@@ -2,6 +2,7 @@
 
 import { FormEvent, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import * as XLSX from 'xlsx'
 import {
   CheckCircle2,
   Copy,
@@ -176,6 +177,65 @@ function buildDatasetPreview(filename: string, text: string): DatasetPreview {
   return {
     mode: 'unsupported',
     text: `Preview is not available for ${extension || 'this file type'}. Download to inspect full content.`,
+  }
+}
+
+function buildXlsxPreview(arrayBuffer: ArrayBuffer): DatasetPreview {
+  const workbook = XLSX.read(arrayBuffer, { type: 'array' })
+  const firstSheetName = workbook.SheetNames[0]
+  if (!firstSheetName) {
+    return {
+      mode: 'text',
+      text: 'No worksheets found in this workbook.',
+    }
+  }
+
+  const sheet = workbook.Sheets[firstSheetName]
+  if (!sheet) {
+    return {
+      mode: 'text',
+      text: `Unable to read worksheet "${firstSheetName}".`,
+    }
+  }
+
+  const rawRows = XLSX.utils.sheet_to_json<(string | number | boolean | null)[]>(sheet, {
+    header: 1,
+    defval: '',
+    blankrows: false,
+  })
+
+  if (!rawRows.length) {
+    return {
+      mode: 'text',
+      text: `Worksheet "${firstSheetName}" is empty.`,
+    }
+  }
+
+  const maxRows = 31
+  const maxColumns = 20
+  const limitedRows = rawRows.slice(0, maxRows).map((row) => row.slice(0, maxColumns))
+  const columnCount = Math.max(1, ...limitedRows.map((row) => row.length))
+  const normalizedRows = limitedRows.map((row) =>
+    Array.from({ length: columnCount }, (_, idx) => {
+      const value = row[idx]
+      return value === null || value === undefined ? '' : String(value)
+    })
+  )
+
+  const notes: string[] = [`Sheet: ${firstSheetName}`]
+  if (rawRows.length > maxRows) {
+    notes.push(`showing first ${maxRows - 1} data rows`)
+  }
+  const maxRawColumns = Math.max(0, ...rawRows.map((row) => row.length))
+  if (maxRawColumns > maxColumns) {
+    notes.push(`showing first ${maxColumns} columns`)
+  }
+
+  return {
+    mode: 'table',
+    headers: normalizedRows[0] || ['Column 1'],
+    rows: normalizedRows.slice(1),
+    note: notes.join(' · '),
   }
 }
 
@@ -458,9 +518,23 @@ export function DataVault() {
     setPreviewLoadingId(dataset.id)
 
     try {
+      const extension = getFileExtension(dataset.filename)
+      if (extension === '.zip') {
+        setPreviewData({
+          mode: 'unsupported',
+          text: 'Preview is not available for .zip files. Download to inspect full content.',
+        })
+        return
+      }
+
       const blob = await downloadDataset(dataset.id)
-      const text = await blob.text()
-      setPreviewData(buildDatasetPreview(dataset.filename, text))
+      if (extension === '.xlsx') {
+        const arrayBuffer = await blob.arrayBuffer()
+        setPreviewData(buildXlsxPreview(arrayBuffer))
+      } else {
+        const text = await blob.text()
+        setPreviewData(buildDatasetPreview(dataset.filename, text))
+      }
     } catch (error: any) {
       setPreviewError(error.message || 'Failed to preview dataset')
     } finally {
