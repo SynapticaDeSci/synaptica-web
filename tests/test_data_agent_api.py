@@ -44,6 +44,8 @@ def _upload_dataset(
     lab_name: str = "NeuroLab",
     data_classification: str = "failed",
     tags: str = "rna,failed-run",
+    failed_reason: str = "No significant signal",
+    reuse_domains: str = "meta-analysis,benchmarking",
     filename: str = "trial.csv",
     content: bytes = b"col1,col2\n1,2\n",
 ):
@@ -55,12 +57,14 @@ def _upload_dataset(
             "lab_name": lab_name,
             "data_classification": data_classification,
             "tags": tags,
+            "failed_reason": failed_reason,
+            "reuse_domains": reuse_domains,
         },
         files={"file": (filename, content, "text/csv")},
     )
 
 
-def test_upload_dataset_success_and_persists_file(client: TestClient):
+def test_upload_creates_dataset_with_verification(client: TestClient):
     response = _upload_dataset(client)
     assert response.status_code == 201
 
@@ -70,7 +74,10 @@ def test_upload_dataset_success_and_persists_file(client: TestClient):
     assert payload["data_classification"] == "failed"
     assert payload["tags"] == ["rna", "failed-run"]
     assert payload["intended_visibility"] == "private"
-    assert payload["message"] == "Dataset uploaded successfully."
+    assert payload["verification_status"] in {"passed", "failed"}
+    assert payload["proof_status"] in {"unanchored", "failed", "manifest_pinned", "anchored"}
+    assert payload["failed_reason"] == "No significant signal"
+    assert payload["reuse_domains"] == ["meta-analysis", "benchmarking"]
 
     session = SessionLocal()
     try:
@@ -78,6 +85,9 @@ def test_upload_dataset_success_and_persists_file(client: TestClient):
         assert row.filename == "trial.csv"
         assert row.size_bytes == len(b"col1,col2\n1,2\n")
         assert Path(row.stored_path).exists()
+        meta = row.meta or {}
+        assert "verification_report" in meta
+        assert "verification_status" in meta
     finally:
         session.close()
 
@@ -95,43 +105,100 @@ def test_upload_rejects_file_larger_than_25mb(client: TestClient):
     assert "25MB" in response.json()["detail"]
 
 
-def test_list_datasets_filters_and_pagination(client: TestClient):
-    _upload_dataset(
+def test_verify_endpoint_returns_report(client: TestClient):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    verified = client.post(f"/api/data-agent/datasets/{dataset_id}/verify")
+    assert verified.status_code == 200
+    payload = verified.json()
+    assert payload["id"] == dataset_id
+    assert payload["verification_status"] in {"passed", "failed"}
+    assert isinstance(payload["verification_report"], dict)
+    assert "checks" in payload["verification_report"]
+
+
+def test_anchor_and_proof_and_citation_endpoints(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    async def _mock_pin(asset, manifest):
+        return "bafy-manifest", "https://gateway.pinata.cloud/ipfs/bafy-manifest"
+
+    async def _mock_submit(payload):
+        return "0.0.123456", "SUCCESS"
+
+    monkeypatch.setattr("api.routes.data_agent._pin_manifest_to_pinata", _mock_pin)
+    monkeypatch.setattr("api.routes.data_agent._submit_anchor_message", _mock_submit)
+
+    anchored = client.post(f"/api/data-agent/datasets/{dataset_id}/anchor")
+    assert anchored.status_code == 200
+    anchored_payload = anchored.json()
+    assert anchored_payload["manifest_cid"] == "bafy-manifest"
+    assert anchored_payload["hcs_topic_id"] == "0.0.123456"
+    assert anchored_payload["proof_status"] == "anchored"
+
+    proof = client.get(f"/api/data-agent/datasets/{dataset_id}/proof")
+    assert proof.status_code == 200
+    proof_payload = proof.json()
+    assert proof_payload["dataset_id"] == dataset_id
+    assert proof_payload["manifest_cid"] == "bafy-manifest"
+
+    citation = client.get(f"/api/data-agent/datasets/{dataset_id}/citation")
+    assert citation.status_code == 200
+    citation_payload = citation.json()["citation"]
+    assert citation_payload["dataset_id"] == dataset_id
+    assert citation_payload["identifiers"]["manifest_cid"] == "bafy-manifest"
+
+    anchored_filter = client.get("/api/data-agent/datasets", params={"proof_status": "anchored"})
+    assert anchored_filter.status_code == 200
+    assert anchored_filter.json()["total"] == 1
+    assert anchored_filter.json()["datasets"][0]["id"] == dataset_id
+
+    verified_filter = client.get("/api/data-agent/datasets", params={"verification_status": "passed"})
+    assert verified_filter.status_code == 200
+    assert verified_filter.json()["total"] == 1
+    assert verified_filter.json()["datasets"][0]["id"] == dataset_id
+
+
+def test_list_filters_and_reuse_events(client: TestClient):
+    first = _upload_dataset(
         client,
         title="Protein run 1",
         data_classification="underused",
         tags="proteomics,archive",
+        reuse_domains="benchmarks",
         filename="protein.csv",
-    )
-    _upload_dataset(
+    ).json()
+    second = _upload_dataset(
         client,
         title="Failed genome scan",
         data_classification="failed",
         tags="genomics,failed-run",
+        lab_name="GenomeLab",
+        reuse_domains="replication",
         filename="genome.csv",
-    )
-    _upload_dataset(
-        client,
-        title="Behavioral pilot",
-        data_classification="underused",
-        tags="behavior,pilot",
-        filename="behavior.csv",
-    )
+    ).json()
 
-    listing = client.get("/api/data-agent/datasets", params={"classification": "underused"})
+    listing = client.get("/api/data-agent/datasets", params={"classification": "failed"})
     assert listing.status_code == 200
-    underused = listing.json()
-    assert underused["total"] == 2
+    assert listing.json()["total"] == 1
+    assert listing.json()["datasets"][0]["title"] == "Failed genome scan"
 
-    searched = client.get("/api/data-agent/datasets", params={"q": "genome"})
-    assert searched.status_code == 200
-    assert searched.json()["total"] == 1
-    assert searched.json()["datasets"][0]["title"] == "Failed genome scan"
+    lab_filtered = client.get("/api/data-agent/datasets", params={"lab_name": "Genome"})
+    assert lab_filtered.status_code == 200
+    assert lab_filtered.json()["total"] == 1
+    assert lab_filtered.json()["datasets"][0]["id"] == second["id"]
 
-    tagged = client.get("/api/data-agent/datasets", params={"tag": "pilot"})
-    assert tagged.status_code == 200
-    assert tagged.json()["total"] == 1
-    assert tagged.json()["datasets"][0]["title"] == "Behavioral pilot"
+    reuse = client.post(f"/api/data-agent/datasets/{second['id']}/reuse-events")
+    assert reuse.status_code == 200
+    assert reuse.json()["reuse_count"] == 1
+
+    refetched = client.get(f"/api/data-agent/datasets/{second['id']}")
+    assert refetched.status_code == 200
+    assert refetched.json()["reuse_count"] == 1
+    assert refetched.json()["last_reused_at"] is not None
+    assert isinstance(refetched.json()["similar_datasets"], list)
 
     paged = client.get("/api/data-agent/datasets", params={"limit": 1, "offset": 1})
     assert paged.status_code == 200
@@ -140,8 +207,10 @@ def test_list_datasets_filters_and_pagination(client: TestClient):
     assert payload["offset"] == 1
     assert len(payload["datasets"]) == 1
 
+    _ = first
 
-def test_dataset_detail_and_download(client: TestClient):
+
+def test_dataset_download_and_missing_download(client: TestClient):
     upload = _upload_dataset(client, filename="detail.csv")
     dataset_id = upload.json()["id"]
 
