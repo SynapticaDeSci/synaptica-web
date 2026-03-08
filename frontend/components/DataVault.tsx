@@ -3,7 +3,6 @@
 import { FormEvent, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
-  Award,
   CheckCircle2,
   Copy,
   Database,
@@ -12,7 +11,6 @@ import {
   Link2,
   Search,
   ShieldCheck,
-  Star,
   XCircle,
 } from 'lucide-react'
 
@@ -100,6 +98,7 @@ export function DataVault() {
   const [selectedDataset, setSelectedDataset] = useState<DataAssetDetailRecord | null>(null)
   const [selectedDatasetProof, setSelectedDatasetProof] = useState<DatasetProofBundle | null>(null)
   const [selectedDatasetCitation, setSelectedDatasetCitation] = useState<Record<string, any> | null>(null)
+  const [isUploadDialogOpen, setIsUploadDialogOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
   const [labFilter, setLabFilter] = useState('')
@@ -149,6 +148,7 @@ export function DataVault() {
       setReuseDomainsInput('')
       setFile(null)
       setErrorMessage(null)
+      setIsUploadDialogOpen(false)
       void query.refetch()
     },
     onError: (error: Error) => {
@@ -268,15 +268,6 @@ export function DataVault() {
   })
 
   const datasets = query.data?.datasets ?? []
-  const failedLeaderboard = useMemo(
-    () =>
-      datasets
-        .filter((item) => item.data_classification === 'failed')
-        .sort((a, b) => (b.reuse_count || 0) - (a.reuse_count || 0))
-        .slice(0, 5),
-    [datasets]
-  )
-
   const sortedTagSuggestions = useMemo(() => {
     const tags = new Set<string>()
     datasets.forEach((dataset) => {
@@ -394,139 +385,132 @@ export function DataVault() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-white">Data Vault</h2>
-        <p className="mt-1 text-sm text-slate-400">
-          Upload, verify, and anchor underused datasets with Hedera-backed provenance.
-        </p>
-      </div>
-
-      <form
-        onSubmit={handleUpload}
-        className="space-y-4 rounded-2xl border border-white/15 bg-slate-900/50 p-5 backdrop-blur-sm"
-      >
-        <div className="flex items-center gap-2 text-sm font-medium text-white">
-          <FileUp className="h-4 w-4 text-sky-400" />
-          Upload dataset
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold text-white">Data Vault</h2>
+          <p className="mt-1 text-sm text-slate-400">
+            Upload, verify, and anchor underused datasets with Hedera-backed provenance.
+          </p>
         </div>
-
-        <div className="grid gap-3 md:grid-cols-2">
-          <Input
-            placeholder="Dataset title"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-          <Input
-            placeholder="Lab name"
-            value={labName}
-            onChange={(event) => setLabName(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-          <Input
-            placeholder="Uploader name (optional)"
-            value={uploaderName}
-            onChange={(event) => setUploaderName(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-          <Input
-            placeholder="Tags (comma separated)"
-            value={tagsInput}
-            onChange={(event) => setTagsInput(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-          <Input
-            placeholder="Failed reason (optional)"
-            value={failedReason}
-            onChange={(event) => setFailedReason(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-          <Input
-            placeholder="Potential reuse domains (comma separated)"
-            value={reuseDomainsInput}
-            onChange={(event) => setReuseDomainsInput(event.target.value)}
-            className="border-white/10 bg-slate-950/40 text-white"
-          />
-        </div>
-
-        <Textarea
-          placeholder="Description (optional)"
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          className="min-h-[90px] border-white/10 bg-slate-950/40 text-white"
-        />
-
-        <div className="grid gap-3 md:grid-cols-3">
-          <select
-            value={classification}
-            onChange={(event) => setClassification(event.target.value as DataClassification)}
-            className="h-10 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-white"
-          >
-            <option value="underused">Underused</option>
-            <option value="failed">Failed</option>
-          </select>
-          <select
-            value={visibility}
-            onChange={(event) => setVisibility(event.target.value as DataVisibility)}
-            className="h-10 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-white"
-          >
-            <option value="private">Private (default)</option>
-            <option value="org">Org shared</option>
-            <option value="public">Public</option>
-          </select>
-          <Input
-            type="file"
-            accept={ALLOWED_EXTENSIONS.join(',')}
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            className="border-white/10 bg-slate-950/40 text-white file:mr-3 file:border-0 file:bg-transparent file:text-slate-200"
-          />
-        </div>
-
-        <p className="text-xs text-slate-400">
-          Allowed file types: {ALLOWED_EXTENSIONS.join(', ')}. Max file size: 25MB.
-        </p>
-
-        {errorMessage && (
-          <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-            {errorMessage}
-          </div>
-        )}
-
         <Button
-          type="submit"
-          disabled={uploadMutation.isPending}
+          type="button"
+          onClick={() => {
+            setErrorMessage(null)
+            setIsUploadDialogOpen(true)
+          }}
           className="bg-gradient-to-r from-sky-500 to-indigo-500 text-white hover:opacity-90"
         >
-          {uploadMutation.isPending ? 'Uploading...' : 'Upload dataset'}
+          <FileUp className="mr-2 h-4 w-4" />
+          Upload dataset
         </Button>
-      </form>
-
-      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-        <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-amber-200">
-          <Award className="h-4 w-4" />
-          Most reused failed datasets
-        </div>
-        {failedLeaderboard.length === 0 ? (
-          <p className="text-sm text-amber-100/80">No failed datasets reused yet.</p>
-        ) : (
-          <div className="grid gap-2">
-            {failedLeaderboard.map((item, index) => (
-              <div
-                key={item.id}
-                className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-black/20 px-3 py-2 text-sm text-amber-100"
-              >
-                <span>
-                  {index + 1}. {item.title}
-                </span>
-                <span className="inline-flex items-center gap-1 rounded-md bg-amber-400/20 px-2 py-0.5 text-xs">
-                  <Star className="h-3 w-3" />
-                  {item.reuse_count}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
+
+      <Dialog open={isUploadDialogOpen} onOpenChange={setIsUploadDialogOpen}>
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto border-white/15 bg-slate-950 text-slate-100">
+          <DialogHeader>
+            <DialogTitle>Upload dataset</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              Add failed or underused lab data to the Data Agent catalog.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={handleUpload}
+            className="space-y-4 rounded-2xl border border-white/15 bg-slate-900/50 p-5 backdrop-blur-sm"
+          >
+            <div className="grid gap-3 md:grid-cols-2">
+              <Input
+                placeholder="Dataset title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+              <Input
+                placeholder="Lab name"
+                value={labName}
+                onChange={(event) => setLabName(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+              <Input
+                placeholder="Uploader name (optional)"
+                value={uploaderName}
+                onChange={(event) => setUploaderName(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+              <Input
+                placeholder="Tags (comma separated)"
+                value={tagsInput}
+                onChange={(event) => setTagsInput(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+              <Input
+                placeholder="Failed reason (optional)"
+                value={failedReason}
+                onChange={(event) => setFailedReason(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+              <Input
+                placeholder="Potential reuse domains (comma separated)"
+                value={reuseDomainsInput}
+                onChange={(event) => setReuseDomainsInput(event.target.value)}
+                className="border-white/10 bg-slate-950/40 text-white"
+              />
+            </div>
+
+            <Textarea
+              placeholder="Description (optional)"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              className="min-h-[90px] border-white/10 bg-slate-950/40 text-white"
+            />
+
+            <div className="grid gap-3 md:grid-cols-3">
+              <select
+                value={classification}
+                onChange={(event) => setClassification(event.target.value as DataClassification)}
+                className="h-10 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-white"
+              >
+                <option value="underused">Underused</option>
+                <option value="failed">Failed</option>
+              </select>
+              <select
+                value={visibility}
+                onChange={(event) => setVisibility(event.target.value as DataVisibility)}
+                className="h-10 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-white"
+              >
+                <option value="private">Private (default)</option>
+                <option value="org">Org shared</option>
+                <option value="public">Public</option>
+              </select>
+              <Input
+                type="file"
+                accept={ALLOWED_EXTENSIONS.join(',')}
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                className="border-white/10 bg-slate-950/40 text-white file:mr-3 file:border-0 file:bg-transparent file:text-slate-200"
+              />
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Allowed file types: {ALLOWED_EXTENSIONS.join(', ')}. Max file size: 25MB.
+            </p>
+
+            {errorMessage && (
+              <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {errorMessage}
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                disabled={uploadMutation.isPending}
+                className="bg-gradient-to-r from-sky-500 to-indigo-500 text-white hover:opacity-90"
+              >
+                {uploadMutation.isPending ? 'Uploading...' : 'Upload dataset'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="space-y-4 rounded-2xl border border-white/15 bg-slate-900/50 p-5 backdrop-blur-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
