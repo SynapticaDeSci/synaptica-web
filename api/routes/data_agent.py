@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import contextlib
 import hashlib
 import io
 import json
@@ -16,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from shared.database import DataAsset, get_db
@@ -420,10 +421,19 @@ def _manifest_payload(asset: DataAsset) -> Dict[str, Any]:
 
 
 def _pinata_headers() -> Dict[str, str]:
+    jwt = os.getenv("PINATA_JWT")
+    if jwt:
+        return {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json",
+        }
+
     api_key = os.getenv("PINATA_API_KEY")
     secret_key = os.getenv("PINATA_SECRET_KEY")
     if not api_key or not secret_key:
-        raise RuntimeError("Pinata credentials missing. Configure PINATA_API_KEY and PINATA_SECRET_KEY.")
+        raise RuntimeError(
+            "Pinata credentials missing. Configure PINATA_JWT or PINATA_API_KEY/PINATA_SECRET_KEY."
+        )
     return {
         "pinata_api_key": api_key,
         "pinata_secret_api_key": secret_key,
@@ -444,10 +454,22 @@ async def _pin_manifest_to_pinata(asset: DataAsset, manifest: Dict[str, Any]) ->
         },
         "pinataContent": manifest,
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(PINATA_PIN_JSON_URL, headers=headers, json=payload)
-    response.raise_for_status()
-    body = response.json()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(PINATA_PIN_JSON_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        body = response.json()
+    except httpx.HTTPStatusError as exc:
+        response_body = ""
+        with contextlib.suppress(Exception):
+            response_body = exc.response.text.strip()
+        snippet = f" Body: {response_body[:240]}" if response_body else ""
+        raise RuntimeError(
+            f"Pinata request failed with status {exc.response.status_code}.{snippet}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Pinata request error: {exc}") from exc
+
     cid = body.get("IpfsHash")
     if not cid:
         raise RuntimeError("Pinata did not return IpfsHash")
@@ -455,7 +477,12 @@ async def _pin_manifest_to_pinata(asset: DataAsset, manifest: Dict[str, Any]) ->
 
 
 async def _submit_anchor_message(anchor_payload: Dict[str, Any]) -> Tuple[str, str]:
-    client = get_hedera_client()
+    try:
+        client = get_hedera_client()
+    except ValidationError as exc:
+        raise RuntimeError(
+            "Hedera configuration missing. Configure HEDERA_ACCOUNT_ID and HEDERA_PRIVATE_KEY."
+        ) from exc
     topic_id = client.topic_id
     if topic_id is None:
         topic_id = await client.create_topic("Synaptica Data Agent Provenance")

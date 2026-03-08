@@ -508,8 +508,23 @@ export async function anchorDataset(datasetId: string): Promise<DatasetProofBund
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Failed to anchor dataset' }));
-    throw new Error(error.detail || error.error || 'Failed to anchor dataset');
+    const raw = await response.text().catch(() => '');
+    let detail = '';
+
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { detail?: string; error?: string };
+        detail = parsed.detail || parsed.error || '';
+      } catch {
+        detail = raw.replace(/\s+/g, ' ').slice(0, 240).trim();
+      }
+    }
+
+    if (!detail) {
+      detail = `Failed to anchor dataset (HTTP ${response.status})`;
+    }
+
+    throw new Error(detail);
   }
 
   return response.json();

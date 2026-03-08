@@ -48,6 +48,13 @@ else:  # pragma: no cover - stub mode for local testing without SDK
             self.topic_id = topic_id
             self.status = status
 
+    class _StubTransactionResponse:
+        def __init__(self, receipt: _StubReceipt):
+            self._receipt = receipt
+
+        async def get_receipt(self, client: "Client") -> _StubReceipt:
+            return self._receipt
+
 
     class Client:  # type: ignore[override]
         """Minimal stub mimicking the Hedera Client interface."""
@@ -94,11 +101,8 @@ else:  # pragma: no cover - stub mode for local testing without SDK
             self.memo = memo
             return self
 
-        async def execute(self, client: Client) -> _StubReceipt:
-            return _StubReceipt(topic_id="stub-topic-id")
-
-        async def get_receipt(self, client: Client) -> _StubReceipt:
-            return _StubReceipt(topic_id="stub-topic-id")
+        async def execute(self, client: Client) -> _StubTransactionResponse:
+            return _StubTransactionResponse(_StubReceipt(topic_id="stub-topic-id"))
 
 
     class TopicMessageSubmitTransaction:  # type: ignore[override]
@@ -114,11 +118,8 @@ else:  # pragma: no cover - stub mode for local testing without SDK
             self.message = message
             return self
 
-        async def execute(self, client: Client) -> _StubReceipt:
-            return _StubReceipt(status="STUB_OK")
-
-        async def get_receipt(self, client: Client) -> _StubReceipt:
-            return _StubReceipt(status="STUB_OK")
+        async def execute(self, client: Client) -> _StubTransactionResponse:
+            return _StubTransactionResponse(_StubReceipt(status="STUB_OK"))
 
 
 class HederaConfig(BaseSettings):
@@ -143,6 +144,14 @@ class HederaClientWrapper:
     operator_key: PrivateKey
     topic_id: Optional[TopicId] = None
 
+    async def _extract_receipt(self, response):
+        """Support both SDK and fallback response shapes."""
+        if hasattr(response, "get_receipt"):
+            return await response.get_receipt(self.client)
+        if hasattr(response, "getReceipt"):
+            return await response.getReceipt(self.client)
+        return response
+
     async def create_topic(self, memo: str = "Agent Coordination Topic") -> TopicId:
         """Create a new HCS topic."""
         transaction = TopicCreateTransaction()
@@ -154,12 +163,16 @@ class HederaClientWrapper:
             raise AttributeError("TopicCreateTransaction lacks set_topic_memo/setTopicMemo")
 
         response = await transaction.execute(self.client)
-        receipt = await response.get_receipt(self.client)
+        receipt = await self._extract_receipt(response)
 
-        if receipt.topic_id is None:
+        topic_id = getattr(receipt, "topic_id", None)
+        if topic_id is None and hasattr(receipt, "topicId"):
+            topic_id = getattr(receipt, "topicId")
+
+        if topic_id is None:
             raise ValueError("Failed to create topic")
 
-        self.topic_id = receipt.topic_id
+        self.topic_id = topic_id
         return self.topic_id
 
     async def submit_message(self, message: str, topic_id: Optional[TopicId] = None) -> str:
@@ -186,9 +199,14 @@ class HederaClientWrapper:
             raise AttributeError("TopicMessageSubmitTransaction lacks set_message/setMessage")
 
         response = await transaction.execute(self.client)
-        receipt = await response.get_receipt(self.client)
+        receipt = await self._extract_receipt(response)
+        status = getattr(receipt, "status", None)
+        if status is None and hasattr(receipt, "statusString"):
+            status = getattr(receipt, "statusString")
+        if status is None:
+            status = "SUCCESS"
 
-        return str(receipt.status)
+        return str(status)
 
 
 def get_hedera_client(config: Optional[HederaConfig] = None) -> HederaClientWrapper:

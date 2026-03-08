@@ -108,6 +108,7 @@ export function DataVault() {
   const [proofFilter, setProofFilter] = useState<'all' | DataProofStatus>('all')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [verifyFeedback, setVerifyFeedback] = useState<ActionFeedback | null>(null)
+  const [anchorFeedback, setAnchorFeedback] = useState<ActionFeedback | null>(null)
   const [reuseFeedback, setReuseFeedback] = useState<ActionFeedback | null>(null)
   const [copiedCitation, setCopiedCitation] = useState(false)
 
@@ -205,6 +206,12 @@ export function DataVault() {
 
   const anchorMutation = useMutation({
     mutationFn: anchorDataset,
+    onMutate: () => {
+      setAnchorFeedback({
+        tone: 'info',
+        message: 'Anchoring started. Pinning manifest to IPFS, then submitting proof to Hedera HCS...',
+      })
+    },
     onSuccess: async (proof) => {
       setErrorMessage(null)
       setSelectedDatasetProof(proof)
@@ -212,9 +219,22 @@ export function DataVault() {
         const refreshed = await getDataset(selectedDataset.id)
         setSelectedDataset(refreshed)
       }
+      const cidText = proof.manifest_cid ? `CID ${proof.manifest_cid}.` : 'Manifest CID generated.'
+      const topicText = proof.hcs_topic_id ? ` Topic ${proof.hcs_topic_id}.` : ''
+      setAnchorFeedback({
+        tone: 'success',
+        message: `Anchoring complete. ${cidText}${topicText}`,
+      })
       await query.refetch()
     },
-    onError: (error: Error) => setErrorMessage(error.message || 'Anchoring failed'),
+    onError: (error: Error) => {
+      const message = error.message || 'Anchoring failed'
+      setErrorMessage(message)
+      setAnchorFeedback({
+        tone: 'error',
+        message: `Anchoring failed. ${message}`,
+      })
+    },
   })
 
   const reuseMutation = useMutation({
@@ -313,6 +333,7 @@ export function DataVault() {
   const handleOpenDetails = async (datasetId: string) => {
     try {
       setVerifyFeedback(null)
+      setAnchorFeedback(null)
       setReuseFeedback(null)
       const detail = await getDataset(datasetId)
       setSelectedDataset(detail)
@@ -673,6 +694,7 @@ export function DataVault() {
             setSelectedDatasetProof(null)
             setSelectedDatasetCitation(null)
             setVerifyFeedback(null)
+            setAnchorFeedback(null)
             setReuseFeedback(null)
           }
         }}
@@ -758,6 +780,12 @@ export function DataVault() {
               {verifyFeedback && (
                 <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(verifyFeedback.tone)}`}>
                   {verifyFeedback.message}
+                </div>
+              )}
+
+              {anchorFeedback && (
+                <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(anchorFeedback.tone)}`}>
+                  {anchorFeedback.message}
                 </div>
               )}
 
