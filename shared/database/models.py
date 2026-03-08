@@ -218,6 +218,28 @@ class ResearchArtifact(Base):
     creator_agent = relationship("Agent", foreign_keys=[created_by])
 
 
+class DataAsset(Base):
+    """Uploaded dataset managed by the built-in Data Agent."""
+
+    __tablename__ = "data_assets"
+
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    lab_name = Column(String, nullable=False)
+    uploader_name = Column(String, nullable=True)
+    data_classification = Column(String, nullable=False)  # failed, underused
+    tags = Column(JSON, nullable=False)
+    intended_visibility = Column(String, default="private")
+    filename = Column(String, nullable=False)
+    stored_path = Column(String, nullable=False)
+    content_type = Column(String, nullable=True)
+    size_bytes = Column(Integer, nullable=False)
+    sha256 = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+
 class AgentReputation(Base):
     """Agent reputation tracking model."""
 

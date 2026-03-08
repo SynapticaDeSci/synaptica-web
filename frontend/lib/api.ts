@@ -313,3 +313,277 @@ export async function submitAgent(payload: AgentSubmissionPayload): Promise<Agen
 
   return response.json();
 }
+
+// Data Agent ----------------------------------------------------------------
+
+export type DataClassification = 'failed' | 'underused';
+export type DataVisibility = 'private' | 'org' | 'public';
+export type DataVerificationStatus = 'pending' | 'passed' | 'failed';
+export type DataProofStatus = 'unanchored' | 'manifest_pinned' | 'anchored' | 'failed';
+
+export interface SimilarDataset {
+  id: string;
+  title: string;
+  data_classification: DataClassification;
+  tags: string[];
+  similarity_score: number;
+}
+
+export interface DatasetProofBundle {
+  dataset_id: string;
+  file_sha256: string;
+  manifest_cid?: string;
+  manifest_sha256?: string;
+  manifest_gateway_url?: string;
+  hcs_topic_id?: string;
+  hcs_message_status?: string;
+  anchor_payload?: Record<string, any>;
+  anchored_at?: string;
+  verification_status: DataVerificationStatus | string;
+  verification_report?: Record<string, any>;
+  proof_status: DataProofStatus | string;
+}
+
+export interface DataAssetRecord {
+  id: string;
+  title: string;
+  description?: string;
+  lab_name: string;
+  uploader_name?: string;
+  data_classification: DataClassification;
+  tags: string[];
+  intended_visibility: DataVisibility;
+  filename: string;
+  size_bytes: number;
+  content_type?: string;
+  sha256: string;
+  created_at: string;
+  verification_status: DataVerificationStatus | string;
+  proof_status: DataProofStatus | string;
+  manifest_cid?: string;
+  reuse_count: number;
+  last_reused_at?: string;
+  failed_reason?: string;
+  reuse_domains: string[];
+}
+
+export interface DataAssetDetailRecord extends DataAssetRecord {
+  verification_report?: Record<string, any>;
+  proof_bundle?: DatasetProofBundle;
+  similar_datasets: SimilarDataset[];
+}
+
+export interface DataAssetListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  datasets: DataAssetRecord[];
+}
+
+export interface UploadDatasetPayload {
+  title: string;
+  description?: string;
+  lab_name: string;
+  data_classification: DataClassification;
+  tags?: string[] | string;
+  intended_visibility?: DataVisibility;
+  uploader_name?: string;
+  failed_reason?: string;
+  reuse_domains?: string[] | string;
+  file: File;
+}
+
+export interface UploadDatasetResponse extends DataAssetRecord {
+  message: string;
+}
+
+export interface ListDatasetsParams {
+  q?: string;
+  tag?: string;
+  classification?: DataClassification;
+  verification_status?: DataVerificationStatus | string;
+  proof_status?: DataProofStatus | string;
+  lab_name?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export async function uploadDataset(payload: UploadDatasetPayload): Promise<UploadDatasetResponse> {
+  const formData = new FormData();
+  formData.set('title', payload.title);
+  formData.set('description', payload.description ?? '');
+  formData.set('lab_name', payload.lab_name);
+  formData.set('data_classification', payload.data_classification);
+  formData.set('intended_visibility', payload.intended_visibility ?? 'private');
+  if (payload.uploader_name) {
+    formData.set('uploader_name', payload.uploader_name);
+  }
+  if (payload.failed_reason) {
+    formData.set('failed_reason', payload.failed_reason);
+  }
+
+  if (Array.isArray(payload.tags)) {
+    formData.set('tags', payload.tags.join(','));
+  } else if (typeof payload.tags === 'string') {
+    formData.set('tags', payload.tags);
+  }
+  if (Array.isArray(payload.reuse_domains)) {
+    formData.set('reuse_domains', payload.reuse_domains.join(','));
+  } else if (typeof payload.reuse_domains === 'string') {
+    formData.set('reuse_domains', payload.reuse_domains);
+  }
+
+  formData.set('file', payload.file);
+
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to upload dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to upload dataset');
+  }
+
+  return response.json();
+}
+
+export async function listDatasets(params: ListDatasetsParams = {}): Promise<DataAssetListResponse> {
+  const query = new URLSearchParams();
+  if (params.q) query.set('q', params.q);
+  if (params.tag) query.set('tag', params.tag);
+  if (params.classification) query.set('classification', params.classification);
+  if (params.verification_status) query.set('verification_status', params.verification_status);
+  if (params.proof_status) query.set('proof_status', params.proof_status);
+  if (params.lab_name) query.set('lab_name', params.lab_name);
+  if (typeof params.limit === 'number') query.set('limit', String(params.limit));
+  if (typeof params.offset === 'number') query.set('offset', String(params.offset));
+
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets${suffix}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to list datasets' }));
+    throw new Error(error.detail || error.error || 'Failed to list datasets');
+  }
+
+  return response.json();
+}
+
+export async function getDataset(datasetId: string): Promise<DataAssetDetailRecord> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to fetch dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to fetch dataset');
+  }
+
+  return response.json();
+}
+
+export async function verifyDataset(datasetId: string): Promise<DataAssetDetailRecord> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/verify`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to verify dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to verify dataset');
+  }
+
+  return response.json();
+}
+
+export async function anchorDataset(datasetId: string): Promise<DatasetProofBundle> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/anchor`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const raw = await response.text().catch(() => '');
+    let detail = '';
+
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as { detail?: string; error?: string };
+        detail = parsed.detail || parsed.error || '';
+      } catch {
+        detail = raw.replace(/\s+/g, ' ').slice(0, 240).trim();
+      }
+    }
+
+    if (!detail) {
+      detail = `Failed to anchor dataset (HTTP ${response.status})`;
+    }
+
+    throw new Error(detail);
+  }
+
+  return response.json();
+}
+
+export async function getDatasetProof(datasetId: string): Promise<DatasetProofBundle> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/proof`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to fetch proof bundle' }));
+    throw new Error(error.detail || error.error || 'Failed to fetch proof bundle');
+  }
+
+  return response.json();
+}
+
+export async function getDatasetCitation(datasetId: string): Promise<{ citation: Record<string, any> }> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/citation`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to fetch citation' }));
+    throw new Error(error.detail || error.error || 'Failed to fetch citation');
+  }
+
+  return response.json();
+}
+
+export async function recordDatasetReuse(
+  datasetId: string
+): Promise<{ dataset_id: string; reuse_count: number; last_reused_at: string; message: string }> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/reuse-events`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to record reuse event' }));
+    throw new Error(error.detail || error.error || 'Failed to record reuse event');
+  }
+
+  return response.json();
+}
+
+export async function downloadDataset(datasetId: string): Promise<Blob> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/download`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to download dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to download dataset');
+  }
+
+  return response.blob();
+}

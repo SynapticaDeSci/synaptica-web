@@ -99,8 +99,9 @@ def test_list_agents_returns_created_agent(client: TestClient):
     assert listing.status_code == 200
     data = listing.json()
     assert data["sync_status"] == "test"
-    assert data["total"] == 1
-    assert data["agents"][0]["agent_id"] == "test-agent"
-    assert data["agents"][0]["pricing"]["rate"] == 1.5
-    assert data["agents"][0]["reputation_score"] == 0.5
-    assert data["agents"][0]["registry_status"] == "pending"
+    assert data["total"] >= 1
+    created = next((agent for agent in data["agents"] if agent["agent_id"] == "test-agent"), None)
+    assert created is not None
+    assert created["pricing"]["rate"] == 1.5
+    assert created["reputation_score"] == 0.5
+    assert created["registry_status"] == "pending"

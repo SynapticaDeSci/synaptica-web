@@ -10,6 +10,7 @@ import { TaskResults } from '@/components/TaskResults'
 import { Tabs } from '@/components/Tabs'
 import { Transactions } from '@/components/Transactions'
 import { Marketplace } from '@/components/Marketplace'
+import { DataVault } from '@/components/DataVault'
 import { useTaskStore } from '@/store/taskStore'
 import type { TaskStatus } from '@/store/taskStore'
 import type { LucideIcon } from 'lucide-react'
@@ -428,6 +429,11 @@ export default function Home() {
                         id: 'marketplace',
                         label: 'Agent Marketplace',
                         content: <Marketplace />,
+                      },
+                      {
+                        id: 'data-vault',
+                        label: 'Data Vault',
+                        content: <DataVault />,
                       },
                     ]}
                   />

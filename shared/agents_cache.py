@@ -26,7 +26,15 @@ def build_agents_payload(session: Optional[Session] = None) -> Dict[str, Any]:
     try:
         agents = db.query(Agent).order_by(Agent.created_at.desc()).all()
         registry_agents = [agent for agent in agents if is_registry_managed(agent)]
-        source = registry_agents or agents
+        always_listed = [agent for agent in agents if (agent.meta or {}).get("always_listed")]
+        if registry_agents:
+            source = list(registry_agents)
+            seen = {agent.agent_id for agent in source}
+            for agent in always_listed:
+                if agent.agent_id not in seen:
+                    source.append(agent)
+        else:
+            source = agents
 
         reputation_map: Dict[str, float] = {}
         agent_ids = [agent.agent_id for agent in source]

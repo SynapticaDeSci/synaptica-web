@@ -13,7 +13,8 @@ from fastapi import BackgroundTasks, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from shared.database import Base, SessionLocal, engine
+from shared.agents_cache import rebuild_agents_cache
+from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
 from shared.database.models import A2AEvent
 from shared.registry_sync import (
     RegistrySyncError,
@@ -25,6 +26,7 @@ from agents.orchestrator.agent import create_orchestrator_agent
 
 from .middleware import logging_middleware
 from .routes import agents as agents_routes
+from .routes import data_agent as data_agent_routes
 
 # Load environment variables
 load_dotenv()
@@ -33,6 +35,94 @@ load_dotenv()
 tasks_storage: Dict[str, Dict[str, Any]] = {}
 _registry_refresh_task: Optional[asyncio.Task] = None
 logger = logging.getLogger(__name__)
+
+BUILT_IN_DATA_AGENT_ID = "data-agent-001"
+
+
+def _upsert_builtin_data_agent() -> None:
+    """Ensure the built-in Data Agent is available in the marketplace."""
+
+    session = SessionLocal()
+    try:
+        agent = (
+            session.query(Agent)
+            .filter(Agent.agent_id == BUILT_IN_DATA_AGENT_ID)
+            .one_or_none()
+        )
+
+        data_agent_meta = {
+            "endpoint_url": "/api/data-agent/datasets",
+            "health_check_url": "/health",
+            "pricing": {
+                "rate": 0.0,
+                "currency": "HBAR",
+                "rate_type": "per_upload",
+            },
+            "categories": ["Data", "Storage", "DeSci"],
+            "always_listed": True,
+            "data_agent": {
+                "built_in": True,
+                "public_access": True,
+            },
+        }
+
+        capabilities = [
+            "dataset-upload",
+            "dataset-catalog",
+            "dataset-retrieval",
+            "failed-data-archiving",
+            "underused-data-storage",
+        ]
+
+        if agent is None:
+            agent = Agent(  # type: ignore[call-arg]
+                agent_id=BUILT_IN_DATA_AGENT_ID,
+                name="Data Agent",
+                agent_type="data",
+                description=(
+                    "Stores and catalogs underused or failed lab datasets for future reuse."
+                ),
+                capabilities=capabilities,
+                status="active",
+                meta=data_agent_meta,
+            )
+            session.add(agent)
+        else:
+            merged_meta = dict(agent.meta or {})
+            merged_meta.update(data_agent_meta)
+            agent.name = "Data Agent"
+            agent.agent_type = "data"
+            agent.description = (
+                "Stores and catalogs underused or failed lab datasets for future reuse."
+            )
+            agent.capabilities = capabilities
+            agent.status = "active"
+            agent.meta = merged_meta
+
+        reputation = (
+            session.query(AgentReputation)
+            .filter(AgentReputation.agent_id == BUILT_IN_DATA_AGENT_ID)
+            .one_or_none()
+        )
+        if reputation is None:
+            session.add(
+                AgentReputation(  # type: ignore[call-arg]
+                    agent_id=BUILT_IN_DATA_AGENT_ID,
+                    reputation_score=0.8,
+                    total_tasks=0,
+                    successful_tasks=0,
+                    failed_tasks=0,
+                    payment_multiplier=1.0,
+                )
+            )
+
+        session.commit()
+        rebuild_agents_cache(session=session)
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to upsert built-in Data Agent")
+    finally:
+        session.close()
 
 
 def update_task_progress(task_id: str, step: str, status: str, data: Optional[Dict] = None):
@@ -107,6 +197,7 @@ async def lifespan(app: FastAPI):
 
     # Startup: Create database tables
     Base.metadata.create_all(bind=engine)
+    _upsert_builtin_data_agent()
     # Register progress callback for task updates
     task_progress.set_progress_callback(update_task_progress)
     print("Database initialized")
@@ -183,6 +274,7 @@ app.middleware("http")(logging_middleware)
 
 # Include routers
 app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
+app.include_router(data_agent_routes.router, prefix="/api/data-agent", tags=["data-agent"])
 
 
 @app.get("/")
