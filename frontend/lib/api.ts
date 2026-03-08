@@ -313,3 +313,137 @@ export async function submitAgent(payload: AgentSubmissionPayload): Promise<Agen
 
   return response.json();
 }
+
+// Data Agent ----------------------------------------------------------------
+
+export type DataClassification = 'failed' | 'underused';
+export type DataVisibility = 'private' | 'org' | 'public';
+
+export interface DataAssetRecord {
+  id: string;
+  title: string;
+  description?: string;
+  lab_name: string;
+  uploader_name?: string;
+  data_classification: DataClassification;
+  tags: string[];
+  intended_visibility: DataVisibility;
+  filename: string;
+  size_bytes: number;
+  content_type?: string;
+  sha256: string;
+  created_at: string;
+}
+
+export interface DataAssetListResponse {
+  total: number;
+  limit: number;
+  offset: number;
+  datasets: DataAssetRecord[];
+}
+
+export interface UploadDatasetPayload {
+  title: string;
+  description?: string;
+  lab_name: string;
+  data_classification: DataClassification;
+  tags?: string[] | string;
+  intended_visibility?: DataVisibility;
+  uploader_name?: string;
+  file: File;
+}
+
+export interface UploadDatasetResponse extends DataAssetRecord {
+  message: string;
+}
+
+export interface ListDatasetsParams {
+  q?: string;
+  tag?: string;
+  classification?: DataClassification;
+  limit?: number;
+  offset?: number;
+}
+
+export async function uploadDataset(payload: UploadDatasetPayload): Promise<UploadDatasetResponse> {
+  const formData = new FormData();
+  formData.set('title', payload.title);
+  formData.set('description', payload.description ?? '');
+  formData.set('lab_name', payload.lab_name);
+  formData.set('data_classification', payload.data_classification);
+  formData.set('intended_visibility', payload.intended_visibility ?? 'private');
+  if (payload.uploader_name) {
+    formData.set('uploader_name', payload.uploader_name);
+  }
+
+  if (Array.isArray(payload.tags)) {
+    formData.set('tags', payload.tags.join(','));
+  } else if (typeof payload.tags === 'string') {
+    formData.set('tags', payload.tags);
+  }
+
+  formData.set('file', payload.file);
+
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to upload dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to upload dataset');
+  }
+
+  return response.json();
+}
+
+export async function listDatasets(params: ListDatasetsParams = {}): Promise<DataAssetListResponse> {
+  const query = new URLSearchParams();
+  if (params.q) query.set('q', params.q);
+  if (params.tag) query.set('tag', params.tag);
+  if (params.classification) query.set('classification', params.classification);
+  if (typeof params.limit === 'number') query.set('limit', String(params.limit));
+  if (typeof params.offset === 'number') query.set('offset', String(params.offset));
+
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets${suffix}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to list datasets' }));
+    throw new Error(error.detail || error.error || 'Failed to list datasets');
+  }
+
+  return response.json();
+}
+
+export async function getDataset(datasetId: string): Promise<DataAssetRecord> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to fetch dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to fetch dataset');
+  }
+
+  return response.json();
+}
+
+export async function downloadDataset(datasetId: string): Promise<Blob> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/download`, {
+    method: 'GET',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to download dataset' }));
+    throw new Error(error.detail || error.error || 'Failed to download dataset');
+  }
+
+  return response.blob();
+}
