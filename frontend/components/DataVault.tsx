@@ -7,6 +7,7 @@ import {
   Copy,
   Database,
   Download,
+  Eye,
   FileUp,
   Link2,
   Search,
@@ -78,10 +79,104 @@ type ActionFeedback = {
   message: string
 }
 
+type DatasetPreview =
+  | {
+      mode: 'table'
+      headers: string[]
+      rows: string[][]
+      note?: string
+    }
+  | {
+      mode: 'json' | 'text' | 'unsupported'
+      text: string
+      note?: string
+    }
+
 function actionFeedbackClass(tone: ActionFeedback['tone']): string {
   if (tone === 'success') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
   if (tone === 'error') return 'border-red-500/40 bg-red-500/10 text-red-200'
   return 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+}
+
+function getFileExtension(filename: string): string {
+  const idx = filename.lastIndexOf('.')
+  if (idx === -1) return ''
+  return filename.slice(idx).toLowerCase()
+}
+
+function clipText(value: string, maxChars = 12000): { text: string; truncated: boolean } {
+  if (value.length <= maxChars) {
+    return { text: value, truncated: false }
+  }
+  return { text: value.slice(0, maxChars), truncated: true }
+}
+
+function buildTabularPreview(text: string, delimiter: string): DatasetPreview {
+  const rawLines = text.split(/\r?\n/).filter((line) => line.trim().length > 0)
+  if (rawLines.length === 0) {
+    return {
+      mode: 'text',
+      text: 'This dataset is empty.',
+    }
+  }
+
+  const maxRows = 31
+  const limitedLines = rawLines.slice(0, maxRows)
+  const rows = limitedLines.map((line) => line.split(delimiter).map((part) => part.trim()))
+  const maxColumns = rows.reduce((acc, row) => Math.max(acc, row.length), 1)
+  const normalized = rows.map((row) =>
+    Array.from({ length: maxColumns }, (_, idx) => (row[idx] === undefined ? '' : row[idx]))
+  )
+
+  return {
+    mode: 'table',
+    headers: normalized[0] || ['Column 1'],
+    rows: normalized.slice(1),
+    note:
+      rawLines.length > maxRows
+        ? `Showing first ${maxRows - 1} data rows (${rawLines.length - 1} total).`
+        : undefined,
+  }
+}
+
+function buildDatasetPreview(filename: string, text: string): DatasetPreview {
+  const extension = getFileExtension(filename)
+  if (extension === '.csv') return buildTabularPreview(text, ',')
+  if (extension === '.tsv') return buildTabularPreview(text, '\t')
+
+  if (extension === '.json') {
+    try {
+      const parsed = JSON.parse(text)
+      const pretty = JSON.stringify(parsed, null, 2)
+      const clipped = clipText(pretty)
+      return {
+        mode: 'json',
+        text: clipped.text,
+        note: clipped.truncated ? 'Preview truncated to first 12,000 characters.' : undefined,
+      }
+    } catch {
+      const clipped = clipText(text)
+      return {
+        mode: 'text',
+        text: clipped.text,
+        note: clipped.truncated ? 'Preview truncated to first 12,000 characters.' : 'Invalid JSON format.',
+      }
+    }
+  }
+
+  if (extension === '.txt') {
+    const clipped = clipText(text)
+    return {
+      mode: 'text',
+      text: clipped.text,
+      note: clipped.truncated ? 'Preview truncated to first 12,000 characters.' : undefined,
+    }
+  }
+
+  return {
+    mode: 'unsupported',
+    text: `Preview is not available for ${extension || 'this file type'}. Download to inspect full content.`,
+  }
 }
 
 export function DataVault() {
@@ -98,6 +193,10 @@ export function DataVault() {
   const [selectedDataset, setSelectedDataset] = useState<DataAssetDetailRecord | null>(null)
   const [selectedDatasetProof, setSelectedDatasetProof] = useState<DatasetProofBundle | null>(null)
   const [selectedDatasetCitation, setSelectedDatasetCitation] = useState<Record<string, any> | null>(null)
+  const [previewDataset, setPreviewDataset] = useState<DataAssetRecord | null>(null)
+  const [previewData, setPreviewData] = useState<DatasetPreview | null>(null)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null)
   const [isUploadDialogOpen, setIsUploadDialogOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [tagFilter, setTagFilter] = useState('')
@@ -349,6 +448,23 @@ export function DataVault() {
       URL.revokeObjectURL(url)
     } catch (error: any) {
       setErrorMessage(error.message || 'Failed to download dataset')
+    }
+  }
+
+  const handlePreviewDataset = async (dataset: DataAssetRecord) => {
+    setPreviewDataset(dataset)
+    setPreviewData(null)
+    setPreviewError(null)
+    setPreviewLoadingId(dataset.id)
+
+    try {
+      const blob = await downloadDataset(dataset.id)
+      const text = await blob.text()
+      setPreviewData(buildDatasetPreview(dataset.filename, text))
+    } catch (error: any) {
+      setPreviewError(error.message || 'Failed to preview dataset')
+    } finally {
+      setPreviewLoadingId(null)
     }
   }
 
@@ -658,6 +774,16 @@ export function DataVault() {
                 </Button>
                 <Button
                   type="button"
+                  variant="outline"
+                  className="border-white/20 bg-transparent text-slate-200 hover:bg-white/10"
+                  onClick={() => handlePreviewDataset(dataset)}
+                  disabled={previewLoadingId === dataset.id}
+                >
+                  <Eye className="mr-2 h-4 w-4" />
+                  {previewLoadingId === dataset.id ? 'Loading preview...' : 'Preview data'}
+                </Button>
+                <Button
+                  type="button"
                   className="bg-slate-100 text-slate-900 hover:bg-white"
                   onClick={() => handleDownloadDataset(dataset)}
                 >
@@ -669,6 +795,92 @@ export function DataVault() {
           ))}
         </div>
       </div>
+
+      <Dialog
+        open={Boolean(previewDataset)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPreviewDataset(null)
+            setPreviewData(null)
+            setPreviewError(null)
+            setPreviewLoadingId(null)
+          }
+        }}
+      >
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-hidden border-white/15 bg-slate-950 text-slate-100">
+          <DialogHeader>
+            <DialogTitle>{previewDataset ? `Preview: ${previewDataset.title}` : 'Dataset preview'}</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              {previewDataset ? `${previewDataset.filename} · ${formatBytes(previewDataset.size_bytes)}` : 'Preview dataset content before downloading.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {previewDataset && (
+            <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+              {previewLoadingId === previewDataset.id && !previewData && !previewError && (
+                <div className="rounded-lg border border-white/10 bg-slate-900/50 p-4 text-sm text-slate-300">
+                  Loading preview...
+                </div>
+              )}
+
+              {previewError && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">
+                  {previewError}
+                </div>
+              )}
+
+              {previewData?.mode === 'table' && (
+                <div className="space-y-2">
+                  <div className="overflow-auto rounded-lg border border-white/10 bg-slate-900/50">
+                    <table className="w-full min-w-[640px] border-collapse text-left text-xs text-slate-200">
+                      <thead className="bg-slate-800/80 text-slate-100">
+                        <tr>
+                          {previewData.headers.map((header, idx) => (
+                            <th key={`header-${idx}`} className="border-b border-white/10 px-3 py-2 font-semibold">
+                              {header || `Column ${idx + 1}`}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previewData.rows.length === 0 ? (
+                          <tr>
+                            <td className="px-3 py-2 text-slate-400" colSpan={previewData.headers.length}>
+                              No data rows available.
+                            </td>
+                          </tr>
+                        ) : (
+                          previewData.rows.map((row, rowIdx) => (
+                            <tr key={`row-${rowIdx}`} className="border-b border-white/5 last:border-b-0">
+                              {row.map((cell, colIdx) => (
+                                <td key={`cell-${rowIdx}-${colIdx}`} className="px-3 py-2 align-top text-slate-300">
+                                  {cell}
+                                </td>
+                              ))}
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {previewData.note && <p className="text-xs text-slate-400">{previewData.note}</p>}
+                </div>
+              )}
+
+              {previewData && previewData.mode !== 'table' && (
+                <div className="space-y-2">
+                  <div className="rounded-lg border border-white/10 bg-slate-900/50 p-3">
+                    <pre className="max-h-[55vh] overflow-auto whitespace-pre-wrap text-xs text-slate-200">
+                      {previewData.text}
+                    </pre>
+                  </div>
+                  {previewData.note && <p className="text-xs text-slate-400">{previewData.note}</p>}
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(selectedDataset)}
