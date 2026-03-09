@@ -42,7 +42,7 @@ def check_dependencies():
     except ImportError:
         print("❌ Required package not installed")
         print("\nInstall with:")
-        print("   uv add requests")
+        print("   uv sync")
         return False
 
 

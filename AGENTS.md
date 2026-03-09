@@ -16,8 +16,8 @@
   - `make smoke`
   - `make lint` and `make typecheck` exist, but they currently report pre-existing repo-wide issues; use them when a change is meant to improve those baselines.
 - Python dependency changes:
-  - Edit [`pyproject.toml`](/Users/tiencheng/Projects/Personal/synaptica-web/pyproject.toml)
-  - Regenerate [`uv.lock`](/Users/tiencheng/Projects/Personal/synaptica-web/uv.lock) with `uv lock` or `uv sync`
+  - Edit [`pyproject.toml`](pyproject.toml)
+  - Regenerate [`uv.lock`](uv.lock) with `uv lock` or `uv sync`
   - Do not reintroduce `requirements.txt`
 - Repo-specific constraint:
   - Keep the Python codebase as one shared app rooted at the repo; do not split `api` / `agents` / `shared` into separate Python packages or workspaces unless explicitly asked.

@@ -130,7 +130,7 @@ make research
 
 Visit http://localhost:3000 to use the platform.
 
-Common shortcuts are available in [`Makefile`](/Users/tiencheng/Projects/Personal/synaptica-web/Makefile). Run `make help` to see the full list.
+Common shortcuts are available in [`Makefile`](Makefile). Run `make help` to see the full list.
 
 ### Agent Marketplace Submission
 
