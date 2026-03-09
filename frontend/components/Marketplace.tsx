@@ -114,61 +114,23 @@ export function Marketplace() {
     }
   }
 
-  if (activeSource === 'hol') {
-    return (
-      <div className="space-y-6">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold text-white">Agent Marketplace</h2>
-            <p className="mt-1 text-sm text-slate-400">
-              Browse local marketplace agents or external agents from HOL.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveSource('local')}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                activeSource === 'local'
-                  ? 'bg-slate-100 text-slate-900'
-                  : 'bg-slate-900/60 text-slate-300 border border-white/10'
-              }`}
-            >
-              Local
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveSource('hol')}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium ${
-                activeSource === 'hol'
-                  ? 'bg-sky-500 text-white'
-                  : 'bg-slate-900/60 text-slate-300 border border-white/10'
-              }`}
-            >
-              HOL Registry
-            </button>
-          </div>
-        </div>
-        <HolMarketplaceView />
-      </div>
-    )
-  }
-
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_240px_minmax(0,1fr)] md:items-center">
         <div>
           <h2 className="text-2xl font-semibold text-white">Agent Marketplace</h2>
-          <p className="mt-1 text-sm text-slate-400">Browse {agents.length} registered agents</p>
+          <p className="mt-1 text-sm text-slate-400">
+            Browse local marketplace agents and external agents from HOL Registry.
+          </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="grid h-10 w-full grid-cols-2 rounded-full border border-white/10 bg-slate-900/60 p-1 md:w-[240px] md:justify-self-center">
           <button
             type="button"
             onClick={() => setActiveSource('local')}
-            className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+            className={`h-full rounded-full px-3 text-xs font-medium transition ${
               activeSource === 'local'
-                ? 'bg-slate-100 text-slate-900'
-                : 'bg-slate-900/60 text-slate-300 border border-white/10'
+                ? 'bg-slate-100 text-slate-900 shadow-sm'
+                : 'text-slate-300 hover:text-white'
             }`}
           >
             Local
@@ -176,164 +138,172 @@ export function Marketplace() {
           <button
             type="button"
             onClick={() => setActiveSource('hol')}
-            className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+            className={`h-full rounded-full px-3 text-xs font-medium transition ${
               activeSource === 'hol'
-                ? 'bg-sky-500 text-white'
-                : 'bg-slate-900/60 text-slate-300 border border-white/10'
+                ? 'bg-sky-500 text-white shadow-sm shadow-sky-500/30'
+                : 'text-slate-300 hover:text-white'
             }`}
           >
             HOL Registry
           </button>
         </div>
-        <AddAgentModal onSuccess={handleAgentAdded} />
+        <div className="w-[132px] justify-self-start md:justify-self-end">
+          <AddAgentModal onSuccess={handleAgentAdded} />
+        </div>
       </div>
 
-      <div className="space-y-4">
-        <div className="relative">
-          <Search className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search agents by name or capability..."
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            className="w-full rounded-2xl border border-white/10 bg-slate-900/40 px-12 py-3 text-sm text-white placeholder:text-slate-500 focus:border-sky-400/50 focus:outline-none focus:ring-1 focus:ring-sky-400/30"
-          />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => setShowAllTags((value) => !value)}
-            className="inline-flex items-center gap-2 rounded-lg bg-slate-800/60 px-3 py-2 text-sm text-slate-200 ring-1 ring-white/10 transition hover:bg-slate-800"
-            aria-expanded={showAllTags}
-            aria-controls="all-tags-accordion"
-          >
-            <ChevronDown className={`h-4 w-4 transition-transform ${showAllTags ? 'rotate-180' : ''}`} />
-            All tags
-            <span className="ml-1 rounded-md bg-slate-700/70 px-1.5 py-0.5 text-xs text-slate-300">
-              {Math.max(categories.length - 1, 0)}
-            </span>
-          </button>
-        </div>
-
-        {showAllTags && (
-          <div
-            id="all-tags-accordion"
-            className="rounded-xl border border-white/15 bg-slate-900/60 p-3 backdrop-blur-sm"
-          >
-            <div className="max-h-56 overflow-y-auto pr-1">
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
-                {categories
-                  .filter((category) => category !== 'All')
-                  .map((category) => (
-                    <button
-                      key={category}
-                      onClick={() => handleSelectCategory(category)}
-                      className={`w-full truncate rounded-lg px-3 py-2 text-left text-sm transition ${
-                        selectedCategory === category
-                          ? 'bg-sky-500 text-white'
-                          : 'bg-slate-800/50 text-slate-300 hover:bg-slate-800 hover:text-white'
-                      }`}
-                      title={category}
-                    >
-                      {category}
-                    </button>
-                  ))}
-              </div>
+      {activeSource === 'hol' ? (
+        <HolMarketplaceView />
+      ) : (
+        <>
+          <div className="space-y-4">
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search agents by name or capability..."
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                className="w-full rounded-2xl border border-white/10 bg-slate-900/40 px-12 py-3 text-sm text-white placeholder:text-slate-500 focus:border-sky-400/50 focus:outline-none focus:ring-1 focus:ring-sky-400/30"
+              />
             </div>
-          </div>
-        )}
-      </div>
 
-      {isLoading && (
-        <div className="rounded-2xl border border-white/15 bg-slate-900/50 p-6 text-center text-slate-400">
-          Loading agents...
-        </div>
-      )}
-      {errorMessage && !isLoading && (
-        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center text-red-300">
-          {errorMessage}
-        </div>
-      )}
-
-      <div className="grid gap-4 md:grid-cols-2">
-        {!isLoading &&
-          !errorMessage &&
-          filteredAgents.map((agent) => {
-            const typeKey = (agent.agent_type || '').toLowerCase()
-            const IconComponent = typeToIcon[typeKey] || Bot
-            const capabilities = Array.isArray(agent.capabilities) ? agent.capabilities : []
-            const normalizedScore =
-              typeof agent.reputation_score === 'number'
-                ? Math.max(0, Math.min(1, agent.reputation_score)) * 5
-                : null
-            const ratingLabel = normalizedScore !== null ? normalizedScore.toFixed(1) : '—'
-
-            const priceValue = typeof agent.pricing?.rate === 'number' ? agent.pricing.rate : null
-            const priceLabel =
-              priceValue !== null ? `${priceValue.toFixed(2)} ${agent.pricing?.currency ?? ''}` : '—'
-            const rateTypeLabel = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
-
-            return (
-              <div
-                key={agent.agent_id}
-                className="group overflow-hidden rounded-2xl border border-white/15 bg-slate-900/50 backdrop-blur-sm transition hover:border-sky-400/50 hover:bg-slate-900/70"
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setShowAllTags((value) => !value)}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-800/60 px-3 py-2 text-sm text-slate-200 ring-1 ring-white/10 transition hover:bg-slate-800"
+                aria-expanded={showAllTags}
+                aria-controls="all-tags-accordion"
               >
-                <div className="p-6">
-                    <div className="flex items-start gap-4">
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
-                      <IconComponent className="h-7 w-7" />
-                      <HolRegisterBadge
-                        holUaid={(agent as any).hol_uaid}
-                        holStatus={(agent as any).hol_registration_status}
-                      />
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
-                      {agent.agent_type && <p className="text-sm text-sky-400">{agent.agent_type}</p>}
-                    </div>
-                  </div>
+                <ChevronDown className={`h-4 w-4 transition-transform ${showAllTags ? 'rotate-180' : ''}`} />
+                All tags
+                <span className="ml-1 rounded-md bg-slate-700/70 px-1.5 py-0.5 text-xs text-slate-300">
+                  {Math.max(categories.length - 1, 0)}
+                </span>
+              </button>
+            </div>
 
-                  <p className="mt-4 text-sm leading-relaxed text-slate-300">
-                    {agent.description || 'No description provided.'}
-                  </p>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {capabilities.map((capability) => (
-                      <span
-                        key={capability}
-                        className="rounded-lg bg-slate-800/50 px-2.5 py-1 text-xs text-slate-300"
-                      >
-                        {capability}
-                      </span>
-                    ))}
-                  </div>
-
-                  <div className="mt-6 flex items-center justify-between border-t border-white/10 pt-4">
-                    <div className="flex items-center gap-4 text-sm">
-                      <div className="flex items-center gap-1.5">
-                        <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
-                        <span className="font-medium text-white">{ratingLabel}</span>
-                      </div>
-                      <div className="text-slate-400">
-                        {ratingLabel === '—' ? 'No feedback yet' : 'Avg reputation'}
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-lg font-semibold text-white">{priceLabel}</div>
-                      <div className="text-xs text-slate-400">{rateTypeLabel}</div>
-                    </div>
+            {showAllTags && (
+              <div
+                id="all-tags-accordion"
+                className="rounded-xl border border-white/15 bg-slate-900/60 p-3 backdrop-blur-sm"
+              >
+                <div className="max-h-56 overflow-y-auto pr-1">
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
+                    {categories
+                      .filter((category) => category !== 'All')
+                      .map((category) => (
+                        <button
+                          key={category}
+                          onClick={() => handleSelectCategory(category)}
+                          className={`w-full truncate rounded-lg px-3 py-2 text-left text-sm transition ${
+                            selectedCategory === category
+                              ? 'bg-sky-500 text-white'
+                              : 'bg-slate-800/50 text-slate-300 hover:bg-slate-800 hover:text-white'
+                          }`}
+                          title={category}
+                        >
+                          {category}
+                        </button>
+                      ))}
                   </div>
                 </div>
               </div>
-            )
-          })}
-      </div>
+            )}
+          </div>
 
-      {!isLoading && !errorMessage && filteredAgents.length === 0 && (
-        <div className="rounded-2xl border border-white/15 bg-slate-900/50 p-12 text-center">
-          <p className="text-slate-400">No agents found matching your criteria</p>
-          <p className="mt-2 text-sm text-slate-500">Try adjusting your search or filter settings</p>
-        </div>
+          {isLoading && (
+            <div className="rounded-2xl border border-white/15 bg-slate-900/50 p-6 text-center text-slate-400">
+              Loading agents...
+            </div>
+          )}
+          {errorMessage && !isLoading && (
+            <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center text-red-300">
+              {errorMessage}
+            </div>
+          )}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            {!isLoading &&
+              !errorMessage &&
+              filteredAgents.map((agent) => {
+                const typeKey = (agent.agent_type || '').toLowerCase()
+                const IconComponent = typeToIcon[typeKey] || Bot
+                const capabilities = Array.isArray(agent.capabilities) ? agent.capabilities : []
+                const normalizedScore =
+                  typeof agent.reputation_score === 'number'
+                    ? Math.max(0, Math.min(1, agent.reputation_score)) * 5
+                    : null
+                const ratingLabel = normalizedScore !== null ? normalizedScore.toFixed(1) : '—'
+
+                const priceValue = typeof agent.pricing?.rate === 'number' ? agent.pricing.rate : null
+                const priceLabel =
+                  priceValue !== null ? `${priceValue.toFixed(2)} ${agent.pricing?.currency ?? ''}` : '—'
+                const rateTypeLabel = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
+
+                return (
+                  <div
+                    key={agent.agent_id}
+                    className="group overflow-hidden rounded-2xl border border-white/15 bg-slate-900/50 backdrop-blur-sm transition hover:border-sky-400/50 hover:bg-slate-900/70"
+                  >
+                    <div className="p-6">
+                      <div className="flex items-start gap-4">
+                        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
+                          <IconComponent className="h-7 w-7" />
+                          <HolRegisterBadge
+                            holUaid={(agent as any).hol_uaid}
+                            holStatus={(agent as any).hol_registration_status}
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
+                          {agent.agent_type && <p className="text-sm text-sky-400">{agent.agent_type}</p>}
+                        </div>
+                      </div>
+
+                      <p className="mt-4 text-sm leading-relaxed text-slate-300">
+                        {agent.description || 'No description provided.'}
+                      </p>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {capabilities.map((capability) => (
+                          <span
+                            key={capability}
+                            className="rounded-lg bg-slate-800/50 px-2.5 py-1 text-xs text-slate-300"
+                          >
+                            {capability}
+                          </span>
+                        ))}
+                      </div>
+
+                      <div className="mt-6 flex items-center justify-between border-t border-white/10 pt-4">
+                        <div className="flex items-center gap-4 text-sm">
+                          <div className="flex items-center gap-1.5">
+                            <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />
+                            <span className="font-medium text-white">{ratingLabel}</span>
+                          </div>
+                          <div className="text-slate-400">
+                            {ratingLabel === '—' ? 'No feedback yet' : 'Avg reputation'}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-lg font-semibold text-white">{priceLabel}</div>
+                          <div className="text-xs text-slate-400">{rateTypeLabel}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+          </div>
+
+          {!isLoading && !errorMessage && filteredAgents.length === 0 && (
+            <div className="rounded-2xl border border-white/15 bg-slate-900/50 p-12 text-center">
+              <p className="text-slate-400">No agents found matching your criteria</p>
+              <p className="mt-2 text-sm text-slate-500">Try adjusting your search or filter settings</p>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

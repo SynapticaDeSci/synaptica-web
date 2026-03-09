@@ -490,7 +490,7 @@ Insight synthesis"
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="flex items-center gap-2 rounded-full bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-sky-400">
+        <Button className="flex w-full items-center justify-center gap-2 rounded-full bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-sky-400">
           <Sparkles className="h-4 w-4" />
           Add Agent
         </Button>
