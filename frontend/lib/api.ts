@@ -84,8 +84,10 @@ export type ResearchRunStatus =
   | 'pending'
   | 'running'
   | 'waiting_for_review'
+  | 'paused'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
 export type ResearchRunNodeStatus =
   | 'pending'
@@ -93,7 +95,8 @@ export type ResearchRunNodeStatus =
   | 'waiting_for_review'
   | 'completed'
   | 'failed'
-  | 'blocked';
+  | 'blocked'
+  | 'cancelled';
 
 export type ResearchMode = 'auto' | 'literature' | 'live_analysis' | 'hybrid';
 export type DepthMode = 'standard' | 'deep';
@@ -218,6 +221,72 @@ export interface ResearchRunResponse {
   edges: ResearchRunEdgeResponse[];
 }
 
+export interface ResearchRunEvidenceResponse {
+  research_run_id: string;
+  status: ResearchRunStatus;
+  claim_targets: Array<Record<string, any>>;
+  rewritten_research_brief?: string | null;
+  sources: ResearchSourceCard[];
+  filtered_sources: ResearchSourceCard[];
+  citations: ResearchSourceCard[];
+  coverage_summary: Record<string, any>;
+  source_summary: Record<string, any>;
+  freshness_summary: Record<string, any>;
+  search_lanes_used: string[];
+}
+
+export interface ResearchRunReportResponse {
+  research_run_id: string;
+  status: ResearchRunStatus;
+  answer_markdown?: string | null;
+  answer?: string | null;
+  claims: ResearchClaim[];
+  citations: ResearchSourceCard[];
+  limitations: string[];
+  critic_findings: ResearchCriticFinding[];
+  quality_summary: ResearchQualitySummary;
+}
+
+export interface PaymentProfileVerificationResponse {
+  success: boolean;
+  agent_id: string;
+  hedera_account_id: string;
+  status: string;
+  verification_method?: string | null;
+  verified_at?: string | null;
+  last_error?: string | null;
+  meta?: Record<string, any>;
+}
+
+export interface PaymentDetailResponse {
+  id: string;
+  task_id: string;
+  from_agent_id: string;
+  to_agent_id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  transaction_id?: string | null;
+  authorization_id?: string | null;
+  created_at?: string | null;
+  completed_at?: string | null;
+  a2a_thread_id?: string | null;
+  payment_mode?: string | null;
+  worker_account_id?: string | null;
+  verification_notes?: string | null;
+  rejection_reason?: string | null;
+  payment_profile?: PaymentProfileVerificationResponse | null;
+  notification_summary: Record<string, number>;
+}
+
+export interface PaymentEventsResponse {
+  payment: PaymentDetailResponse;
+  state_transitions: Array<Record<string, any>>;
+  notifications: Array<Record<string, any>>;
+  a2a_events: Array<Record<string, any>>;
+  reconciliations: Array<Record<string, any>>;
+}
+
 /**
  * Create a new task
  */
@@ -306,6 +375,136 @@ export async function getResearchRun(researchRunId: string): Promise<ResearchRun
       .json()
       .catch(() => ({ detail: 'Research run not found' }));
     throw new Error(error.detail || error.error || 'Research run not found');
+  }
+
+  return response.json();
+}
+
+export async function pauseResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/pause`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to pause research run' }));
+    throw new Error(error.detail || error.error || 'Failed to pause research run');
+  }
+
+  return response.json();
+}
+
+export async function resumeResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/resume`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to resume research run' }));
+    throw new Error(error.detail || error.error || 'Failed to resume research run');
+  }
+
+  return response.json();
+}
+
+export async function cancelResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to cancel research run' }));
+    throw new Error(error.detail || error.error || 'Failed to cancel research run');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunEvidence(
+  researchRunId: string
+): Promise<ResearchRunEvidenceResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/evidence`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run evidence not found' }));
+    throw new Error(error.detail || error.error || 'Research run evidence not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunReport(
+  researchRunId: string
+): Promise<ResearchRunReportResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/report`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run report not found' }));
+    throw new Error(error.detail || error.error || 'Research run report not found');
+  }
+
+  return response.json();
+}
+
+export async function getPayment(paymentId: string): Promise<PaymentDetailResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/payments/${paymentId}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Payment not found' }));
+    throw new Error(error.detail || error.error || 'Payment not found');
+  }
+
+  return response.json();
+}
+
+export async function getPaymentEvents(paymentId: string): Promise<PaymentEventsResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/payments/${paymentId}/events`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Payment events not found' }));
+    throw new Error(error.detail || error.error || 'Payment events not found');
   }
 
   return response.json();

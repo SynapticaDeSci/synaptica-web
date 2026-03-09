@@ -135,16 +135,15 @@ Research run APIs:
 - `GET /api/research-runs/{id}/report`
 
 Payment APIs:
-- `POST /api/payments/proposals`
-- `POST /api/payments/{payment_id}/authorize`
-- `POST /api/payments/{payment_id}/release`
-- `POST /api/payments/{payment_id}/refund`
 - `GET /api/payments/{payment_id}`
 - `GET /api/payments/{payment_id}/events`
 - `POST /api/payments/reconcile`
 
 Payment identity APIs:
 - `POST /api/agents/{agent_id}/payment-profile/verify`
+
+Internal runtime-only payment actions:
+- proposal / authorize / release / refund remain tool-driven inside the deterministic orchestrator-verifier flow and are not mounted as public REST routes in Phase 1.
 
 ## 5. Data Model
 

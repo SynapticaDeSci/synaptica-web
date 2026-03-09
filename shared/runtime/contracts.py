@@ -77,6 +77,7 @@ class AgentSelectionResult(BaseModel):
     hedera_account_id: Optional[str] = None
     pricing: Dict[str, Any] = Field(default_factory=dict)
     support_tier: SupportTier = SupportTier.EXPERIMENTAL
+    payment_profile_status: Optional[str] = None
     payment_id: Optional[str] = None
     payment_thread_id: Optional[str] = None
     summary: Optional[str] = None

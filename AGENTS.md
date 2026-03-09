@@ -24,6 +24,7 @@
   - Keep the Python codebase as one shared app rooted at the repo; do not split `api` / `agents` / `shared` into separate Python packages or workspaces unless explicitly asked.
   - For repo scripts, use `uv run python scripts/...` from the repo root.
   - Database schema changes should ship as Alembic revisions under `alembic/versions/`; avoid reintroducing `Base.metadata.create_all(...)` as the primary local setup path.
+  - Active OpenAI-backed agent construction should go through `shared/strands_openai_agent.py`; keep `shared/openai_agent.py` legacy/demo-only unless explicitly reactivated.
 - Safe edits:
   - Treat `.env`, local DB files, and files under `agent_metadata/` as potentially sensitive; do not commit secrets or generated local data.
   - If a change affects local developer workflow, update `README.md` and this file in the same change.

@@ -19,6 +19,7 @@ from agents.verifier.tools.research_verification_tools import calculate_quality_
 from shared.database import Agent, AgentReputation, SessionLocal
 from shared.payments.service import get_payment_mode
 from shared.payments.service import build_idempotency_key
+from shared.payments.runtime import require_verified_payment_profile
 from shared.research.catalog import select_supported_agent_for_todo
 from shared.runtime import (
     AgentSelectionResult,
@@ -327,7 +328,7 @@ def _check_task_cancelled(task_id: str) -> bool:
     snapshot = load_task_snapshot(task_id)
     if snapshot is None:
         return False
-    return snapshot.get("status") == "CANCELLED"
+    return str(snapshot.get("status") or "").lower() == "cancelled"
 
 
 async def _request_human_verification(
@@ -446,6 +447,24 @@ async def negotiator_agent(
             handoff_context=context,
         ).model_dump(mode="json")
 
+    payment_profile_status = None
+    db = SessionLocal()
+    try:
+        profile = require_verified_payment_profile(
+            db,
+            agent_id=selected_agent_id,
+            hedera_account_id=agent_record.get("hedera_account_id"),
+        )
+        payment_profile_status = profile.status
+    except Exception as exc:  # noqa: BLE001
+        return AgentSelectionResult(
+            success=False,
+            error=str(exc),
+            handoff_context=context,
+        ).model_dump(mode="json")
+    finally:
+        db.close()
+
     payment_result = await create_payment_request(
         task_id=task_id,
         from_agent_id="orchestrator-agent",
@@ -473,6 +492,7 @@ async def negotiator_agent(
         hedera_account_id=agent_record.get("hedera_account_id"),
         pricing=agent_record.get("pricing") or {},
         support_tier="supported",
+        payment_profile_status=payment_profile_status,
         payment_id=payment_result.get("payment_id"),
         payment_thread_id=((payment_result.get("a2a") or {}).get("thread_id")),
         summary=f"Selected {agent_record.get('name')} for {task_name or todo_id}",

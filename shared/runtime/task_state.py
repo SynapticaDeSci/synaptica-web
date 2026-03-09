@@ -130,6 +130,31 @@ def persist_verification_state(
         db.close()
 
 
+def persist_runtime_status(
+    task_id: str,
+    *,
+    status: str,
+    error: Any = _UNSET,
+) -> Optional[Dict[str, Any]]:
+    """Persist a task-level runtime status with an optional error payload."""
+
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).one_or_none()
+        if task is None:
+            return None
+
+        runtime = _ensure_runtime_meta(task)
+        runtime["status"] = status
+        if error is not _UNSET:
+            runtime["error"] = redact_sensitive_payload(error)
+        db.commit()
+        db.refresh(task)
+        return build_task_snapshot(task)
+    finally:
+        db.close()
+
+
 def build_task_snapshot(task: Task) -> Dict[str, Any]:
     """Convert a task row into the task-status response shape."""
 

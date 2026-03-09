@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -25,7 +26,14 @@ from shared.database import (
     Task,
 )
 from shared.database.models import TaskStatus
-from shared.runtime import HandoffContext, initialize_runtime_state, load_task_snapshot, redact_sensitive_payload
+from shared.runtime import (
+    HandoffContext,
+    initialize_runtime_state,
+    load_task_snapshot,
+    persist_runtime_status,
+    persist_verification_state,
+    redact_sensitive_payload,
+)
 
 from .planner import (
     SUPPORTED_RESEARCH_RUN_WORKFLOW,
@@ -41,6 +49,15 @@ from .planner import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_REPUTATION_SCORE = 0.7
+RUN_CONTROL_ACTIVE = "active"
+RUN_CONTROL_PAUSE_REQUESTED = "pause_requested"
+RUN_CONTROL_PAUSED = "paused"
+RUN_CONTROL_CANCEL_REQUESTED = "cancel_requested"
+RUN_CONTROL_CANCELLED = "cancelled"
+
+
+class ResearchRunCancelledError(RuntimeError):
+    """Raised when a research run has been cancelled cooperatively."""
 
 
 class _ResearchRunGraphNodeExecutor:
@@ -106,6 +123,18 @@ def _build_research_run_title(description: str) -> str:
     return f"Research Run: {snippet}..." if len(snippet) == 57 else f"Research Run: {snippet}"
 
 
+def _is_terminal_run_status(status: Any) -> bool:
+    return _enum_value(status) in {
+        ResearchRunStatus.COMPLETED.value,
+        ResearchRunStatus.FAILED.value,
+        ResearchRunStatus.CANCELLED.value,
+    }
+
+
+def _get_control_state(meta: Dict[str, Any]) -> str:
+    return str(meta.get("control_state") or RUN_CONTROL_ACTIVE)
+
+
 def create_research_run(
     *,
     description: str,
@@ -145,6 +174,8 @@ def create_research_run(
                 "planner_notes": plan.profile.planner_notes,
                 "scenario_analysis_requested": plan.profile.scenario_analysis_requested,
                 "generated_at": plan.profile.generated_at,
+                "control_state": RUN_CONTROL_ACTIVE,
+                "control_reason": None,
             },
         )
         db.add(record)
@@ -183,6 +214,212 @@ def create_research_run(
         raise
     finally:
         db.close()
+
+
+def request_pause_research_run(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Request that a research run pause after the current node settles."""
+
+    db = SessionLocal()
+    try:
+        record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one_or_none()
+        if record is None:
+            return None
+        if _is_terminal_run_status(record.status):
+            db.rollback()
+            return get_research_run_payload(research_run_id)
+
+        meta = dict(record.meta or {})
+        control_state = _get_control_state(meta)
+        if control_state in {RUN_CONTROL_PAUSE_REQUESTED, RUN_CONTROL_PAUSED}:
+            db.rollback()
+            return get_research_run_payload(research_run_id)
+
+        active_node = (
+            db.query(ResearchRunNode)
+            .filter(ResearchRunNode.research_run_id == research_run_id)
+            .filter(
+                ResearchRunNode.status.in_(
+                    [ResearchRunNodeStatus.RUNNING, ResearchRunNodeStatus.WAITING_FOR_REVIEW]
+                )
+            )
+            .one_or_none()
+        )
+        meta["control_state"] = (
+            RUN_CONTROL_PAUSE_REQUESTED if active_node is not None else RUN_CONTROL_PAUSED
+        )
+        meta["control_reason"] = "Pause requested by user"
+        record.meta = meta
+        if active_node is None:
+            record.status = ResearchRunStatus.PAUSED
+        db.commit()
+    finally:
+        db.close()
+
+    return get_research_run_payload(research_run_id)
+
+
+def request_resume_research_run(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Resume a paused research run."""
+
+    db = SessionLocal()
+    try:
+        record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one_or_none()
+        if record is None:
+            return None
+        if _is_terminal_run_status(record.status):
+            db.rollback()
+            return get_research_run_payload(research_run_id)
+
+        meta = dict(record.meta or {})
+        meta["control_state"] = RUN_CONTROL_ACTIVE
+        meta["control_reason"] = None
+        record.meta = meta
+        if record.status == ResearchRunStatus.PAUSED:
+            record.status = ResearchRunStatus.RUNNING
+        db.commit()
+    finally:
+        db.close()
+
+    return get_research_run_payload(research_run_id)
+
+
+def request_cancel_research_run(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Request cancellation for a research run and cancel idle/pending work immediately."""
+
+    db = SessionLocal()
+    try:
+        record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one_or_none()
+        if record is None:
+            return None
+        if _is_terminal_run_status(record.status):
+            db.rollback()
+            return get_research_run_payload(research_run_id)
+
+        meta = dict(record.meta or {})
+        meta["control_state"] = RUN_CONTROL_CANCEL_REQUESTED
+        meta["control_reason"] = "Cancelled by user"
+        record.meta = meta
+
+        candidate_attempts = (
+            db.query(ExecutionAttempt)
+            .filter(ExecutionAttempt.research_run_id == research_run_id)
+            .filter(ExecutionAttempt.status == ResearchRunNodeStatus.RUNNING)
+            .order_by(ExecutionAttempt.created_at.desc())
+            .all()
+        )
+        waiting_attempt = next(
+            (
+                attempt
+                for attempt in candidate_attempts
+                if attempt.task_id and (load_task_snapshot(attempt.task_id) or {}).get("verification_pending")
+            ),
+            None,
+        )
+        running_attempt = (
+            next(
+                (
+                    attempt
+                    for attempt in candidate_attempts
+                    if attempt is not waiting_attempt
+                ),
+                None,
+            )
+        )
+
+        if waiting_attempt is not None and waiting_attempt.task_id:
+            persist_verification_state(
+                waiting_attempt.task_id,
+                pending=False,
+                verification_data=None,
+                verification_decision={
+                    "approved": False,
+                    "reason": "Cancelled by user",
+                    "timestamp": _utcnow().isoformat(),
+                },
+            )
+            persist_runtime_status(
+                waiting_attempt.task_id,
+                status="cancelled",
+                error="Cancelled by user",
+            )
+
+        if waiting_attempt is None and running_attempt is None:
+            record.status = ResearchRunStatus.CANCELLED
+            record.completed_at = _utcnow()
+            record.result = {
+                "error": "Cancelled by user",
+                "classified_mode": meta.get("classified_mode"),
+                "depth_mode": meta.get("depth_mode"),
+            }
+            record.error = "Cancelled by user"
+            meta["control_state"] = RUN_CONTROL_CANCELLED
+            for node in (
+                db.query(ResearchRunNode)
+                .filter(ResearchRunNode.research_run_id == research_run_id)
+                .filter(
+                    ResearchRunNode.status.in_(
+                        [ResearchRunNodeStatus.PENDING, ResearchRunNodeStatus.BLOCKED]
+                    )
+                )
+                .all()
+            ):
+                node.status = ResearchRunNodeStatus.CANCELLED
+                node.completed_at = _utcnow()
+                node.error = "Cancelled by user"
+            record.meta = meta
+
+        db.commit()
+    finally:
+        db.close()
+
+    return get_research_run_payload(research_run_id)
+
+
+def get_research_run_evidence_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Return a shaped evidence payload for the research run."""
+
+    payload = get_research_run_payload(research_run_id)
+    if payload is None:
+        return None
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    planning = result.get("planning") if isinstance(result, dict) else {}
+    evidence = result.get("evidence") if isinstance(result, dict) else {}
+    curated_sources = result.get("curated_sources") if isinstance(result, dict) else {}
+    return {
+        "research_run_id": research_run_id,
+        "status": payload.get("status"),
+        "claim_targets": (planning or {}).get("claim_targets") or [],
+        "rewritten_research_brief": (planning or {}).get("rewritten_research_brief"),
+        "sources": (curated_sources or {}).get("sources")
+        or (evidence or {}).get("sources")
+        or [],
+        "filtered_sources": (curated_sources or {}).get("filtered_sources") or [],
+        "citations": (curated_sources or {}).get("citations") or [],
+        "coverage_summary": (evidence or {}).get("coverage_summary") or {},
+        "source_summary": (curated_sources or {}).get("source_summary") or {},
+        "freshness_summary": (curated_sources or {}).get("freshness_summary") or {},
+        "search_lanes_used": (evidence or {}).get("search_lanes_used") or [],
+    }
+
+
+def get_research_run_report_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Return a shaped report payload for the research run."""
+
+    payload = get_research_run_payload(research_run_id)
+    if payload is None:
+        return None
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    return {
+        "research_run_id": research_run_id,
+        "status": payload.get("status"),
+        "answer_markdown": (result or {}).get("answer_markdown"),
+        "answer": (result or {}).get("answer"),
+        "claims": (result or {}).get("claims") or [],
+        "citations": (result or {}).get("citations") or [],
+        "limitations": (result or {}).get("limitations") or [],
+        "critic_findings": (result or {}).get("critic_findings") or [],
+        "quality_summary": (result or {}).get("quality_summary") or {},
+    }
 
 
 def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
@@ -262,11 +499,16 @@ class ResearchRunExecutor:
         graph = self._build_graph()
 
         try:
+            await self._wait_for_control_state()
             await graph.invoke_async(
                 f"Execute research run {self.research_run_id}",
                 invocation_state={"runner": self},
             )
             self._mark_completed()
+        except ResearchRunCancelledError as exc:
+            logger.info("Research run %s cancelled: %s", self.research_run_id, exc)
+            self._mark_cancelled(str(exc))
+            self._cancel_pending_nodes(reason=str(exc))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Research run %s failed", self.research_run_id)
             self._mark_failed(str(exc))
@@ -274,6 +516,21 @@ class ResearchRunExecutor:
 
     async def execute_node(self, node_id: str) -> Dict[str, Any]:
         """Execute one node by creating a backing task and reusing the phase 0 microtask flow."""
+
+        node_record = self._get_node(node_id)
+        if _enum_value(node_record.status) == ResearchRunNodeStatus.COMPLETED.value and node_record.result is not None:
+            return {
+                "success": True,
+                "task_id": node_record.latest_task_id,
+                "todo_id": node_id,
+                "result": node_record.result,
+                "todo_status": "completed",
+                "resumed": True,
+            }
+        if _enum_value(node_record.status) == ResearchRunNodeStatus.CANCELLED.value:
+            raise ResearchRunCancelledError(node_record.error or "Cancelled by user")
+
+        await self._wait_for_control_state()
 
         attempt_id, task_id, node_title = self._create_attempt(node_id)
         await self._initialize_attempt_runtime(node_id=node_id, attempt_id=attempt_id, task_id=task_id)
@@ -309,24 +566,31 @@ class ResearchRunExecutor:
             )
 
             snapshot = load_task_snapshot(task_id)
+            cancelled = self._attempt_was_cancelled(result=result, snapshot=snapshot)
             self._finalize_attempt(
                 node_id=node_id,
                 attempt_id=attempt_id,
                 task_id=task_id,
                 result=result,
                 snapshot=snapshot,
+                cancelled=cancelled,
             )
 
             if not result.get("success"):
+                if cancelled:
+                    raise ResearchRunCancelledError(result.get("error") or "Cancelled by user")
                 raise RuntimeError(result.get("error", f"Research run node '{node_id}' failed"))
 
             return result
+        except ResearchRunCancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             self._record_attempt_failure(
                 node_id=node_id,
                 attempt_id=attempt_id,
                 task_id=task_id,
                 error=str(exc),
+                cancelled=isinstance(exc, ResearchRunCancelledError),
             )
             raise
 
@@ -362,12 +626,52 @@ class ResearchRunExecutor:
         finally:
             db.close()
 
+    def _get_run_meta(self) -> Dict[str, Any]:
+        run_record = self._get_research_run()
+        return dict(run_record.meta or {})
+
+    async def _wait_for_control_state(self) -> None:
+        while True:
+            meta = self._get_run_meta()
+            control_state = _get_control_state(meta)
+            if control_state == RUN_CONTROL_ACTIVE:
+                return
+            if control_state in {RUN_CONTROL_PAUSE_REQUESTED, RUN_CONTROL_PAUSED}:
+                self._mark_paused()
+                await asyncio.sleep(0.2)
+                continue
+            if control_state in {RUN_CONTROL_CANCEL_REQUESTED, RUN_CONTROL_CANCELLED}:
+                raise ResearchRunCancelledError(str(meta.get("control_reason") or "Cancelled by user"))
+            return
+
     def _mark_started(self) -> None:
         db = SessionLocal()
         try:
             record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
-            record.status = ResearchRunStatus.RUNNING
+            if _is_terminal_run_status(record.status):
+                db.rollback()
+                return
+            meta = dict(record.meta or {})
+            if _get_control_state(meta) == RUN_CONTROL_PAUSED:
+                record.status = ResearchRunStatus.PAUSED
+            else:
+                record.status = ResearchRunStatus.RUNNING
             record.started_at = record.started_at or _utcnow()
+            db.commit()
+        finally:
+            db.close()
+
+    def _mark_paused(self) -> None:
+        db = SessionLocal()
+        try:
+            record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
+            if _is_terminal_run_status(record.status):
+                db.rollback()
+                return
+            meta = dict(record.meta or {})
+            meta["control_state"] = RUN_CONTROL_PAUSED
+            record.meta = meta
+            record.status = ResearchRunStatus.PAUSED
             db.commit()
         finally:
             db.close()
@@ -520,10 +824,34 @@ class ResearchRunExecutor:
         db = SessionLocal()
         try:
             record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
+            if _enum_value(record.status) == ResearchRunStatus.CANCELLED.value:
+                db.rollback()
+                return
             record.status = ResearchRunStatus.FAILED
             record.completed_at = _utcnow()
             record.error = error
             record_meta = record.meta or {}
+            if record.result is None:
+                record.result = {
+                    "error": error,
+                    "classified_mode": record_meta.get("classified_mode"),
+                    "depth_mode": record_meta.get("depth_mode"),
+                }
+            db.commit()
+        finally:
+            db.close()
+
+    def _mark_cancelled(self, error: str) -> None:
+        db = SessionLocal()
+        try:
+            record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
+            record_meta = dict(record.meta or {})
+            record_meta["control_state"] = RUN_CONTROL_CANCELLED
+            record_meta["control_reason"] = error
+            record.meta = record_meta
+            record.status = ResearchRunStatus.CANCELLED
+            record.completed_at = _utcnow()
+            record.error = error
             if record.result is None:
                 record.result = {
                     "error": error,
@@ -685,6 +1013,20 @@ class ResearchRunExecutor:
             return str(handoff_context["agent_id"])
         return None
 
+    def _attempt_was_cancelled(
+        self,
+        *,
+        result: Dict[str, Any],
+        snapshot: Optional[Dict[str, Any]],
+    ) -> bool:
+        if str(result.get("todo_status") or "").lower() == "cancelled":
+            return True
+        snapshot_status = str((snapshot or {}).get("status", "")).lower()
+        if snapshot_status == "cancelled":
+            return True
+        error = str(result.get("error") or "").lower()
+        return "cancel" in error
+
     def _finalize_attempt(
         self,
         *,
@@ -693,13 +1035,19 @@ class ResearchRunExecutor:
         task_id: str,
         result: Dict[str, Any],
         snapshot: Optional[Dict[str, Any]],
+        cancelled: bool = False,
     ) -> None:
         success = bool(result.get("success"))
         payment_id = self._extract_payment_id(result, snapshot)
         agent_id = self._extract_agent_id(result, snapshot)
-        task_status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
-        attempt_status = ResearchRunNodeStatus.COMPLETED if success else ResearchRunNodeStatus.FAILED
-        node_status = ResearchRunNodeStatus.COMPLETED if success else ResearchRunNodeStatus.FAILED
+        if cancelled:
+            task_status = TaskStatus.CANCELLED
+            attempt_status = ResearchRunNodeStatus.CANCELLED
+            node_status = ResearchRunNodeStatus.CANCELLED
+        else:
+            task_status = TaskStatus.COMPLETED if success else TaskStatus.FAILED
+            attempt_status = ResearchRunNodeStatus.COMPLETED if success else ResearchRunNodeStatus.FAILED
+            node_status = ResearchRunNodeStatus.COMPLETED if success else ResearchRunNodeStatus.FAILED
         task_result = (
             redact_sensitive_payload(result.get("result"))
             if success
@@ -733,7 +1081,7 @@ class ResearchRunExecutor:
 
             task.status = task_status
             task.result = task_result
-            if success:
+            if success or cancelled:
                 task.completed_at = _utcnow()
 
             db.commit()
@@ -743,12 +1091,22 @@ class ResearchRunExecutor:
         finally:
             db.close()
 
-    def _record_attempt_failure(self, *, node_id: str, attempt_id: str, task_id: str, error: str) -> None:
+    def _record_attempt_failure(
+        self,
+        *,
+        node_id: str,
+        attempt_id: str,
+        task_id: str,
+        error: str,
+        cancelled: bool = False,
+    ) -> None:
         db = SessionLocal()
         try:
             attempt = db.query(ExecutionAttempt).filter(ExecutionAttempt.id == attempt_id).one_or_none()
             if attempt is not None and _enum_value(attempt.status) == ResearchRunNodeStatus.RUNNING.value:
-                attempt.status = ResearchRunNodeStatus.FAILED
+                attempt.status = (
+                    ResearchRunNodeStatus.CANCELLED if cancelled else ResearchRunNodeStatus.FAILED
+                )
                 attempt.completed_at = _utcnow()
                 attempt.error = error
                 attempt.result = {"error": error}
@@ -760,14 +1118,17 @@ class ResearchRunExecutor:
                 .one_or_none()
             )
             if node_record is not None and _enum_value(node_record.status) == ResearchRunNodeStatus.RUNNING.value:
-                node_record.status = ResearchRunNodeStatus.FAILED
+                node_record.status = (
+                    ResearchRunNodeStatus.CANCELLED if cancelled else ResearchRunNodeStatus.FAILED
+                )
                 node_record.completed_at = _utcnow()
                 node_record.error = error
 
             task = db.query(Task).filter(Task.id == task_id).one_or_none()
             if task is not None and _enum_value(task.status) == TaskStatus.IN_PROGRESS.value:
-                task.status = TaskStatus.FAILED
+                task.status = TaskStatus.CANCELLED if cancelled else TaskStatus.FAILED
                 task.result = {"error": error}
+                task.completed_at = _utcnow()
 
             db.commit()
         except Exception:
@@ -795,6 +1156,30 @@ class ResearchRunExecutor:
         finally:
             db.close()
 
+    def _cancel_pending_nodes(self, *, reason: str) -> None:
+        db = SessionLocal()
+        try:
+            pending_nodes = (
+                db.query(ResearchRunNode)
+                .filter(ResearchRunNode.research_run_id == self.research_run_id)
+                .filter(
+                    ResearchRunNode.status.in_(
+                        [ResearchRunNodeStatus.PENDING, ResearchRunNodeStatus.BLOCKED]
+                    )
+                )
+                .all()
+            )
+            for node in pending_nodes:
+                node.status = ResearchRunNodeStatus.CANCELLED
+                node.completed_at = _utcnow()
+                node.error = reason
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
 
 def _derive_attempt_status(attempt: ExecutionAttempt) -> str:
     status = _enum_value(attempt.status)
@@ -804,7 +1189,7 @@ def _derive_attempt_status(attempt: ExecutionAttempt) -> str:
             return ResearchRunNodeStatus.WAITING_FOR_REVIEW.value
         snapshot_status = str((snapshot or {}).get("status", "")).lower()
         if snapshot_status == "cancelled":
-            return ResearchRunNodeStatus.FAILED.value
+            return ResearchRunNodeStatus.CANCELLED.value
     return status
 
 
@@ -898,10 +1283,14 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         )
 
     run_status = _enum_value(record.status)
+    meta = record.meta or {}
+    control_state = _get_control_state(meta)
     if run_status == ResearchRunStatus.RUNNING.value and any_waiting_for_review:
         run_status = ResearchRunStatus.WAITING_FOR_REVIEW.value
-
-    meta = record.meta or {}
+    if run_status == ResearchRunStatus.RUNNING.value and control_state == RUN_CONTROL_PAUSED:
+        run_status = ResearchRunStatus.PAUSED.value
+    if run_status == ResearchRunStatus.RUNNING.value and control_state == RUN_CONTROL_CANCEL_REQUESTED:
+        run_status = ResearchRunStatus.CANCELLED.value if record.completed_at else ResearchRunStatus.RUNNING.value
     return {
         "id": record.id,
         "title": record.title,

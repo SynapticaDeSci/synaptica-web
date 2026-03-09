@@ -23,6 +23,7 @@ from shared.database import (
     SessionLocal,
 )
 from shared.agents_cache import rebuild_agents_cache
+from shared.payments.runtime import sync_verified_payment_profile
 from shared.handlers.identity_registry_handlers import get_all_domains, resolve_by_domain
 from shared.handlers.reputation_registry_handlers import get_full_reputation_info
 from shared.handlers.validation_registry_handlers import get_full_validation_info
@@ -643,6 +644,11 @@ def _apply_snapshots(session: Session, snapshots: List[AgentSnapshot]) -> List[s
         agent.meta = meta
 
         _upsert_reputation(session, snapshot)
+        sync_verified_payment_profile(
+            session,
+            agent=agent,
+            verification_method="registry_sync",
+        )
 
         if created:
             session.flush()

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from shared.agents_cache import rebuild_agents_cache
 from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
 from shared.database.models import A2AEvent, Task
+from shared.payments.runtime import sync_verified_payment_profile
 from shared.research.catalog import (
     SUPPORTED_AGENT_DETAILS,
     build_phase0_todo_items,
@@ -40,6 +41,7 @@ from agents.orchestrator.tools import create_todo_list, execute_microtask
 from .middleware import logging_middleware
 from .routes import agents as agents_routes
 from .routes import data_agent as data_agent_routes
+from .routes import payments as payments_routes
 from .routes import research_runs as research_runs_routes
 
 # Load environment variables
@@ -165,18 +167,17 @@ def _upsert_supported_research_agents() -> None:
             }
 
             if agent is None:
-                session.add(
-                    Agent(  # type: ignore[call-arg]
-                        agent_id=agent_id,
-                        name=details["name"],
-                        agent_type="research",
-                        description=details["description"],
-                        capabilities=details["capabilities"],
-                        hedera_account_id=details["hedera_account_id"],
-                        status="active",
-                        meta=meta,
-                    )
+                agent = Agent(  # type: ignore[call-arg]
+                    agent_id=agent_id,
+                    name=details["name"],
+                    agent_type="research",
+                    description=details["description"],
+                    capabilities=details["capabilities"],
+                    hedera_account_id=details["hedera_account_id"],
+                    status="active",
+                    meta=meta,
                 )
+                session.add(agent)
             else:
                 merged_meta = dict(agent.meta or {})
                 merged_meta.update(meta)
@@ -206,6 +207,12 @@ def _upsert_supported_research_agents() -> None:
                 )
             else:
                 reputation.reputation_score = max(float(reputation.reputation_score or 0.0), 0.8)
+
+            sync_verified_payment_profile(
+                session,
+                agent=agent,
+                verification_method="supported_catalog_sync",
+            )
 
         session.commit()
         rebuild_agents_cache(session=session)
@@ -374,6 +381,7 @@ app.middleware("http")(logging_middleware)
 # Include routers
 app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 app.include_router(data_agent_routes.router, prefix="/api/data-agent", tags=["data-agent"])
+app.include_router(payments_routes.router, prefix="/api/payments", tags=["payments"])
 app.include_router(research_runs_routes.router, prefix="/api/research-runs", tags=["research-runs"])
 
 
@@ -394,6 +402,15 @@ async def root():
             "/execute": "POST - Execute a task using marketplace agents",
             "/api/research-runs": "POST - Create and start a graph-backed research run",
             "/api/research-runs/{id}": "GET - Inspect research run status, nodes, and attempts",
+            "/api/research-runs/{id}/pause": "POST - Cooperatively pause a research run",
+            "/api/research-runs/{id}/resume": "POST - Resume a paused research run",
+            "/api/research-runs/{id}/cancel": "POST - Cancel a research run and downstream scheduling",
+            "/api/research-runs/{id}/evidence": "GET - Read the shaped evidence payload",
+            "/api/research-runs/{id}/report": "GET - Read the shaped final report payload",
+            "/api/payments/{payment_id}": "GET - Inspect payment detail and notification summary",
+            "/api/payments/{payment_id}/events": "GET - Inspect payment transitions, notifications, and A2A events",
+            "/api/payments/reconcile": "POST - Reconcile payment state against terminal notifications",
+            "/api/agents/{agent_id}/payment-profile/verify": "POST - Verify a payee payment profile",
             "/health": "GET - Health check",
             "/api/tasks/{task_id}": "GET - Poll task status and progress",
             "/api/tasks/history": "GET - Retrieve task history with payments",

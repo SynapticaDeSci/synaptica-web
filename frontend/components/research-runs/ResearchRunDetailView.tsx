@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import {
+  Activity,
   AlertTriangle,
   Clock3,
   Coins,
@@ -9,7 +10,10 @@ import {
   ChevronDown,
   ExternalLink,
   Loader2,
+  Pause,
+  Play,
   RefreshCw,
+  Slash,
   ShieldCheck,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -21,13 +25,24 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   approveVerification,
+  cancelResearchRun,
   getResearchRun,
+  getResearchRunEvidence,
+  getResearchRunReport,
+  getPayment,
+  getPaymentEvents,
   getTask,
+  pauseResearchRun,
   type ResearchClaim,
   type ResearchCriticFinding,
   rejectVerification,
+  resumeResearchRun,
+  type PaymentDetailResponse,
+  type PaymentEventsResponse,
+  type ResearchRunEvidenceResponse,
   type ResearchRunNodeResponse,
   type ResearchRunNodeStatus,
+  type ResearchRunReportResponse,
   type ResearchRunResponse,
   type ResearchQualitySummary,
   type ResearchSourceCard,
@@ -36,7 +51,7 @@ import { cn } from '@/lib/utils'
 
 import { ResearchRunStatusBadge } from './ResearchRunStatusBadge'
 
-const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed'])
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled'])
 
 function formatDateTime(value?: string | null) {
   if (!value) return 'Not yet'
@@ -231,6 +246,7 @@ function pickFocusNode(nodes: ResearchRunNodeResponse[]) {
     'waiting_for_review',
     'running',
     'failed',
+    'cancelled',
     'blocked',
     'pending',
     'completed',
@@ -343,14 +359,20 @@ function JsonPreview({
   )
 }
 
-function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
+function SourceCards({
+  sources,
+  title = 'Linked sources',
+}: {
+  sources: ResearchSourceCard[]
+  title?: string
+}) {
   if (sources.length === 0) {
     return null
   }
 
   return (
     <div className="space-y-3">
-      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Linked sources</p>
+      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">{title}</p>
       <div className="space-y-3">
         {sources.map((source) => (
           <a
@@ -407,6 +429,125 @@ function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
           </a>
         ))}
       </div>
+    </div>
+  )
+}
+
+function PaymentActivityPanel({
+  payment,
+  paymentEvents,
+}: {
+  payment?: PaymentDetailResponse
+  paymentEvents?: PaymentEventsResponse
+}) {
+  if (!payment) {
+    return null
+  }
+
+  const notifications = paymentEvents?.notifications ?? []
+  const transitions = paymentEvents?.state_transitions ?? []
+  const reconciliations = paymentEvents?.reconciliations ?? []
+
+  return (
+    <div className="space-y-4 rounded-2xl border border-white/10 bg-white/5 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
+            Payment activity
+          </p>
+          <p className="mt-1 text-sm text-slate-300">
+            Track the payment state, profile verification, and payer/payee delivery.
+          </p>
+        </div>
+        <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100">
+          {payment.status}
+        </span>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400">Transaction</p>
+          <p className="mt-2 break-all text-sm text-slate-200">{payment.transaction_id || 'Pending'}</p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400">Mode</p>
+          <p className="mt-2 text-sm capitalize text-slate-200">
+            {payment.payment_mode || 'Not recorded'}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400">Payee profile</p>
+          <p className="mt-2 text-sm text-slate-200">
+            {payment.payment_profile?.status || 'Not recorded'}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+          <p className="text-[11px] uppercase tracking-[0.25em] text-slate-400">Notifications</p>
+          <p className="mt-2 text-sm text-slate-200">
+            {notifications.length} delivered
+            {typeof payment.notification_summary?.reconciliations === 'number'
+              ? ` • ${payment.notification_summary.reconciliations} reconciliations`
+              : ''}
+          </p>
+        </div>
+      </div>
+
+      {payment.verification_notes && (
+        <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 p-3 text-sm text-emerald-50">
+          {payment.verification_notes}
+        </div>
+      )}
+
+      {payment.rejection_reason && (
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-100">
+          {payment.rejection_reason}
+        </div>
+      )}
+
+      {(transitions.length > 0 || notifications.length > 0 || reconciliations.length > 0) && (
+        <div className="space-y-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+            Delivery timeline
+          </p>
+          <div className="space-y-2">
+            {transitions.map((transition) => (
+              <div
+                key={`transition-${transition.id ?? transition.idempotency_key ?? transition.action}`}
+                className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm text-slate-200"
+              >
+                <p className="font-medium text-white">
+                  {transition.action} • {transition.state}
+                </p>
+                <p className="mt-1 text-xs text-slate-400">{formatDateTime(transition.created_at)}</p>
+              </div>
+            ))}
+            {notifications.map((notification) => (
+              <div
+                key={`notification-${notification.id ?? notification.message_id}`}
+                className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm text-slate-200"
+              >
+                <p className="font-medium text-white">
+                  {notification.notification_type} → {notification.recipient_role}
+                </p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {formatDateTime(notification.delivered_at)} • {notification.status}
+                </p>
+              </div>
+            ))}
+            {reconciliations.map((reconciliation) => (
+              <div
+                key={`reconciliation-${reconciliation.id ?? reconciliation.created_at}`}
+                className="rounded-2xl border border-white/10 bg-slate-950/60 p-3 text-sm text-slate-200"
+              >
+                <p className="font-medium text-white">Reconciliation • {reconciliation.status}</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {formatDateTime(reconciliation.created_at)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -630,6 +771,8 @@ const markdownComponents: Components = {
 export function ResearchRunDetailView({ researchRunId }: { researchRunId: string }) {
   const queryClient = useQueryClient()
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null)
+  const [controlAction, setControlAction] = useState<'pause' | 'resume' | 'cancel' | null>(null)
+  const [controlError, setControlError] = useState<string | null>(null)
 
   const researchRunQuery = useQuery({
     queryKey: ['research-run', researchRunId],
@@ -637,6 +780,28 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     retry: false,
     refetchInterval: (query) => {
       const status = query.state.data?.status
+      return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
+    },
+    refetchIntervalInBackground: true,
+  })
+
+  const evidenceQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'evidence'],
+    queryFn: () => getResearchRunEvidence(researchRunId),
+    retry: false,
+    refetchInterval: () => {
+      const status = queryClient.getQueryData<ResearchRunResponse>(['research-run', researchRunId])?.status
+      return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
+    },
+    refetchIntervalInBackground: true,
+  })
+
+  const reportQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'report'],
+    queryFn: () => getResearchRunReport(researchRunId),
+    retry: false,
+    refetchInterval: () => {
+      const status = queryClient.getQueryData<ResearchRunResponse>(['research-run', researchRunId])?.status
       return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
     },
     refetchIntervalInBackground: true,
@@ -666,9 +831,9 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     const activeNode = orderedNodes.find((node) => node.node_id === activeNodeId)
     if (
       activeNode &&
-      ['completed', 'pending', 'blocked'].includes(activeNode.status) &&
+      ['completed', 'pending', 'blocked', 'cancelled'].includes(activeNode.status) &&
       focusedNode &&
-      ['waiting_for_review', 'running', 'failed'].includes(focusedNode.status)
+      ['waiting_for_review', 'running', 'failed', 'cancelled'].includes(focusedNode.status)
     ) {
       setActiveNodeId(focusedNode.node_id)
     }
@@ -690,10 +855,30 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     refetchInterval: researchRunQuery.data?.status === 'waiting_for_review' ? 2000 : false,
   })
 
+  const selectedPaymentId = selectedNode?.payment_id ?? null
+  const paymentDetailQuery = useQuery({
+    queryKey: ['payment', selectedPaymentId],
+    queryFn: () => getPayment(selectedPaymentId as string),
+    enabled: Boolean(selectedPaymentId),
+    retry: false,
+    refetchInterval: researchRunQuery.data?.status && TERMINAL_RUN_STATUSES.has(researchRunQuery.data.status) ? false : 2000,
+    refetchIntervalInBackground: true,
+  })
+  const paymentEventsQuery = useQuery({
+    queryKey: ['payment', selectedPaymentId, 'events'],
+    queryFn: () => getPaymentEvents(selectedPaymentId as string),
+    enabled: Boolean(selectedPaymentId),
+    retry: false,
+    refetchInterval: researchRunQuery.data?.status && TERMINAL_RUN_STATUSES.has(researchRunQuery.data.status) ? false : 2000,
+    refetchIntervalInBackground: true,
+  })
+
   const handleApproveReview = async (taskId: string) => {
     await approveVerification(taskId)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
     ])
   }
@@ -702,8 +887,45 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     await rejectVerification(taskId, reason)
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
     ])
+  }
+
+  const handleRunControl = async (action: 'pause' | 'resume' | 'cancel') => {
+    setControlAction(action)
+    setControlError(null)
+    try {
+      if (action === 'pause') {
+        await pauseResearchRun(researchRunId)
+      } else if (action === 'resume') {
+        await resumeResearchRun(researchRunId)
+      } else {
+        await cancelResearchRun(researchRunId)
+      }
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
+        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
+        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
+        waitingTaskId
+          ? queryClient.invalidateQueries({ queryKey: ['task', waitingTaskId] })
+          : Promise.resolve(),
+        selectedPaymentId
+          ? queryClient.invalidateQueries({ queryKey: ['payment', selectedPaymentId] })
+          : Promise.resolve(),
+        selectedPaymentId
+          ? queryClient.invalidateQueries({ queryKey: ['payment', selectedPaymentId, 'events'] })
+          : Promise.resolve(),
+      ])
+    } catch (error) {
+      setControlError(
+        error instanceof Error ? error.message : 'Unable to update the research run right now.',
+      )
+    } finally {
+      setControlAction(null)
+    }
   }
 
   if (researchRunQuery.isLoading) {
@@ -751,26 +973,48 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   }
 
   const researchRun = researchRunQuery.data
-  const reportPayload = getRunPayload(researchRun)
-  const headline = getRunHeadline(researchRun)
-  const claims = getRunClaims(researchRun)
-  const runSources = getRunSources(researchRun)
-  const criticFindings = getCriticFindings(researchRun)
-  const qualitySummary = getRunQualitySummary(researchRun)
+  const fallbackRunPayload = getRunPayload(researchRun)
+  const reportData: ResearchRunReportResponse | null = reportQuery.data ?? null
+  const reportPayload: Record<string, any> | null =
+    reportData && typeof reportData === 'object'
+      ? (reportData as unknown as Record<string, any>)
+      : fallbackRunPayload
+  const evidencePayload: ResearchRunEvidenceResponse | null = evidenceQuery.data ?? null
+  const claimTargets = Array.isArray(evidencePayload?.claim_targets) ? evidencePayload.claim_targets : []
+  const headline =
+    typeof reportPayload?.answer_markdown === 'string'
+      ? reportPayload.answer_markdown
+      : typeof reportPayload?.answer === 'string'
+        ? reportPayload.answer
+        : getRunHeadline(researchRun)
+  const claims = Array.isArray(reportPayload?.claims)
+    ? (reportPayload.claims as ResearchClaim[])
+    : getRunClaims(researchRun)
+  const runSources = evidencePayload?.sources?.length
+    ? evidencePayload.sources
+    : getRunSources(researchRun)
+  const filteredSources = evidencePayload?.filtered_sources ?? []
+  const criticFindings = Array.isArray(reportPayload?.critic_findings)
+    ? (reportPayload.critic_findings as ResearchCriticFinding[])
+    : getCriticFindings(researchRun)
+  const qualitySummary =
+    reportPayload && typeof reportPayload.quality_summary === 'object'
+      ? (reportPayload.quality_summary as ResearchQualitySummary)
+      : getRunQualitySummary(researchRun)
   const citations = Array.isArray(reportPayload?.citations)
-    ? (reportPayload?.citations as ResearchSourceCard[])
+    ? (reportPayload.citations as ResearchSourceCard[])
     : []
   const limitations = Array.isArray(reportPayload?.limitations)
     ? reportPayload?.limitations.filter((item): item is string => typeof item === 'string')
     : []
-  const freshnessSummary =
-    reportPayload && typeof reportPayload.freshness_summary === 'object'
+  const freshnessSummary = evidencePayload?.freshness_summary ??
+    (reportPayload && typeof reportPayload.freshness_summary === 'object'
       ? (reportPayload.freshness_summary as Record<string, any>)
-      : null
-  const sourceSummary =
-    reportPayload && typeof reportPayload.source_summary === 'object'
+      : null)
+  const sourceSummary = evidencePayload?.source_summary ??
+    (reportPayload && typeof reportPayload.source_summary === 'object'
       ? (reportPayload.source_summary as Record<string, any>)
-      : null
+      : null)
   const citedSources = dedupeSources([
     ...citations,
     ...runSources.filter((source) => Boolean(getCitationId(source))),
@@ -802,6 +1046,9 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const selectedNodeAttempts = [...(selectedNode?.attempts ?? [])].sort(
     (left, right) => right.attempt_number - left.attempt_number,
   )
+  const canPause = researchRun.status === 'running'
+  const canResume = researchRun.status === 'paused'
+  const canCancel = !TERMINAL_RUN_STATUSES.has(researchRun.status)
 
   return (
     <div className="space-y-6">
@@ -864,11 +1111,67 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                     {researchRun.description}
                   </CardDescription>
                 </div>
-                <ResearchRunStatusBadge status={researchRun.status} />
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <ResearchRunStatusBadge status={researchRun.status} />
+                  {canPause && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={controlAction !== null}
+                      onClick={() => handleRunControl('pause')}
+                      className="border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+                    >
+                      {controlAction === 'pause' ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Pause className="mr-2 h-4 w-4" />
+                      )}
+                      Pause
+                    </Button>
+                  )}
+                  {canResume && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={controlAction !== null}
+                      onClick={() => handleRunControl('resume')}
+                      className="border-emerald-400/20 bg-emerald-400/10 text-emerald-100 hover:bg-emerald-400/20 hover:text-emerald-50"
+                    >
+                      {controlAction === 'resume' ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Play className="mr-2 h-4 w-4" />
+                      )}
+                      Resume
+                    </Button>
+                  )}
+                  {canCancel && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={controlAction !== null}
+                      onClick={() => handleRunControl('cancel')}
+                      className="border-rose-500/30 bg-rose-500/10 text-rose-100 hover:bg-rose-500/20 hover:text-rose-50"
+                    >
+                      {controlAction === 'cancel' ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Slash className="mr-2 h-4 w-4" />
+                      )}
+                      Cancel
+                    </Button>
+                  )}
+                </div>
               </div>
             </CardHeader>
 
             <CardContent className="space-y-6">
+              {controlError && (
+                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
+                  {controlError}
+                </div>
+              )}
+
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Budget</p>
@@ -958,6 +1261,69 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                   )}
                 </div>
               </div>
+
+              {(evidencePayload?.rewritten_research_brief ||
+                claimTargets.length > 0 ||
+                (evidencePayload?.search_lanes_used?.length ?? 0) > 0) && (
+                <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-4">
+                  <div className="flex items-center gap-2 text-cyan-100">
+                    <Activity className="h-4 w-4" />
+                    <p className="text-sm font-semibold uppercase tracking-[0.3em]">Evidence view</p>
+                  </div>
+
+                  {evidencePayload?.rewritten_research_brief && (
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-cyan-200/80">
+                        Rewritten brief
+                      </p>
+                      <div className="mt-2">
+                        <ExpandableText
+                          content={evidencePayload.rewritten_research_brief}
+                          collapsedHeight="max-h-24"
+                          buttonLabel="Expand brief"
+                          className="text-cyan-50"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs text-cyan-50">
+                    {(evidencePayload?.search_lanes_used ?? []).map((lane) => (
+                      <span
+                        key={lane}
+                        className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-1"
+                      >
+                        {formatMode(lane)}
+                      </span>
+                    ))}
+                    {claimTargets.length > 0 && (
+                      <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-1">
+                        Claim targets: {claimTargets.length}
+                      </span>
+                    )}
+                  </div>
+
+                  {claimTargets.length > 0 && (
+                    <div className="mt-4 grid gap-2 md:grid-cols-2">
+                      {claimTargets.map((target, index) => (
+                        <div
+                          key={`${String(target.claim_id ?? target.claim_target ?? index)}`}
+                          className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm text-cyan-50"
+                        >
+                          <p className="font-medium text-white">
+                            {String(target.claim_target ?? target.claim ?? 'Claim target')}
+                          </p>
+                          <p className="mt-2 text-[11px] uppercase tracking-[0.2em] text-cyan-100/70">
+                            {[target.claim_id, target.priority, target.lane]
+                              .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                              .join(' • ') || 'Target'}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {researchRun.error?.includes('insufficient_fresh_evidence') && (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
@@ -1080,9 +1446,12 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
               )}
 
               <SourceCards sources={runSources} />
+              <SourceCards sources={filteredSources} title="Filtered or downranked sources" />
 
               <div className="space-y-3">
                 <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">Debug payloads</p>
+                <DebugSection title="Research run evidence" value={evidenceQuery.data} />
+                <DebugSection title="Research run report" value={reportQuery.data} />
                 <DebugSection title="Research run result" value={researchRun.result} />
               </div>
             </CardContent>
@@ -1289,6 +1658,27 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       sources={(selectedNode.result as Record<string, any>).sources as ResearchSourceCard[]}
                     />
                   )}
+
+                {selectedPaymentId && (
+                  <>
+                    {paymentDetailQuery.isLoading && (
+                      <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-5 text-sm text-slate-300">
+                        Loading payment activity…
+                      </div>
+                    )}
+                    {paymentDetailQuery.data && (
+                      <PaymentActivityPanel
+                        payment={paymentDetailQuery.data}
+                        paymentEvents={paymentEventsQuery.data}
+                      />
+                    )}
+                    {(paymentDetailQuery.isError || paymentEventsQuery.isError) && (
+                      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+                        Payment activity could not be loaded for this node.
+                      </div>
+                    )}
+                  </>
+                )}
 
                 <div className="space-y-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">

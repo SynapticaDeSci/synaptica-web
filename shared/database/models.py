@@ -28,6 +28,7 @@ class TaskStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class PaymentStatus(str, enum.Enum):
@@ -66,8 +67,10 @@ class ResearchRunStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     WAITING_FOR_REVIEW = "waiting_for_review"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ResearchRunNodeStatus(str, enum.Enum):
@@ -79,6 +82,7 @@ class ResearchRunNodeStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    CANCELLED = "cancelled"
 
 
 class Task(Base):
@@ -159,6 +163,16 @@ class Payment(Base):
         back_populates="payment",
         cascade="all, delete-orphan",
     )
+    notifications = relationship(
+        "PaymentNotification",
+        back_populates="payment",
+        cascade="all, delete-orphan",
+    )
+    reconciliations = relationship(
+        "PaymentReconciliation",
+        back_populates="payment",
+        cascade="all, delete-orphan",
+    )
 
 
 class PaymentStateTransition(Base):
@@ -192,6 +206,72 @@ class PaymentStateTransition(Base):
 
     payment = relationship("Payment", back_populates="state_transitions")
     task = relationship("Task")
+
+
+class AgentPaymentProfile(Base):
+    """Verified payment profile for a marketplace agent."""
+
+    __tablename__ = "agent_payment_profiles"
+    __table_args__ = (UniqueConstraint("agent_id", name="uq_agent_payment_profiles_agent_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    hedera_account_id = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    verification_method = Column(String, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    agent = relationship("Agent", foreign_keys=[agent_id])
+
+
+class PaymentNotification(Base):
+    """Persisted terminal payment notifications for payer/payee delivery."""
+
+    __tablename__ = "payment_notifications"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_payment_notifications_message_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    message_id = Column(String, nullable=False)
+    notification_type = Column(String, nullable=False)
+    recipient_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    recipient_role = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="delivered")
+    thread_id = Column(String, nullable=False)
+    delivered_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    payment = relationship("Payment", back_populates="notifications")
+    task = relationship("Task", foreign_keys=[task_id])
+    recipient_agent = relationship("Agent", foreign_keys=[recipient_agent_id])
+
+
+class PaymentReconciliation(Base):
+    """Persisted reconciliation result between payment state and emitted notifications."""
+
+    __tablename__ = "payment_reconciliations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    status = Column(String, nullable=False)
+    mismatch_count = Column(Integer, default=0)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    meta = Column(JSON, nullable=True)
+
+    payment = relationship("Payment", back_populates="reconciliations")
+    task = relationship("Task", foreign_keys=[task_id])
 
 
 class DynamicTool(Base):

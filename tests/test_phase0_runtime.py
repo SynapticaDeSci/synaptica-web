@@ -15,10 +15,13 @@ from shared.runtime import PaymentAction, PaymentActionContext
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
+    AgentPaymentProfile,
     AgentReputation,
     AgentsCacheEntry,
     ExecutionAttempt,
     Payment,
+    PaymentNotification,
+    PaymentReconciliation,
     PaymentStateTransition,
     ResearchRun,
     ResearchRunEdge,
@@ -37,10 +40,13 @@ def _reset_runtime_state():
         session.query(ResearchRunEdge).delete()
         session.query(ResearchRunNode).delete()
         session.query(ResearchRun).delete()
+        session.query(PaymentReconciliation).delete()
+        session.query(PaymentNotification).delete()
         session.query(PaymentStateTransition).delete()
         session.query(A2AEvent).delete()
         session.query(Payment).delete()
         session.query(Task).delete()
+        session.query(AgentPaymentProfile).delete()
         session.query(AgentsCacheEntry).delete()
         session.query(AgentReputation).delete()
         session.query(AgentModel).delete()
@@ -149,10 +155,127 @@ def test_execute_happy_path_offline_persists_payments_and_events(client: TestCli
         )
         assert len(transitions) == 9
 
+        notifications = (
+            session.query(PaymentNotification)
+            .join(Payment, PaymentNotification.payment_id == Payment.id)
+            .filter(Payment.task_id == task_id)
+            .all()
+        )
+        assert len(notifications) == 6
+        assert {item.recipient_role for item in notifications} == {"payer", "payee"}
+
         events = session.query(A2AEvent).all()
-        assert len(events) == 9
+        assert len(events) == 12
     finally:
         session.close()
+
+
+def test_payment_routes_expose_notifications_and_reconciliation(client: TestClient):
+    response = client.post(
+        "/execute",
+        json={
+            "description": "Review literature on autonomous agent payments in DeSci.",
+            "verification_mode": "standard",
+            "budget_limit": 25.0,
+        },
+    )
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+
+    session = SessionLocal()
+    try:
+        payment = (
+            session.query(Payment)
+            .filter(Payment.task_id == task_id)
+            .order_by(Payment.created_at.asc())
+            .first()
+        )
+        assert payment is not None
+        payment_id = payment.id
+        notification = (
+            session.query(PaymentNotification)
+            .filter(PaymentNotification.payment_id == payment_id)
+            .order_by(PaymentNotification.id.asc())
+            .first()
+        )
+        assert notification is not None
+        deleted_message_id = notification.message_id
+        session.delete(notification)
+        session.commit()
+    finally:
+        session.close()
+
+    detail_response = client.get(f"/api/payments/{payment_id}")
+    assert detail_response.status_code == 200
+    detail_payload = detail_response.json()
+    assert detail_payload["payment_profile"]["status"] == "verified"
+    assert detail_payload["notification_summary"]["count"] == 1
+
+    events_response = client.get(f"/api/payments/{payment_id}/events")
+    assert events_response.status_code == 200
+    events_payload = events_response.json()
+    assert len(events_payload["state_transitions"]) == 3
+    assert len(events_payload["notifications"]) == 1
+    assert len(events_payload["a2a_events"]) >= 4
+
+    reconcile_response = client.post("/api/payments/reconcile", json={"payment_id": payment_id})
+    assert reconcile_response.status_code == 200
+    reconciliation = reconcile_response.json()["reconciliations"][0]
+    assert reconciliation["status"] == "repaired"
+    assert reconciliation["details"]["repaired_notifications"]
+
+    repaired_events = client.get(f"/api/payments/{payment_id}/events")
+    assert repaired_events.status_code == 200
+    assert len(repaired_events.json()["notifications"]) == 2
+
+
+def test_execute_requires_verified_payment_profile(client: TestClient):
+    session = SessionLocal()
+    try:
+        profile = (
+            session.query(AgentPaymentProfile)
+            .filter(AgentPaymentProfile.agent_id == "problem-framer-001")
+            .one_or_none()
+        )
+        assert profile is not None
+        session.delete(profile)
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.post(
+        "/execute",
+        json={
+            "description": "Review literature on autonomous agent payments in DeSci.",
+            "verification_mode": "standard",
+            "budget_limit": 25.0,
+        },
+    )
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+
+    status = client.get(f"/api/tasks/{task_id}")
+    assert status.status_code == 200
+    payload = status.json()
+    assert payload["status"] == "failed"
+    assert "missing a verified payment profile" in payload["error"]
+
+
+def test_verify_payment_profile_endpoint_persists_failures_and_success(client: TestClient):
+    mismatch = client.post(
+        "/api/agents/problem-framer-001/payment-profile/verify",
+        json={"hedera_account_id": "0.0.9999"},
+    )
+    assert mismatch.status_code == 200
+    mismatch_payload = mismatch.json()
+    assert mismatch_payload["success"] is False
+    assert mismatch_payload["status"] == "failed"
+
+    verified = client.post("/api/agents/problem-framer-001/payment-profile/verify", json={})
+    assert verified.status_code == 200
+    verified_payload = verified.json()
+    assert verified_payload["success"] is True
+    assert verified_payload["status"] == "verified"
 
 
 @pytest.mark.asyncio

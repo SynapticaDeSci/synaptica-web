@@ -21,6 +21,7 @@ from .task_state import (
     load_task_snapshot,
     persist_handoff_context,
     persist_runtime_error,
+    persist_runtime_status,
     persist_verification_state,
 )
 
@@ -45,6 +46,6 @@ __all__ = [
     "load_task_snapshot",
     "persist_handoff_context",
     "persist_runtime_error",
+    "persist_runtime_status",
     "persist_verification_state",
 ]
-

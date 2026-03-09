@@ -8,7 +8,16 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
-from shared.research_runs import ResearchRunExecutor, create_research_run, get_research_run_payload
+from shared.research_runs import (
+    ResearchRunExecutor,
+    create_research_run,
+    get_research_run_evidence_payload,
+    get_research_run_payload,
+    get_research_run_report_payload,
+    request_cancel_research_run,
+    request_pause_research_run,
+    request_resume_research_run,
+)
 
 router = APIRouter()
 _running_jobs: Dict[str, asyncio.Task[None]] = {}
@@ -86,6 +95,36 @@ class ResearchRunResponse(BaseModel):
     edges: List[ResearchRunEdgeResponse]
 
 
+class ResearchRunEvidenceResponse(BaseModel):
+    """Shaped evidence payload for a research run."""
+
+    research_run_id: str
+    status: str
+    claim_targets: List[Dict[str, Any]] = Field(default_factory=list)
+    rewritten_research_brief: Optional[str] = None
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    filtered_sources: List[Dict[str, Any]] = Field(default_factory=list)
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    coverage_summary: Dict[str, Any] = Field(default_factory=dict)
+    source_summary: Dict[str, Any] = Field(default_factory=dict)
+    freshness_summary: Dict[str, Any] = Field(default_factory=dict)
+    search_lanes_used: List[str] = Field(default_factory=list)
+
+
+class ResearchRunReportResponse(BaseModel):
+    """Shaped final report payload for a research run."""
+
+    research_run_id: str
+    status: str
+    answer_markdown: Optional[str] = None
+    answer: Optional[str] = None
+    claims: List[Dict[str, Any]] = Field(default_factory=list)
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    limitations: List[Any] = Field(default_factory=list)
+    critic_findings: List[Dict[str, Any]] = Field(default_factory=list)
+    quality_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ResearchRunCreateRequest(BaseModel):
     """Payload for creating a research run."""
 
@@ -104,6 +143,14 @@ async def _run_research_run_job(research_run_id: str) -> None:
         _running_jobs.pop(research_run_id, None)
 
 
+def _ensure_research_run_job(research_run_id: str) -> None:
+    existing = _running_jobs.get(research_run_id)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(_run_research_run_job(research_run_id))
+    _running_jobs[research_run_id] = task
+
+
 @router.post("", response_model=ResearchRunResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_research_run_route(request: ResearchRunCreateRequest) -> ResearchRunResponse:
     """Create and immediately start a research run."""
@@ -115,8 +162,7 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
         research_mode=request.research_mode,
         depth_mode=request.depth_mode,
     )
-    task = asyncio.create_task(_run_research_run_job(research_run_id))
-    _running_jobs[research_run_id] = task
+    _ensure_research_run_job(research_run_id)
 
     payload = get_research_run_payload(research_run_id)
     if payload is None:
@@ -135,3 +181,55 @@ async def get_research_run_route(research_run_id: str) -> ResearchRunResponse:
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
     return ResearchRunResponse.model_validate(payload)
+
+
+@router.post("/{research_run_id}/pause", response_model=ResearchRunResponse)
+async def pause_research_run_route(research_run_id: str) -> ResearchRunResponse:
+    """Request a cooperative pause for a running research run."""
+
+    payload = request_pause_research_run(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunResponse.model_validate(payload)
+
+
+@router.post("/{research_run_id}/resume", response_model=ResearchRunResponse)
+async def resume_research_run_route(research_run_id: str) -> ResearchRunResponse:
+    """Resume a paused research run and restart its executor if needed."""
+
+    payload = request_resume_research_run(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    _ensure_research_run_job(research_run_id)
+    refreshed_payload = get_research_run_payload(research_run_id) or payload
+    return ResearchRunResponse.model_validate(refreshed_payload)
+
+
+@router.post("/{research_run_id}/cancel", response_model=ResearchRunResponse)
+async def cancel_research_run_route(research_run_id: str) -> ResearchRunResponse:
+    """Cancel a research run cooperatively and stop downstream scheduling."""
+
+    payload = request_cancel_research_run(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunResponse.model_validate(payload)
+
+
+@router.get("/{research_run_id}/evidence", response_model=ResearchRunEvidenceResponse)
+async def get_research_run_evidence_route(research_run_id: str) -> ResearchRunEvidenceResponse:
+    """Return the shaped evidence view for a research run."""
+
+    payload = get_research_run_evidence_payload(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunEvidenceResponse.model_validate(payload)
+
+
+@router.get("/{research_run_id}/report", response_model=ResearchRunReportResponse)
+async def get_research_run_report_route(research_run_id: str) -> ResearchRunReportResponse:
+    """Return the shaped final report view for a research run."""
+
+    payload = get_research_run_report_payload(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunReportResponse.model_validate(payload)

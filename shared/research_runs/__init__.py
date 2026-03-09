@@ -12,7 +12,16 @@ from .planner import (
     build_research_run_profile,
     build_research_run_plan,
 )
-from .service import ResearchRunExecutor, create_research_run, get_research_run_payload
+from .service import (
+    ResearchRunExecutor,
+    create_research_run,
+    get_research_run_evidence_payload,
+    get_research_run_payload,
+    get_research_run_report_payload,
+    request_cancel_research_run,
+    request_pause_research_run,
+    request_resume_research_run,
+)
 
 __all__ = [
     "SUPPORTED_RESEARCH_RUN_WORKFLOW",
@@ -27,5 +36,10 @@ __all__ = [
     "ResearchRunExecutor",
     "build_research_run_plan",
     "create_research_run",
+    "request_pause_research_run",
+    "request_resume_research_run",
+    "request_cancel_research_run",
     "get_research_run_payload",
+    "get_research_run_evidence_payload",
+    "get_research_run_report_payload",
 ]

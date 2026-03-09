@@ -32,6 +32,7 @@ from shared.metadata import (
     build_agent_metadata_payload,
     publish_agent_metadata,
 )
+from shared.payments.runtime import verify_agent_payment_profile
 from shared.registry import (
     AgentRegistryConfigError,
     AgentRegistryRegistrationError,
@@ -186,6 +187,25 @@ class AgentSubmissionResponse(AgentResponse):
     message: str
 
 
+class PaymentProfileVerifyRequest(BaseModel):
+    """Optional override payload for verifying a payment profile."""
+
+    hedera_account_id: Optional[str] = None
+
+
+class PaymentProfileVerifyResponse(BaseModel):
+    """Serialized payment profile verification result."""
+
+    success: bool
+    agent_id: str
+    hedera_account_id: str
+    status: str
+    verification_method: Optional[str] = None
+    verified_at: Optional[str] = None
+    last_error: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 def _require_admin_token(provided: Optional[str]) -> None:
     """Enforce optional admin header."""
     required = os.getenv("AGENT_SUBMIT_ADMIN_TOKEN")
@@ -196,6 +216,24 @@ def _require_admin_token(provided: Optional[str]) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing admin token",
         )
+
+
+@router.post("/{agent_id}/payment-profile/verify", response_model=PaymentProfileVerifyResponse)
+async def verify_payment_profile_route(
+    agent_id: str,
+    request: PaymentProfileVerifyRequest,
+) -> PaymentProfileVerifyResponse:
+    """Verify and persist an agent payment profile against the registered account."""
+
+    try:
+        payload = verify_agent_payment_profile(
+            agent_id=agent_id,
+            hedera_account_id=request.hedera_account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    return PaymentProfileVerifyResponse.model_validate(payload)
 
 
 def _set_registry_status(

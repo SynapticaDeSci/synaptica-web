@@ -15,10 +15,13 @@ from agents.orchestrator.tools.agent_tools import _evaluate_research_quality_con
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
+    AgentPaymentProfile,
     AgentReputation,
     AgentsCacheEntry,
     ExecutionAttempt,
     Payment,
+    PaymentNotification,
+    PaymentReconciliation,
     PaymentStateTransition,
     ResearchRun,
     ResearchRunEdge,
@@ -45,10 +48,13 @@ def _reset_runtime_state():
         session.query(ResearchRunEdge).delete()
         session.query(ResearchRunNode).delete()
         session.query(ResearchRun).delete()
+        session.query(PaymentReconciliation).delete()
+        session.query(PaymentNotification).delete()
         session.query(PaymentStateTransition).delete()
         session.query(A2AEvent).delete()
         session.query(Payment).delete()
         session.query(Task).delete()
+        session.query(AgentPaymentProfile).delete()
         session.query(AgentsCacheEntry).delete()
         session.query(AgentReputation).delete()
         session.query(AgentModel).delete()
@@ -667,6 +673,9 @@ def test_alembic_upgrade_preserves_phase0_data(tmp_path, monkeypatch):
     assert "research_run_nodes" in inspector.get_table_names()
     assert "research_run_edges" in inspector.get_table_names()
     assert "execution_attempts" in inspector.get_table_names()
+    assert "agent_payment_profiles" in inspector.get_table_names()
+    assert "payment_notifications" in inspector.get_table_names()
+    assert "payment_reconciliations" in inspector.get_table_names()
 
     with engine.connect() as conn:
         task_row = conn.execute(
@@ -721,6 +730,170 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     assert all(node["status"] == "completed" for node in completed["nodes"])
     assert all(node["task_id"] for node in completed["nodes"])
     assert all(node["payment_id"] for node in completed["nodes"])
+
+
+def test_research_run_evidence_and_report_routes(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+    assert completed["status"] == "completed"
+
+    evidence_response = client.get(f"/api/research-runs/{research_run_id}/evidence")
+    assert evidence_response.status_code == 200
+    evidence_payload = evidence_response.json()
+    assert evidence_payload["rewritten_research_brief"].startswith("Investigate:")
+    assert len(evidence_payload["sources"]) >= 6
+    assert len(evidence_payload["citations"]) >= 2
+    assert evidence_payload["coverage_summary"]["ready_for_synthesis"] is True
+
+    report_response = client.get(f"/api/research-runs/{research_run_id}/report")
+    assert report_response.status_code == 200
+    report_payload = report_response.json()
+    assert report_payload["answer_markdown"].startswith("## Summary")
+    assert len(report_payload["claims"]) >= 3
+    assert len(report_payload["critic_findings"]) >= 1
+    assert report_payload["quality_summary"]["citation_coverage"] == 1.0
+
+
+def test_research_run_pause_and_resume(client: TestClient, monkeypatch):
+    original_post_agent_request = research_api_executor._post_agent_request
+    gate = asyncio.Event()
+
+    async def _slow_first_node(endpoint, payload):
+        context = payload.get("context") or {}
+        if context.get("node_strategy") == "plan_query":
+            await gate.wait()
+        return await original_post_agent_request(endpoint, payload)
+
+    monkeypatch.setattr(research_api_executor, "_post_agent_request", _slow_first_node)
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    running = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: any(node["status"] == "running" for node in item["nodes"]),
+    )
+    assert running["status"] == "running"
+
+    pause_response = client.post(f"/api/research-runs/{research_run_id}/pause")
+    assert pause_response.status_code == 200
+    paused_request = pause_response.json()
+    assert paused_request["status"] in {"running", "paused"}
+
+    gate.set()
+
+    paused = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "paused",
+        timeout=10.0,
+    )
+    paused_statuses = {node["node_id"]: node["status"] for node in paused["nodes"]}
+    assert paused_statuses["plan_query"] == "completed"
+    assert paused_statuses["gather_evidence"] == "pending"
+
+    resume_response = client.post(f"/api/research-runs/{research_run_id}/resume")
+    assert resume_response.status_code == 200
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+        timeout=10.0,
+    )
+    assert completed["status"] == "completed"
+
+
+def test_research_run_cancel_from_waiting_review(client: TestClient, monkeypatch):
+    score_calls = {"knowledge": 0}
+
+    async def _review_required_score(output, phase, agent_role, phase_validation):
+        del output, phase, phase_validation
+        if agent_role == "knowledge-synthesizer-001":
+            score_calls["knowledge"] += 1
+            return {
+                "overall_score": 45,
+                "dimension_scores": {
+                    "completeness": 40,
+                    "correctness": 45,
+                    "academic_rigor": 42,
+                    "clarity": 50,
+                    "innovation": 48,
+                    "ethics": 90,
+                },
+                "feedback": "Needs human review",
+            }
+        return {
+            "overall_score": 88,
+            "dimension_scores": {
+                "completeness": 88,
+                "correctness": 89,
+                "academic_rigor": 86,
+                "clarity": 90,
+                "innovation": 78,
+                "ethics": 92,
+            },
+            "feedback": f"Verified for {agent_role}",
+        }
+
+    async def _fast_wait_for_human_decision(task_id: str, timeout: int = 3600):
+        deadline = time.time() + min(timeout, 5)
+        while time.time() < deadline:
+            snapshot = load_task_snapshot(task_id)
+            if snapshot and snapshot.get("verification_decision"):
+                return snapshot["verification_decision"]
+            await asyncio.sleep(0.01)
+        return {"approved": False, "reason": "Verification timeout"}
+
+    monkeypatch.setattr("agents.orchestrator.tools.agent_tools.calculate_quality_score", _review_required_score)
+    monkeypatch.setattr("agents.orchestrator.tools.agent_tools._wait_for_human_decision", _fast_wait_for_human_decision)
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on reproducible DeSci payment verification."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    waiting = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "waiting_for_review",
+        timeout=10.0,
+    )
+    waiting_node = next(node for node in waiting["nodes"] if node["status"] == "waiting_for_review")
+
+    cancel_response = client.post(f"/api/research-runs/{research_run_id}/cancel")
+    assert cancel_response.status_code == 200
+
+    cancelled = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "cancelled",
+        timeout=10.0,
+    )
+    statuses = {node["node_id"]: node["status"] for node in cancelled["nodes"]}
+    assert statuses["revise_final_answer"] == "cancelled"
+    assert cancelled["error"] == "Cancelled by user"
+
+    waiting_task = client.get(f"/api/tasks/{waiting_node['task_id']}")
+    assert waiting_task.status_code == 200
+    assert waiting_task.json()["status"] == "cancelled"
 
 
 def test_research_run_blocks_downstream_nodes_after_failure(client: TestClient, monkeypatch):

@@ -4,8 +4,10 @@ import {
   CheckCircle2,
   Clock3,
   Loader2,
+  Pause,
   PauseCircle,
   ShieldAlert,
+  Slash,
 } from 'lucide-react'
 
 import type { ResearchRunNodeStatus, ResearchRunStatus } from '@/lib/api'
@@ -36,6 +38,11 @@ const STATUS_META: Record<
     className: 'border-amber-500/40 bg-amber-500/10 text-amber-200',
     icon: PauseCircle,
   },
+  paused: {
+    label: 'Paused',
+    className: 'border-violet-500/40 bg-violet-500/10 text-violet-200',
+    icon: Pause,
+  },
   completed: {
     label: 'Completed',
     className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200',
@@ -50,6 +57,11 @@ const STATUS_META: Record<
     label: 'Blocked',
     className: 'border-orange-500/40 bg-orange-500/10 text-orange-200',
     icon: AlertTriangle,
+  },
+  cancelled: {
+    label: 'Cancelled',
+    className: 'border-rose-500/40 bg-rose-500/10 text-rose-200',
+    icon: Slash,
   },
 }
 
