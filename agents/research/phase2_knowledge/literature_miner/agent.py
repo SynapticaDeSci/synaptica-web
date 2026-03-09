@@ -24,6 +24,7 @@ from shared.research_runs.deep_research import (
     build_source_summary,
     dedupe_sources,
     enrich_source_cards,
+    filter_sources_for_curation,
     normalize_source_card,
     search_web,
     sort_sources,
@@ -188,7 +189,12 @@ class LiteratureMinerAgent(BaseResearchAgent):
         classified_mode = str(context.get("classified_mode") or "literature")
         scenario_requested = bool(context.get("scenario_analysis_requested"))
 
-        curated_sources = sort_sources(dedupe_sources(gathered.get("sources") or []))
+        filtered_payload = filter_sources_for_curation(
+            dedupe_sources(gathered.get("sources") or []),
+            requirements=requirements,
+            classified_mode=classified_mode,
+        )
+        curated_sources = sort_sources(filtered_payload["selected_sources"])
         validation = validate_source_requirements(curated_sources, requirements=requirements)
         source_summary = build_source_summary(curated_sources, requirements=requirements)
         freshness_summary = {
@@ -227,6 +233,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 "source_summary": source_summary,
                 "freshness_summary": freshness_summary,
                 "issues": validation["issues"],
+                "filtered_sources": filtered_payload["filtered_sources"],
                 "rounds_completed": dict(
                     gathered.get("rounds_completed")
                     or {"evidence_rounds": 0, "critique_rounds": 0}

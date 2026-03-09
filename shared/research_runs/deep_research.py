@@ -57,6 +57,21 @@ _NEWS_HINTS = (
     "nytimes.com",
 )
 
+_LOW_SIGNAL_HINTS = (
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "instagram.com",
+    "livestream",
+    "/live/",
+)
+
+_AGGREGATOR_HINTS = (
+    "livemint.com",
+    "ts2.tech",
+    "oedigital.com",
+)
+
 _DATE_META_SELECTORS = (
     ("property", "article:published_time"),
     ("name", "article:published_time"),
@@ -252,17 +267,148 @@ def normalize_source_card(
             item.get("snippet"),
         )
     )
+    snippet = clean_source_snippet(
+        (item.get("content") or item.get("snippet") or item.get("abstract") or "")[:4000]
+    )
+    quality_flags = score_source_quality(
+        {
+            "title": item.get("title"),
+            "url": url,
+            "publisher": publisher,
+            "published_at": published_at,
+            "source_type": source_type,
+            "snippet": snippet,
+        }
+    )
     return {
         "title": (item.get("title") or "Untitled source")[:240],
         "url": url,
         "publisher": publisher,
         "published_at": published_at,
         "source_type": source_type,
-        "snippet": (item.get("content") or item.get("snippet") or item.get("abstract") or "")[:1200],
+        "snippet": snippet[:1200],
+        "display_snippet": snippet[:700],
         "relevance_score": float(item.get("score") or item.get("relevance_score") or 0.0),
+        "quality_flags": quality_flags,
         "scout_role": scout_role,
         "round_number": round_number,
     }
+
+
+def clean_source_snippet(snippet: str | None) -> str:
+    if not snippet:
+        return ""
+
+    text = snippet.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"(?:#{2,}\s*)+", "", text)
+    text = re.sub(r"\b(?:live|video|shows|shop|stream on|stream logo)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:\b[A-Z][A-Za-z]+\s+News\b\s*){2,}", " ", text)
+    text = re.sub(r"(\b[\w'/-]+\b)(?:\s+\1\b){2,}", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*[|>]+\s*", " ", text)
+    text = re.sub(r"\b(?:additional live streams|watch live|click here|read more)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -|")
+
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    cleaned_sentences: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        normalized = re.sub(r"\W+", " ", sentence).strip().lower()
+        if len(normalized) < 20:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned_sentences.append(sentence.strip())
+        if len(" ".join(cleaned_sentences)) >= 700:
+            break
+    return " ".join(cleaned_sentences)[:700].strip()
+
+
+def score_source_quality(source: Dict[str, Any]) -> List[str]:
+    flags: List[str] = []
+    url = str(source.get("url") or "").lower()
+    publisher = str(source.get("publisher") or "").lower()
+    snippet = str(source.get("snippet") or "")
+    source_type = str(source.get("source_type") or "")
+
+    if any(hint in url for hint in _LOW_SIGNAL_HINTS):
+        flags.append("video_only")
+    if any(hint in url or hint in publisher for hint in _AGGREGATOR_HINTS):
+        flags.append("aggregator")
+    if 0 < len(snippet) < 45:
+        flags.append("thin_snippet")
+    if snippet.count("###") >= 2 or re.search(r"\b(?:shows|shop|live updates|stream)\b", snippet, re.IGNORECASE):
+        flags.append("junk_snippet")
+    if source_type == "analysis" and not snippet:
+        flags.append("weak_analysis")
+    return sorted(set(flags))
+
+
+def filter_sources_for_curation(
+    sources: Iterable[Dict[str, Any]],
+    *,
+    requirements: SourceRequirements,
+    classified_mode: str,
+) -> Dict[str, List[Dict[str, Any]]]:
+    source_list = [dict(source) for source in sources]
+    if classified_mode != "live_analysis":
+        return {"selected_sources": source_list, "filtered_sources": []}
+
+    prioritized = sorted(
+        source_list,
+        key=lambda source: (
+            len(source.get("quality_flags") or []),
+            0 if str(source.get("source_type") or "") in {"primary", "academic", "news"} else 1,
+            -float(source.get("relevance_score") or 0.0),
+        ),
+    )
+
+    selected: List[Dict[str, Any]] = []
+    filtered: List[Dict[str, Any]] = []
+    remaining_total = len(prioritized)
+    remaining_fresh = sum(
+        1 for source in prioritized if is_fresh_source(source, requirements.freshness_window_days)
+    )
+
+    for source in prioritized:
+        remaining_total -= 1
+        if is_fresh_source(source, requirements.freshness_window_days):
+            remaining_fresh -= 1
+
+        quality_flags = list(source.get("quality_flags") or [])
+        weak_source = bool(set(quality_flags) & {"video_only", "aggregator", "thin_snippet", "junk_snippet"})
+
+        selected_total = len(selected)
+        selected_fresh = sum(
+            1 for item in selected if is_fresh_source(item, requirements.freshness_window_days)
+        )
+        needs_total = selected_total < requirements.total_sources
+        needs_fresh = selected_fresh < requirements.min_fresh_sources
+        could_still_meet_total = selected_total + remaining_total >= requirements.total_sources
+        could_still_meet_fresh = selected_fresh + remaining_fresh >= requirements.min_fresh_sources
+
+        if weak_source and could_still_meet_total and could_still_meet_fresh:
+            filtered_source = dict(source)
+            filtered_source["filtered_reason"] = ",".join(quality_flags)
+            filtered.append(filtered_source)
+            continue
+
+        if not weak_source or needs_total or needs_fresh:
+            selected.append(source)
+        else:
+            filtered_source = dict(source)
+            filtered_source["filtered_reason"] = ",".join(quality_flags)
+            filtered.append(filtered_source)
+
+    for source in filtered:
+        if len(selected) >= requirements.total_sources and build_source_summary(
+            selected, requirements=requirements
+        )["requirements_met"]:
+            break
+        selected.append({key: value for key, value in source.items() if key != "filtered_reason"})
+
+    return {"selected_sources": selected, "filtered_sources": filtered}
 
 
 def dedupe_sources(sources: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -286,6 +432,11 @@ def dedupe_sources(sources: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             existing["published_at"] = source["published_at"]
         if not existing.get("snippet") and source.get("snippet"):
             existing["snippet"] = source["snippet"]
+        if not existing.get("display_snippet") and source.get("display_snippet"):
+            existing["display_snippet"] = source["display_snippet"]
+        merged_flags = sorted(set(existing.get("quality_flags") or []) | set(source.get("quality_flags") or []))
+        if merged_flags:
+            existing["quality_flags"] = merged_flags
     return list(deduped.values())
 
 
@@ -443,6 +594,8 @@ def build_citation_cards(sources: Iterable[Dict[str, Any]], *, limit: Optional[i
             "publisher": source.get("publisher"),
             "published_at": source.get("published_at"),
             "source_type": source.get("source_type"),
+            "display_snippet": source.get("display_snippet"),
+            "quality_flags": source.get("quality_flags") or [],
         }
         for source in sources
         if source.get("title") and source.get("url")

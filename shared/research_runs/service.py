@@ -441,6 +441,16 @@ class ResearchRunExecutor:
                 "critique": critique,
                 "report": final_answer,
                 "answer": final_answer.get("answer") if isinstance(final_answer, dict) else None,
+                "answer_markdown": (
+                    final_answer.get("answer_markdown")
+                    if isinstance(final_answer, dict)
+                    else None
+                )
+                or (
+                    final_answer.get("answer")
+                    if isinstance(final_answer, dict)
+                    else None
+                ),
                 "citations": final_answer.get("citations", []) if isinstance(final_answer, dict) else [],
                 "source_summary": (
                     final_answer.get("source_summary")
@@ -465,6 +475,12 @@ class ResearchRunExecutor:
                 "critic_findings": (
                     critique.get("critic_findings", []) if isinstance(critique, dict) else []
                 ),
+                "filtered_sources": (
+                    curated_sources.get("filtered_sources")
+                    if isinstance(curated_sources, dict)
+                    else []
+                )
+                or [],
                 "sources": (
                     final_answer.get("sources")
                     if isinstance(final_answer, dict)

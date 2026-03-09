@@ -1,5 +1,7 @@
 from shared.research_runs.deep_research import (
     build_source_summary,
+    clean_source_snippet,
+    filter_sources_for_curation,
     is_fresh_source,
     normalize_source_card,
 )
@@ -65,3 +67,61 @@ def test_source_summary_counts_fresh_sources_with_inferred_dates():
     assert summary["requirements_met"] is True
     assert is_fresh_source(sources[0], requirements.freshness_window_days) is True
     assert is_fresh_source(sources[2], requirements.freshness_window_days) is False
+
+
+def test_clean_source_snippet_removes_repeated_live_stream_chrome():
+    cleaned = clean_source_snippet(
+        "## ABC News ## Live ## Video ## Shows ## Shop ## Stream on stream logo ## Live Updates "
+        "Iran war ## Oil prices surge amid war in Iran ### March 7, 2026 ### Additional Live Streams"
+    )
+
+    assert "Stream on" not in cleaned
+    assert "Additional Live Streams" not in cleaned
+    assert "Oil prices surge amid war in Iran" in cleaned
+
+
+def test_filter_sources_for_curation_drops_low_signal_live_sources_when_not_needed():
+    requirements = SourceRequirements(
+        total_sources=2,
+        min_fresh_sources=1,
+        freshness_window_days=7,
+    )
+    strong_source = normalize_source_card(
+        {
+            "title": "Reuters oil market update",
+            "url": "https://www.reuters.com/world/example-2026-03-09/",
+            "content": "Governments scramble to limit fallout as oil prices surge and shipping risk grows.",
+            "score": 0.9,
+        },
+        scout_role="breaking-news-scout",
+        round_number=1,
+    )
+    second_strong_source = normalize_source_card(
+        {
+            "title": "AP market reaction",
+            "url": "https://apnews.com/article/example-2026-03-08",
+            "content": "Regional escalation drove a fresh risk premium into crude benchmarks.",
+            "score": 0.88,
+        },
+        scout_role="market-impact-scout",
+        round_number=1,
+    )
+    weak_source = normalize_source_card(
+        {
+            "title": "Oil Surge Spooks Markets as Iran War Escalates - YouTube",
+            "url": "https://www.youtube.com/watch?v=example",
+            "content": "Live Video Shows Shop Stream on stream logo",
+            "score": 0.95,
+        },
+        scout_role="breaking-news-scout",
+        round_number=1,
+    )
+
+    filtered = filter_sources_for_curation(
+        [strong_source, second_strong_source, weak_source],
+        requirements=requirements,
+        classified_mode="live_analysis",
+    )
+
+    assert len(filtered["selected_sources"]) == 2
+    assert any(source["title"] == weak_source["title"] for source in filtered["filtered_sources"])

@@ -101,7 +101,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T02:00:00+00:00",
                             "source_type": "news",
                             "snippet": "Oil prices jumped on escalation.",
+                            "display_snippet": "Oil prices jumped on escalation.",
                             "relevance_score": 0.94,
+                            "quality_flags": [],
                         },
                         {
                             "title": "Reuters report",
@@ -110,7 +112,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T01:00:00+00:00",
                             "source_type": "primary",
                             "snippet": "Market reaction to the conflict.",
+                            "display_snippet": "Market reaction to the conflict.",
                             "relevance_score": 0.93,
+                            "quality_flags": [],
                         },
                         {
                             "title": "AP report",
@@ -119,7 +123,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-08T23:30:00+00:00",
                             "source_type": "news",
                             "snippet": "Regional escalation drives risk premium.",
+                            "display_snippet": "Regional escalation drives risk premium.",
                             "relevance_score": 0.91,
+                            "quality_flags": [],
                         },
                         {
                             "title": "OPEC market note",
@@ -128,7 +134,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-08T20:00:00+00:00",
                             "source_type": "primary",
                             "snippet": "Supply and spare-capacity commentary.",
+                            "display_snippet": "Supply and spare-capacity commentary.",
                             "relevance_score": 0.88,
+                            "quality_flags": [],
                         },
                         {
                             "title": "Academic context paper",
@@ -137,7 +145,9 @@ def client(monkeypatch):
                             "published_at": "2024-05-11T00:00:00+00:00",
                             "source_type": "academic",
                             "snippet": "Historical evidence on geopolitical oil shocks.",
+                            "display_snippet": "Historical evidence on geopolitical oil shocks.",
                             "relevance_score": 0.82,
+                            "quality_flags": [],
                         },
                         {
                             "title": "FT market analysis",
@@ -146,7 +156,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T03:00:00+00:00",
                             "source_type": "news",
                             "snippet": "Asian markets reacted sharply.",
+                            "display_snippet": "Asian markets reacted sharply.",
                             "relevance_score": 0.87,
+                            "quality_flags": [],
                         },
                     ],
                     "rounds_completed": {
@@ -170,7 +182,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T02:00:00+00:00",
                             "source_type": "news",
                             "snippet": "Oil prices jumped on escalation.",
+                            "display_snippet": "Oil prices jumped on escalation.",
                             "relevance_score": 0.94,
+                            "quality_flags": [],
                         },
                         {
                             "title": "Reuters report",
@@ -179,7 +193,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T01:00:00+00:00",
                             "source_type": "primary",
                             "snippet": "Market reaction to the conflict.",
+                            "display_snippet": "Market reaction to the conflict.",
                             "relevance_score": 0.93,
+                            "quality_flags": [],
                         },
                         {
                             "title": "Academic context paper",
@@ -188,7 +204,9 @@ def client(monkeypatch):
                             "published_at": "2024-05-11T00:00:00+00:00",
                             "source_type": "academic",
                             "snippet": "Historical evidence on geopolitical oil shocks.",
+                            "display_snippet": "Historical evidence on geopolitical oil shocks.",
                             "relevance_score": 0.82,
+                            "quality_flags": [],
                         },
                         {
                             "title": "FT market analysis",
@@ -197,7 +215,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-09T03:00:00+00:00",
                             "source_type": "news",
                             "snippet": "Asian markets reacted sharply.",
+                            "display_snippet": "Asian markets reacted sharply.",
                             "relevance_score": 0.87,
+                            "quality_flags": [],
                         },
                         {
                             "title": "AP report",
@@ -206,7 +226,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-08T23:30:00+00:00",
                             "source_type": "news",
                             "snippet": "Regional escalation drives risk premium.",
+                            "display_snippet": "Regional escalation drives risk premium.",
                             "relevance_score": 0.91,
+                            "quality_flags": [],
                         },
                         {
                             "title": "OPEC market note",
@@ -215,7 +237,9 @@ def client(monkeypatch):
                             "published_at": "2026-03-08T20:00:00+00:00",
                             "source_type": "primary",
                             "snippet": "Supply and spare-capacity commentary.",
+                            "display_snippet": "Supply and spare-capacity commentary.",
                             "relevance_score": 0.88,
+                            "quality_flags": [],
                         },
                     ],
                     "citations": [
@@ -252,6 +276,7 @@ def client(monkeypatch):
                         "evidence_rounds": int((context.get("rounds_planned") or {}).get("evidence_rounds", 1) or 1),
                         "critique_rounds": 0,
                     },
+                    "filtered_sources": [],
                 },
                 "metadata": {},
             }
@@ -261,7 +286,8 @@ def client(monkeypatch):
                 "success": True,
                 "agent_id": "knowledge-synthesizer-001",
                 "result": {
-                    "answer": "As of March 9, 2026, the freshest reporting indicates the conflict pushed oil prices higher through immediate risk premia and supply fears.",
+                    "answer": "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates the conflict pushed oil prices higher through immediate risk premia and supply fears.",
+                    "answer_markdown": "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates the conflict pushed oil prices higher through immediate risk premia and supply fears.",
                     "claims": [
                         {
                             "claim": "Oil prices rose immediately on escalation.",
@@ -325,8 +351,9 @@ def client(monkeypatch):
         return {
             "success": True,
             "agent_id": "knowledge-synthesizer-001",
-            "result": {
-                "answer": "As of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain.",
+                "result": {
+                "answer": "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain.",
+                "answer_markdown": "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain.",
                 "claims": [
                     {
                         "claim": "Markets priced in immediate supply and shipping risk.",
@@ -545,7 +572,8 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
         "plan_query -> gather_evidence -> curate_sources -> draft_synthesis -> "
         "critique_and_fact_check -> revise_final_answer"
     )
-    assert completed["result"]["answer"].startswith("As of March 9, 2026")
+    assert "As of March 9, 2026" in completed["result"]["answer"]
+    assert completed["result"]["answer_markdown"].startswith("## Summary")
     assert len(completed["result"]["citations"]) >= 2
     assert completed["result"]["source_summary"]["total_sources"] == 6
     assert completed["rounds_completed"] == {"evidence_rounds": 1, "critique_rounds": 1}
@@ -670,7 +698,7 @@ def test_research_run_waits_for_human_review_and_resumes(client: TestClient, mon
         lambda item: item["status"] == "completed",
         timeout=10.0,
     )
-    assert completed["result"]["answer"].startswith("As of March 9, 2026")
+    assert "As of March 9, 2026" in completed["result"]["answer"]
 
 
 def test_query_classifier_detects_live_and_hybrid_modes():

@@ -110,7 +110,7 @@ Sources:
 
 Return JSON with this shape:
 {{
-  "answer": "<direct answer that cites the evidence and uses absolute dates when relevant>",
+  "answer": "<direct answer in markdown that cites the evidence and uses absolute dates when relevant>",
   "claims": [
     {{
       "claim": "<specific claim>",
@@ -125,6 +125,7 @@ Rules:
 - Do not invent events or outcomes that are not reflected in the sources.
 - If the topic is live/current, state the answer as of the date above.
 - Keep claims tied to sources.
+- Format the answer in markdown with a short opening summary, followed by concise sections when useful.
 """
 
         parsed = await self._run_role_prompt(
@@ -246,7 +247,7 @@ Sources:
 
 Return JSON:
 {{
-  "answer": "<final revised answer>",
+  "answer": "<final revised markdown answer>",
   "claims": [
     {{
       "claim": "<specific claim>",
@@ -261,6 +262,7 @@ Rules:
 - Use absolute dates for current events.
 - Preserve uncertainty instead of speculating.
 - Do not claim evidence beyond what is in the sources.
+- Return markdown with short sections such as Summary, Evidence, and Limitations when helpful.
 """
 
         parsed = await self._run_role_prompt(
@@ -393,8 +395,10 @@ Rules:
         answer = str(payload.get("answer") or "").strip()
         if not answer:
             answer = f"Insufficient model output to complete a final synthesis for: {fallback_query}"
+        answer_markdown = answer
         return {
             "answer": answer,
+            "answer_markdown": answer_markdown,
             "claims": claims,
             "limitations": limitations,
         }

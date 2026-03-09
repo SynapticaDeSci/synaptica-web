@@ -113,7 +113,10 @@ export interface ResearchSourceCard {
   published_at?: string | null;
   source_type?: string | null;
   snippet?: string | null;
+  display_snippet?: string | null;
   relevance_score?: number | null;
+  quality_flags?: string[] | null;
+  filtered_reason?: string | null;
 }
 
 export interface ResearchClaim {

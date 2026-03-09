@@ -6,12 +6,14 @@ import {
   Clock3,
   Coins,
   DatabaseZap,
+  ChevronDown,
   ExternalLink,
   Loader2,
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import ReactMarkdown from 'react-markdown'
 
 import { VerificationReviewCard } from '@/components/VerificationReviewCard'
 import { Button } from '@/components/ui/button'
@@ -67,6 +69,9 @@ function stringifyValue(value: unknown) {
 
 function getRunHeadline(run: ResearchRunResponse): string | null {
   const payload = run.result && typeof run.result === 'object' ? run.result : null
+  if (payload && typeof payload.answer_markdown === 'string') {
+    return payload.answer_markdown
+  }
   if (payload && typeof payload.answer === 'string') {
     return payload.answer
   }
@@ -114,6 +119,10 @@ function getCriticFindings(run: ResearchRunResponse): ResearchCriticFinding[] {
     (item: unknown): item is ResearchCriticFinding =>
       Boolean(item) && typeof item === 'object' && typeof (item as ResearchCriticFinding).issue === 'string',
   )
+}
+
+function getRunPayload(run: ResearchRunResponse): Record<string, any> | null {
+  return run.result && typeof run.result === 'object' ? (run.result as Record<string, any>) : null
 }
 
 function formatMode(value: string) {
@@ -194,6 +203,25 @@ function ExpandableText({
   )
 }
 
+function DebugSection({ title, value }: { title: string; value: unknown }) {
+  const content = stringifyValue(value)
+  if (!content) {
+    return null
+  }
+
+  return (
+    <details className="rounded-2xl border border-white/10 bg-white/5 p-4">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.25em] text-slate-300">
+        <span>{title}</span>
+        <ChevronDown className="h-4 w-4 text-slate-400 transition details-open:rotate-180" />
+      </summary>
+      <div className="mt-4">
+        <JsonPreview title={title} value={value} />
+      </div>
+    </details>
+  )
+}
+
 function JsonPreview({
   title,
   value,
@@ -262,10 +290,18 @@ function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
                       {formatDateTime(source.published_at)}
                     </span>
                   )}
+                  {(source.quality_flags ?? []).map((flag) => (
+                    <span
+                      key={`${source.url}-${flag}`}
+                      className="rounded-full border border-amber-400/20 bg-amber-400/10 px-2 py-1 text-amber-100"
+                    >
+                      {formatMode(flag)}
+                    </span>
+                  ))}
                 </div>
-                {source.snippet && (
+                {(source.display_snippet || source.snippet) && (
                   <ExpandableText
-                    content={source.snippet}
+                    content={source.display_snippet || source.snippet || ''}
                     collapsedHeight="max-h-36"
                     buttonLabel="Read snippet"
                     className="text-slate-300"
@@ -405,10 +441,25 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   }
 
   const researchRun = researchRunQuery.data
+  const reportPayload = getRunPayload(researchRun)
   const headline = getRunHeadline(researchRun)
   const findings = getRunFindings(researchRun)
   const runSources = getRunSources(researchRun)
   const criticFindings = getCriticFindings(researchRun)
+  const citations = Array.isArray(reportPayload?.citations)
+    ? (reportPayload?.citations as ResearchSourceCard[])
+    : []
+  const limitations = Array.isArray(reportPayload?.limitations)
+    ? reportPayload?.limitations.filter((item): item is string => typeof item === 'string')
+    : []
+  const freshnessSummary =
+    reportPayload && typeof reportPayload.freshness_summary === 'object'
+      ? (reportPayload.freshness_summary as Record<string, any>)
+      : null
+  const sourceSummary =
+    reportPayload && typeof reportPayload.source_summary === 'object'
+      ? (reportPayload.source_summary as Record<string, any>)
+      : null
   const selectedNodeAttempts = [...(selectedNode?.attempts ?? [])].sort(
     (left, right) => right.attempt_number - left.attempt_number,
   )
@@ -582,13 +633,8 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                     <p className="text-sm font-semibold uppercase tracking-[0.3em]">Final result</p>
                   </div>
                   {headline && (
-                    <div className="mt-3">
-                      <ExpandableText
-                        content={headline}
-                        collapsedHeight="max-h-80"
-                        buttonLabel="Read full answer"
-                        className="text-base text-white"
-                      />
+                    <div className="prose prose-invert prose-sm mt-4 max-w-none prose-headings:text-white prose-p:text-slate-100 prose-strong:text-white prose-a:text-sky-200 prose-li:text-slate-100 prose-blockquote:border-sky-400/30 prose-blockquote:text-slate-200 prose-code:text-emerald-100">
+                      <ReactMarkdown>{headline}</ReactMarkdown>
                     </div>
                   )}
                   {findings.length > 0 && (
@@ -625,10 +671,105 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       ))}
                     </div>
                   )}
+                  {limitations.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
+                        Limitations
+                      </p>
+                      <ul className="space-y-2 text-sm text-emerald-50">
+                        {limitations.map((limitation) => (
+                          <li key={limitation} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                            {limitation}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {citations.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
+                        Cited sources
+                      </p>
+                      <div className="grid gap-2">
+                        {citations.map((citation) => (
+                          <a
+                            key={`${citation.url}-${citation.title}`}
+                            href={citation.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm text-emerald-50 transition hover:bg-white/10"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="font-medium text-white">{citation.title}</p>
+                                <p className="mt-1 text-xs text-emerald-100/80">
+                                  {[citation.publisher, citation.published_at ? formatDateTime(citation.published_at) : null]
+                                    .filter(Boolean)
+                                    .join(' • ')}
+                                </p>
+                              </div>
+                              <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-emerald-200" />
+                            </div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(sourceSummary || freshnessSummary) && (
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-300">
+                    Evidence at a glance
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-200">
+                    {typeof sourceSummary?.total_sources === 'number' && (
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                        Sources: {sourceSummary.total_sources}
+                      </span>
+                    )}
+                    {typeof sourceSummary?.fresh_sources === 'number' && (
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                        Fresh: {sourceSummary.fresh_sources}
+                      </span>
+                    )}
+                    {typeof sourceSummary?.academic_or_primary_sources === 'number' && (
+                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                        Primary/Academic: {sourceSummary.academic_or_primary_sources}
+                      </span>
+                    )}
+                    {freshnessSummary?.required && (
+                      <span
+                        className={cn(
+                          'rounded-full border px-2 py-1',
+                          freshnessSummary.requirements_met
+                            ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                            : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+                        )}
+                      >
+                        Freshness {freshnessSummary.requirements_met ? 'met' : 'warning'}
+                      </span>
+                    )}
+                  </div>
+                  {Array.isArray(freshnessSummary?.issues) && freshnessSummary.issues.length > 0 && (
+                    <ul className="mt-3 space-y-2 text-sm text-amber-100">
+                      {freshnessSummary.issues.map((issue: string) => (
+                        <li key={issue} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                          {issue}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               <SourceCards sources={runSources} />
+
+              <div className="space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">Debug payloads</p>
+                <DebugSection title="Research run result" value={researchRun.result} />
+              </div>
             </CardContent>
           </Card>
 
@@ -795,8 +936,6 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                   </div>
                 )}
 
-                <JsonPreview title="Node result" value={selectedNode.result} />
-
                 {selectedNode.result &&
                   typeof selectedNode.result === 'object' &&
                   Array.isArray((selectedNode.result as Record<string, any>).critic_findings) &&
@@ -899,20 +1038,12 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       )}
 
                       <div className="mt-4">
-                        <JsonPreview title="Attempt result" value={attempt.result} />
+                        <DebugSection title="Attempt result" value={attempt.result} />
                       </div>
                     </div>
                   ))}
                 </div>
-
-                {researchRun.result && (
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                    <p className="mb-3 text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
-                      Run payload
-                    </p>
-                    <JsonPreview title="Research run result" value={researchRun.result} />
-                  </div>
-                )}
+                <DebugSection title="Node result" value={selectedNode.result} />
               </>
             )}
           </CardContent>
