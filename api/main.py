@@ -129,6 +129,8 @@ def _upsert_builtin_data_agent() -> None:
                     payment_multiplier=1.0,
                 )
             )
+        else:
+            reputation.reputation_score = max(float(reputation.reputation_score or 0.0), 0.8)
 
         session.commit()
         rebuild_agents_cache(session=session)
@@ -201,6 +203,8 @@ def _upsert_supported_research_agents() -> None:
                         payment_multiplier=1.0,
                     )
                 )
+            else:
+                reputation.reputation_score = max(float(reputation.reputation_score or 0.0), 0.8)
 
         session.commit()
         rebuild_agents_cache(session=session)

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from api.main import app
+from api.main import _upsert_supported_research_agents
 from agents.executor.tools import research_api_executor
 from agents.negotiator.tools.payment_tools import create_payment_request, authorize_payment
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
@@ -387,3 +388,47 @@ def test_task_history_uses_persisted_runtime_cancelled_status(client: TestClient
     payload = response.json()
     cancelled = next(item for item in payload if item["id"] == "task-cancelled")
     assert cancelled["status"] == "cancelled"
+
+
+def test_supported_agent_upsert_restores_reputation_floor():
+    _reset_runtime_state()
+    session = SessionLocal()
+    try:
+        session.add(
+            AgentModel(  # type: ignore[call-arg]
+                agent_id="problem-framer-001",
+                name="Problem Framer",
+                agent_type="research",
+                description="Legacy seeded agent",
+                capabilities=["problem framing"],
+                hedera_account_id="0.0.7001",
+                status="active",
+                meta={"support_tier": "supported"},
+            )
+        )
+        session.add(
+            AgentReputation(  # type: ignore[call-arg]
+                agent_id="problem-framer-001",
+                reputation_score=0.0,
+                total_tasks=1,
+                successful_tasks=0,
+                failed_tasks=1,
+                payment_multiplier=1.0,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    _upsert_supported_research_agents()
+
+    session = SessionLocal()
+    try:
+        reputation = (
+            session.query(AgentReputation)
+            .filter(AgentReputation.agent_id == "problem-framer-001")
+            .one()
+        )
+        assert reputation.reputation_score >= 0.8
+    finally:
+        session.close()

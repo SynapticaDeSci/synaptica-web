@@ -61,6 +61,11 @@ async def _fetch_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
     if agent_id in _agent_cache:
         return _agent_cache[agent_id]
 
+    record = _load_local_agent_record(agent_id)
+    if record:
+        _agent_cache[agent_id] = record
+        return record
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{AGENT_DIRECTORY_BASE_URL}/{agent_id}")
@@ -73,11 +78,6 @@ async def _fetch_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
                 return data
     except Exception as error:
         logger.debug("[fetch_agent_record] Failed to fetch agent %s: %s", agent_id, error)
-
-    record = _load_local_agent_record(agent_id)
-    if record:
-        _agent_cache[agent_id] = record
-        return record
 
     return None
 
