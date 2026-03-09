@@ -856,6 +856,18 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   })
 
   const selectedPaymentId = selectedNode?.payment_id ?? null
+  const relevantPaymentIds = [
+    ...new Set(
+      [
+        selectedPaymentId,
+        waitingNode?.payment_id,
+        waitingTaskQuery.data?.verification_data?.payment_id,
+      ].filter(
+        (paymentId): paymentId is string =>
+          typeof paymentId === 'string' && paymentId.length > 0,
+      ),
+    ),
+  ]
   const paymentDetailQuery = useQuery({
     queryKey: ['payment', selectedPaymentId],
     queryFn: () => getPayment(selectedPaymentId as string),
@@ -873,6 +885,14 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     refetchIntervalInBackground: true,
   })
 
+  const invalidateRelevantPaymentQueries = () =>
+    Promise.all(
+      relevantPaymentIds.flatMap((paymentId) => [
+        queryClient.invalidateQueries({ queryKey: ['payment', paymentId] }),
+        queryClient.invalidateQueries({ queryKey: ['payment', paymentId, 'events'] }),
+      ]),
+    )
+
   const handleApproveReview = async (taskId: string) => {
     await approveVerification(taskId)
     await Promise.all([
@@ -880,6 +900,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
+      invalidateRelevantPaymentQueries(),
     ])
   }
 
@@ -890,6 +911,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
       queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
+      invalidateRelevantPaymentQueries(),
     ])
   }
 
@@ -912,12 +934,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
         waitingTaskId
           ? queryClient.invalidateQueries({ queryKey: ['task', waitingTaskId] })
           : Promise.resolve(),
-        selectedPaymentId
-          ? queryClient.invalidateQueries({ queryKey: ['payment', selectedPaymentId] })
-          : Promise.resolve(),
-        selectedPaymentId
-          ? queryClient.invalidateQueries({ queryKey: ['payment', selectedPaymentId, 'events'] })
-          : Promise.resolve(),
+        invalidateRelevantPaymentQueries(),
       ])
     } catch (error) {
       setControlError(

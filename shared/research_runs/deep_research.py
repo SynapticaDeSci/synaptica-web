@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import socket
 from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote_plus, urlparse
@@ -90,6 +92,9 @@ _PUBLISHER_META_SELECTORS = (
     ("name", "publisher"),
 )
 
+_ALLOWED_ENRICHMENT_CONTENT_TYPES = ("text/html", "application/xhtml+xml")
+_MAX_ENRICHMENT_RESPONSE_BYTES = 1_000_000
+
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
     if not value or not isinstance(value, str):
@@ -104,6 +109,121 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _is_blocked_enrichment_host(hostname: str) -> bool:
+    normalized = hostname.strip().lower().rstrip(".")
+    if not normalized:
+        return True
+    if normalized in {"localhost", "localhost.localdomain"}:
+        return True
+    if normalized.endswith(".localhost") or normalized.endswith(".local"):
+        return True
+
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+async def _is_safe_enrichment_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+
+    hostname = parsed.hostname
+    if not hostname or _is_blocked_enrichment_host(hostname):
+        return False
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        resolutions = await asyncio.get_running_loop().getaddrinfo(
+            hostname,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    except socket.gaierror:
+        return False
+
+    resolved_public_address = False
+    for *_, sockaddr in resolutions:
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return False
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+        ):
+            return False
+        resolved_public_address = True
+
+    return resolved_public_address
+
+
+async def _fetch_enrichment_html(client: httpx.AsyncClient, url: str, *, max_redirects: int = 3) -> Optional[str]:
+    current_url = url
+    for _ in range(max_redirects + 1):
+        if not await _is_safe_enrichment_url(current_url):
+            return None
+
+        try:
+            async with client.stream("GET", current_url, follow_redirects=False) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        return None
+                    current_url = str(response.url.join(location))
+                    continue
+
+                response.raise_for_status()
+
+                content_type = str(response.headers.get("content-type") or "").lower()
+                if content_type and not any(
+                    allowed in content_type for allowed in _ALLOWED_ENRICHMENT_CONTENT_TYPES
+                ):
+                    return None
+
+                content_length = response.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > _MAX_ENRICHMENT_RESPONSE_BYTES:
+                            return None
+                    except ValueError:
+                        pass
+
+                chunks: list[bytes] = []
+                total_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > _MAX_ENRICHMENT_RESPONSE_BYTES:
+                        return None
+                    chunks.append(chunk)
+
+                encoding = response.encoding or "utf-8"
+        except Exception:
+            return None
+
+        return b"".join(chunks).decode(encoding, errors="ignore")
+
+    return None
 
 
 def _extract_datetime_from_text(value: str) -> Optional[datetime]:
@@ -659,21 +779,19 @@ async def enrich_source_cards(
 
     async with httpx.AsyncClient(
         timeout=8.0,
-        follow_redirects=True,
         headers={"User-Agent": "Mozilla/5.0 (compatible; SynapticaResearch/1.0)"},
     ) as client:
         async def _enrich(source: Dict[str, Any]) -> None:
             url = source.get("url")
             if not isinstance(url, str) or not url.startswith(("http://", "https://")):
                 return
-            try:
-                async with semaphore:
-                    response = await client.get(url)
-                    response.raise_for_status()
-            except Exception:
+
+            async with semaphore:
+                html = await _fetch_enrichment_html(client, url)
+            if not html:
                 return
 
-            soup = BeautifulSoup(response.text, "html.parser")
+            soup = BeautifulSoup(html, "html.parser")
             if not source.get("published_at"):
                 published = _extract_meta_content(soup, _DATE_META_SELECTORS)
                 parsed = _parse_datetime(published) if published else None

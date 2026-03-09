@@ -12,12 +12,14 @@ from sqlalchemy import create_engine, inspect, text
 from api.main import app
 from agents.executor.tools import research_api_executor
 from agents.orchestrator.tools.agent_tools import _evaluate_research_quality_contract
+from agents.research.phase2_knowledge.literature_miner.agent import LiteratureMinerAgent
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
     AgentPaymentProfile,
     AgentReputation,
     AgentsCacheEntry,
+    Base,
     ExecutionAttempt,
     Payment,
     PaymentNotification,
@@ -691,6 +693,25 @@ def test_alembic_upgrade_preserves_phase0_data(tmp_path, monkeypatch):
     assert payment_row["task_id"] == "task-preexisting"
 
 
+def test_alembic_upgrade_is_idempotent_for_precreated_tables(tmp_path, monkeypatch):
+    db_path = tmp_path / "migration-precreated.db"
+    database_url = f"sqlite:///{db_path}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    engine = create_engine(database_url, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+
+    command.upgrade(config, "head")
+
+    inspector = inspect(engine)
+    assert "alembic_version" in inspector.get_table_names()
+    assert "research_runs" in inspector.get_table_names()
+    assert "agent_payment_profiles" in inspector.get_table_names()
+
+
 def test_create_research_run_completes_and_persists_graph(client: TestClient):
     response = client.post(
         "/api/research-runs",
@@ -809,6 +830,55 @@ def test_research_run_pause_and_resume(client: TestClient, monkeypatch):
 
     resume_response = client.post(f"/api/research-runs/{research_run_id}/resume")
     assert resume_response.status_code == 200
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+        timeout=10.0,
+    )
+    assert completed["status"] == "completed"
+
+
+def test_research_run_evidence_payload_uses_node_results_before_completion(client: TestClient, monkeypatch):
+    original_post_agent_request = research_api_executor._post_agent_request
+    gate = asyncio.Event()
+
+    async def _slow_draft_node(endpoint, payload):
+        context = payload.get("context") or {}
+        if context.get("node_strategy") == "draft_synthesis":
+            await gate.wait()
+        return await original_post_agent_request(endpoint, payload)
+
+    monkeypatch.setattr(research_api_executor, "_post_agent_request", _slow_draft_node)
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    in_flight = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: any(
+            node["node_id"] == "draft_synthesis" and node["status"] == "running"
+            for node in item["nodes"]
+        ),
+        timeout=10.0,
+    )
+    assert in_flight["rounds_completed"] == {"evidence_rounds": 1, "critique_rounds": 0}
+
+    evidence_response = client.get(f"/api/research-runs/{research_run_id}/evidence")
+    assert evidence_response.status_code == 200
+    evidence_payload = evidence_response.json()
+    assert evidence_payload["rewritten_research_brief"].startswith("Investigate:")
+    assert len(evidence_payload["sources"]) >= 6
+    assert len(evidence_payload["citations"]) >= 2
+    assert evidence_payload["coverage_summary"]["ready_for_synthesis"] is True
+
+    gate.set()
 
     completed = _poll_research_run(
         client,
@@ -1040,6 +1110,55 @@ def test_build_research_run_profile_accepts_string_modes():
     assert profile.freshness_required is True
 
 
+@pytest.mark.asyncio
+async def test_hybrid_source_curation_fails_when_requirements_are_not_met(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = LiteratureMinerAgent()
+
+    result = await agent._execute_curate_sources(
+        "Curate hybrid evidence",
+        {
+            "classified_mode": "hybrid",
+            "scenario_analysis_requested": False,
+            "source_requirements": {
+                "total_sources": 2,
+                "min_academic_or_primary": 1,
+                "min_fresh_sources": 1,
+                "freshness_window_days": 7,
+            },
+            "gathered_evidence": {
+                "sources": [
+                    {
+                        "title": "Old analysis 1",
+                        "url": "https://example.com/old-1",
+                        "publisher": "Example",
+                        "published_at": "2020-01-01T00:00:00+00:00",
+                        "source_type": "analysis",
+                        "snippet": "stale evidence",
+                        "quality_flags": [],
+                    },
+                    {
+                        "title": "Old analysis 2",
+                        "url": "https://example.com/old-2",
+                        "publisher": "Example 2",
+                        "published_at": "2020-01-02T00:00:00+00:00",
+                        "source_type": "analysis",
+                        "snippet": "stale evidence",
+                        "quality_flags": [],
+                    },
+                ],
+                "coverage_summary": {},
+                "uncovered_claim_targets": [],
+                "rounds_completed": {"evidence_rounds": 1, "critique_rounds": 0},
+            },
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "insufficient_curated_evidence"
+    assert "Not enough fresh sources" in " ".join(result["details"]["issues"])
+
+
 def test_deep_research_run_tracks_extra_rounds(client: TestClient):
     response = client.post(
         "/api/research-runs",
@@ -1156,3 +1275,51 @@ def test_research_quality_contract_is_noop_for_non_final_nodes():
     )
 
     assert result["issues"] == []
+
+
+def test_research_quality_contract_accepts_lowercase_absolute_month_dates():
+    result = _evaluate_research_quality_contract(
+        {
+            "answer_markdown": (
+                "## Summary\n\nAs of march 9, 2026, oil prices appear elevated.[S1]\n\n"
+                "## Evidence\n\nReuters reported a conflict-linked risk premium.[S1]\n\n"
+                "## Limitations\n\nThe situation may keep changing."
+            ),
+            "claims": [
+                {
+                    "claim_id": "C1",
+                    "claim": "Oil prices appear elevated.",
+                    "supporting_citation_ids": ["S1"],
+                }
+            ],
+            "citations": [
+                {
+                    "citation_id": "S1",
+                    "title": "Reuters report",
+                    "url": "https://www.reuters.com/example",
+                }
+            ],
+            "limitations": ["The situation may keep changing."],
+            "source_summary": {
+                "fresh_sources": 1,
+                "academic_or_primary_sources": 1,
+            },
+        },
+        {
+            "node_strategy": "revise_final_answer",
+            "classified_mode": "live_analysis",
+            "expected_format": {"required": ["answer_markdown", "claims", "limitations"]},
+            "quality_requirements": {
+                "min_claim_count": 1,
+                "min_citation_coverage": 1.0,
+                "require_inline_citations": True,
+                "required_sections": ["Summary", "Evidence", "Limitations"],
+                "require_absolute_dates": True,
+                "require_uncertainty_language": True,
+                "strict_live_analysis": True,
+            },
+        },
+    )
+
+    assert not any("absolute date" in issue.lower() for issue in result["issues"])
+    assert result["quality_summary"]["strict_live_analysis_checks_passed"] is True

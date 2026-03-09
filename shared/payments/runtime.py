@@ -20,6 +20,7 @@ from shared.database import (
     SessionLocal,
 )
 from shared.database.models import PaymentStatus as DBPaymentStatus
+from shared.hedera.utils import hedera_account_to_evm_address
 from shared.protocols import (
     build_payment_refund_message,
     build_payment_release_message,
@@ -35,6 +36,18 @@ def is_valid_hedera_account_id(value: str | None) -> bool:
     if not value:
         return False
     return bool(HEDERA_ACCOUNT_PATTERN.match(value.strip()))
+
+
+def canonicalize_hedera_account_id(value: str | None) -> str:
+    """Normalize supported account formats into one comparable representation."""
+
+    candidate = str(value or "").strip()
+    if not candidate or not is_valid_hedera_account_id(candidate):
+        return candidate
+    try:
+        return hedera_account_to_evm_address(candidate)
+    except ValueError:
+        return candidate
 
 
 def upsert_agent_payment_profile(
@@ -116,6 +129,8 @@ def verify_agent_payment_profile(
 
         registered_account = str(agent.hedera_account_id or "").strip()
         candidate = str(hedera_account_id or registered_account).strip()
+        canonical_registered_account = canonicalize_hedera_account_id(registered_account)
+        canonical_candidate = canonicalize_hedera_account_id(candidate)
 
         if not candidate:
             profile = upsert_agent_payment_profile(
@@ -143,11 +158,11 @@ def verify_agent_payment_profile(
             session.commit()
             return serialize_payment_profile(profile, success=False)
 
-        if registered_account != candidate:
+        if canonical_registered_account != canonical_candidate:
             profile = upsert_agent_payment_profile(
                 session,
                 agent_id=agent_id,
-                hedera_account_id=candidate,
+                hedera_account_id=registered_account or candidate,
                 status="failed",
                 verification_method=verification_method,
                 last_error="Hedera account does not match the registered agent account",
@@ -159,7 +174,7 @@ def verify_agent_payment_profile(
         profile = upsert_agent_payment_profile(
             session,
             agent_id=agent_id,
-            hedera_account_id=candidate,
+            hedera_account_id=registered_account or candidate,
             status="verified",
             verification_method=verification_method,
             metadata={"registered_account": registered_account},
@@ -192,7 +207,10 @@ def require_verified_payment_profile(
         raise ValueError(f"Agent '{agent_id}' does not have a verified payment profile")
 
     expected_account = str(hedera_account_id or "").strip()
-    if expected_account and str(profile.hedera_account_id or "").strip() != expected_account:
+    if expected_account and (
+        canonicalize_hedera_account_id(profile.hedera_account_id)
+        != canonicalize_hedera_account_id(expected_account)
+    ):
         raise ValueError(
             f"Agent '{agent_id}' payment profile does not match Hedera account '{expected_account}'"
         )

@@ -41,7 +41,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     for table in Base.metadata.sorted_tables:
         if table.name in _BASELINE_TABLES:
-            table.create(bind=bind, checkfirst=False)
+            table.create(bind=bind, checkfirst=True)
 
 
 def downgrade() -> None:

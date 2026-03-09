@@ -221,14 +221,17 @@ def _require_admin_token(provided: Optional[str]) -> None:
 @router.post("/{agent_id}/payment-profile/verify", response_model=PaymentProfileVerifyResponse)
 async def verify_payment_profile_route(
     agent_id: str,
-    request: PaymentProfileVerifyRequest,
+    request: Optional[PaymentProfileVerifyRequest] = None,
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
 ) -> PaymentProfileVerifyResponse:
     """Verify and persist an agent payment profile against the registered account."""
+
+    _require_admin_token(x_admin_token)
 
     try:
         payload = verify_agent_payment_profile(
             agent_id=agent_id,
-            hedera_account_id=request.hedera_account_id,
+            hedera_account_id=request.hedera_account_id if request else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

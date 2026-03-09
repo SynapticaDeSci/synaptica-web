@@ -236,12 +236,16 @@ class LiteratureMinerAgent(BaseResearchAgent):
             "issues": validation["issues"],
         }
 
-        if classified_mode == "live_analysis" and not scenario_requested and not validation["passed"]:
+        if classified_mode in {"live_analysis", "hybrid"} and not scenario_requested and not validation["passed"]:
             self._update_reputation(success=False, quality_score=0.0)
             return {
                 "success": False,
                 "agent_id": self.agent_id,
-                "error": "insufficient_fresh_evidence",
+                "error": (
+                    "insufficient_fresh_evidence"
+                    if classified_mode == "live_analysis"
+                    else "insufficient_curated_evidence"
+                ),
                 "details": {
                     "issues": validation["issues"],
                     "source_summary": source_summary,

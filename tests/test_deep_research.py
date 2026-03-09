@@ -1,7 +1,10 @@
+import pytest
+
 from shared.research_runs.deep_research import (
     assign_citation_ids,
     build_source_summary,
     clean_source_snippet,
+    enrich_source_cards,
     filter_sources_for_curation,
     is_fresh_source,
     normalize_source_card,
@@ -155,3 +158,87 @@ def test_assign_citation_ids_adds_stable_ids_to_sources_and_citations():
     assert [source["citation_id"] for source in updated_sources] == ["S1", "S2"]
     assert [citation["citation_id"] for citation in citations] == ["S1", "S2"]
     assert citations[0]["title"] == "Reuters oil market update"
+
+
+@pytest.mark.asyncio
+async def test_enrich_source_cards_skips_private_ip_urls(monkeypatch):
+    called = False
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def stream(self, *args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("private hosts should be rejected before any fetch")
+
+    monkeypatch.setattr("shared.research_runs.deep_research.httpx.AsyncClient", FakeAsyncClient)
+
+    sources = [{"title": "Local service", "url": "http://127.0.0.1/internal", "publisher": "Unknown"}]
+    enriched = await enrich_source_cards(sources)
+
+    assert called is False
+    assert enriched[0]["publisher"] == "Unknown"
+    assert enriched[0].get("published_at") is None
+
+
+@pytest.mark.asyncio
+async def test_enrich_source_cards_skips_non_html_responses(monkeypatch):
+    async def _always_safe(url: str) -> bool:
+        del url
+        return True
+
+    class FakeResponse:
+        status_code = 200
+        headers = {
+            "content-type": "application/pdf",
+            "content-length": "256",
+        }
+        encoding = "utf-8"
+        url = "https://example.com/report.pdf"
+
+        def raise_for_status(self):
+            return None
+
+        async def aiter_bytes(self):
+            yield b"%PDF-1.4"
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            del exc_type, exc, tb
+            return False
+
+        def stream(self, *args, **kwargs):
+            del args, kwargs
+            return FakeStreamContext()
+
+    monkeypatch.setattr("shared.research_runs.deep_research._is_safe_enrichment_url", _always_safe)
+    monkeypatch.setattr("shared.research_runs.deep_research.httpx.AsyncClient", FakeAsyncClient)
+
+    sources = [{"title": "Binary file", "url": "https://example.com/report.pdf", "publisher": "Unknown"}]
+    enriched = await enrich_source_cards(sources)
+
+    assert enriched[0]["publisher"] == "Unknown"
+    assert enriched[0].get("published_at") is None

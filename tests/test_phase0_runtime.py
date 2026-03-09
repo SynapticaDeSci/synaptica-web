@@ -10,6 +10,7 @@ from api.main import _upsert_supported_research_agents
 from agents.executor.tools import research_api_executor
 from agents.negotiator.tools.payment_tools import create_payment_request, authorize_payment
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
+from shared.hedera.utils import hedera_account_to_evm_address
 from shared.payments.service import run_idempotent_payment_action
 from shared.runtime import PaymentAction, PaymentActionContext
 from shared.database import (
@@ -276,6 +277,29 @@ def test_verify_payment_profile_endpoint_persists_failures_and_success(client: T
     verified_payload = verified.json()
     assert verified_payload["success"] is True
     assert verified_payload["status"] == "verified"
+
+    equivalent = client.post(
+        "/api/agents/problem-framer-001/payment-profile/verify",
+        json={"hedera_account_id": hedera_account_to_evm_address("0.0.7001").lower()},
+    )
+    assert equivalent.status_code == 200
+    equivalent_payload = equivalent.json()
+    assert equivalent_payload["success"] is True
+    assert equivalent_payload["status"] == "verified"
+
+
+def test_verify_payment_profile_endpoint_requires_admin_token_when_configured(client: TestClient, monkeypatch):
+    monkeypatch.setenv("AGENT_SUBMIT_ADMIN_TOKEN", "top-secret")
+
+    unauthorized = client.post("/api/agents/problem-framer-001/payment-profile/verify")
+    assert unauthorized.status_code == 401
+
+    authorized = client.post(
+        "/api/agents/problem-framer-001/payment-profile/verify",
+        headers={"X-Admin-Token": "top-secret"},
+    )
+    assert authorized.status_code == 200
+    assert authorized.json()["success"] is True
 
 
 @pytest.mark.asyncio

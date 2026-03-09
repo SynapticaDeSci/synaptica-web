@@ -135,6 +135,19 @@ def _get_control_state(meta: Dict[str, Any]) -> str:
     return str(meta.get("control_state") or RUN_CONTROL_ACTIVE)
 
 
+def _get_node_result_from_payload(payload: Dict[str, Any], node_id: str) -> Optional[Dict[str, Any]]:
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("node_id") != node_id:
+            continue
+        result = node.get("result")
+        if isinstance(result, dict):
+            return result
+    return None
+
+
 def create_research_run(
     *,
     description: str,
@@ -382,9 +395,15 @@ def get_research_run_evidence_payload(research_run_id: str) -> Optional[Dict[str
     if payload is None:
         return None
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    planning = result.get("planning") if isinstance(result, dict) else {}
-    evidence = result.get("evidence") if isinstance(result, dict) else {}
-    curated_sources = result.get("curated_sources") if isinstance(result, dict) else {}
+    planning = (
+        result.get("planning") if isinstance(result, dict) else None
+    ) or _get_node_result_from_payload(payload, "plan_query") or {}
+    evidence = (
+        result.get("evidence") if isinstance(result, dict) else None
+    ) or _get_node_result_from_payload(payload, "gather_evidence") or {}
+    curated_sources = (
+        result.get("curated_sources") if isinstance(result, dict) else None
+    ) or _get_node_result_from_payload(payload, "curate_sources") or {}
     return {
         "research_run_id": research_run_id,
         "status": payload.get("status"),
@@ -1285,6 +1304,14 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
     run_status = _enum_value(record.status)
     meta = record.meta or {}
     control_state = _get_control_state(meta)
+    evidence_result = _get_node_result_from_payload({"nodes": nodes_payload}, "gather_evidence")
+    critique_result = _get_node_result_from_payload({"nodes": nodes_payload}, "critique_and_fact_check")
+    final_result = _get_node_result_from_payload({"nodes": nodes_payload}, "revise_final_answer")
+    derived_rounds_completed = _merge_rounds_completed(
+        evidence_result,
+        critique_result,
+        final_result,
+    )
     if run_status == ResearchRunStatus.RUNNING.value and any_waiting_for_review:
         run_status = ResearchRunStatus.WAITING_FOR_REVIEW.value
     if run_status == ResearchRunStatus.RUNNING.value and control_state == RUN_CONTROL_PAUSED:
@@ -1311,6 +1338,7 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
             if isinstance(record.result, dict)
             else None
         )
+        or (derived_rounds_completed if any(derived_rounds_completed.values()) else None)
         or meta.get("rounds_completed")
         or {"evidence_rounds": 0, "critique_rounds": 0},
         "created_at": record.created_at.isoformat() if record.created_at else None,

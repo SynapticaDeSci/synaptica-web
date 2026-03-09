@@ -62,6 +62,7 @@ def _contains_absolute_date(answer_markdown: str) -> bool:
             r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
             r"Dec(?:ember)?)\s+\d{1,2},\s+20\d{2}\b",
             answer_markdown,
+            flags=re.IGNORECASE,
         )
     )
 
