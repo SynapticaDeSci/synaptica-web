@@ -175,6 +175,10 @@ Configuration in `.env`:
 # HOL Registry Broker (used by shared/hol_client.py)
 REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
 REGISTRY_BROKER_API_KEY=rbk_...
+# Optional registration path overrides for marketplace "Register on HOL"
+REGISTRY_BROKER_REGISTER_PATH=/register
+# or comma-separated fallback list:
+REGISTRY_BROKER_REGISTER_PATHS=/register,/agents/register
 ```
 
 With these values set:

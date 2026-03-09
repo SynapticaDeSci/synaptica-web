@@ -20,7 +20,7 @@ import {
 import { AddAgentModal } from '@/components/AddAgentModal'
 import { HolMarketplaceView } from '@/components/HolMarketplaceView'
 import { HolRegisterBadge } from '@/components/HolRegisterBadge'
-import { getAgents, type AgentRecord } from '@/lib/api'
+import { getAgents, registerAgentOnHol, type AgentRecord } from '@/lib/api'
 
 type IconType = typeof Database
 
@@ -54,6 +54,8 @@ export function Marketplace() {
   const [selectedCategory, setSelectedCategory] = useState('All')
   const [showAllTags, setShowAllTags] = useState(false)
   const [activeSource, setActiveSource] = useState<'local' | 'hol'>('local')
+  const [registeringAgentId, setRegisteringAgentId] = useState<string | null>(null)
+  const [holRegistrationErrors, setHolRegistrationErrors] = useState<Record<string, string>>({})
 
   const { data, isLoading, isError, error, refetch } = useQuery<AgentRecord[], Error>({
     queryKey: ['agents'],
@@ -66,6 +68,28 @@ export function Marketplace() {
     setSearchQuery('')
     setSelectedCategory('All')
   }, [refetch])
+
+  const handleRegisterOnHol = useCallback(
+    async (agentId: string) => {
+      setRegisteringAgentId(agentId)
+      setHolRegistrationErrors((current) => {
+        const next = { ...current }
+        delete next[agentId]
+        return next
+      })
+
+      try {
+        await registerAgentOnHol({ agent_id: agentId, mode: 'register' })
+        await refetch()
+      } catch (err: any) {
+        const message = err?.message || 'Failed to register agent on HOL'
+        setHolRegistrationErrors((current) => ({ ...current, [agentId]: message }))
+      } finally {
+        setRegisteringAgentId(null)
+      }
+    },
+    [refetch]
+  )
 
   const agents = data ?? EMPTY_AGENTS
   const errorMessage = isError ? error?.message ?? 'Failed to load agents' : null
@@ -240,6 +264,16 @@ export function Marketplace() {
                 const priceLabel =
                   priceValue !== null ? `${priceValue.toFixed(2)} ${agent.pricing?.currency ?? ''}` : '—'
                 const rateTypeLabel = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
+                const holStatus = (agent.hol_registration_status || '').toLowerCase()
+                const hasHolUaid = Boolean(agent.hol_uaid)
+                const holRegistered = holStatus === 'registered' || holStatus === 'ok' || hasHolUaid
+                const holPending = holStatus === 'pending'
+                const canRegisterOnHol = Boolean(
+                  agent.endpoint_url && (agent.erc8004_metadata_uri || agent.metadata_gateway_url)
+                )
+                const isRegistering = registeringAgentId === agent.agent_id
+                const registerDisabled =
+                  holRegistered || holPending || isRegistering || !canRegisterOnHol
 
                 return (
                   <div
@@ -251,8 +285,8 @@ export function Marketplace() {
                         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
                           <IconComponent className="h-7 w-7" />
                           <HolRegisterBadge
-                            holUaid={(agent as any).hol_uaid}
-                            holStatus={(agent as any).hol_registration_status}
+                            holUaid={agent.hol_uaid}
+                            holStatus={agent.hol_registration_status}
                           />
                         </div>
                         <div className="flex-1">
@@ -291,6 +325,38 @@ export function Marketplace() {
                           <div className="text-xs text-slate-400">{rateTypeLabel}</div>
                         </div>
                       </div>
+
+                      <div className="mt-3 flex items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          onClick={() => void handleRegisterOnHol(agent.agent_id)}
+                          disabled={registerDisabled}
+                          className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                            registerDisabled
+                              ? 'cursor-not-allowed bg-slate-800/60 text-slate-500'
+                              : 'bg-sky-500 text-white hover:bg-sky-400'
+                          }`}
+                          title={
+                            !canRegisterOnHol
+                              ? 'Agent requires endpoint + metadata URI before HOL registration.'
+                              : undefined
+                          }
+                        >
+                          {isRegistering
+                            ? 'Registering on HOL...'
+                            : holRegistered
+                              ? 'Registered on HOL'
+                              : holPending
+                                ? 'HOL Registration Pending'
+                                : 'Register on HOL'}
+                        </button>
+                        {agent.hol_last_error && (
+                          <span className="text-right text-[11px] text-rose-300">{agent.hol_last_error}</span>
+                        )}
+                      </div>
+                      {holRegistrationErrors[agent.agent_id] && (
+                        <p className="mt-2 text-xs text-rose-300">{holRegistrationErrors[agent.agent_id]}</p>
+                      )}
                     </div>
                   </div>
                 )

@@ -56,6 +56,42 @@ def _build_client() -> httpx.Client:
     return httpx.Client(timeout=timeout, limits=limits, headers=headers, base_url=_get_base_url())
 
 
+def _normalize_register_path(path: str) -> str:
+    normalized = path.strip()
+    if not normalized:
+        return ""
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+    return normalized if normalized.startswith("/") else f"/{normalized}"
+
+
+def _get_register_paths() -> List[str]:
+    # Prefer explicit CSV list when provided.
+    paths_csv = (os.getenv("REGISTRY_BROKER_REGISTER_PATHS") or "").strip()
+    if paths_csv:
+        paths = [_normalize_register_path(item) for item in paths_csv.split(",")]
+        cleaned = [path for path in paths if path]
+        if not cleaned:
+            raise HolClientConfigurationError("REGISTRY_BROKER_REGISTER_PATHS is empty")
+        return cleaned
+
+    # Fall back to a single path override.
+    single_path = _normalize_register_path(
+        os.getenv("REGISTRY_BROKER_REGISTER_PATH", "/register")
+    )
+    if not single_path:
+        raise HolClientConfigurationError("REGISTRY_BROKER_REGISTER_PATH is empty")
+
+    # Conservative built-in fallbacks for broker variations. First item remains
+    # the configured/default path to preserve existing behavior.
+    fallbacks = [single_path, "/agents/register", "/agent/register", "/skills/publish"]
+    deduped: List[str] = []
+    for candidate in fallbacks:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
 @dataclass
 class HolAgentSummary:
     """Lightweight representation of an agent returned from search."""
@@ -246,6 +282,62 @@ def list_sessions(*, as_uaid: Optional[str] = None, limit: int = 50) -> List[Dic
     return data.get("sessions") or []
 
 
+def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> Dict[str, Any]:
+    """Register an agent in HOL Registry Broker, or request a quote for registration."""
+    normalized_mode = (mode or "register").strip().lower()
+    if normalized_mode not in {"quote", "register"}:
+        raise ValueError("mode must be either 'quote' or 'register'")
+
+    payload: Dict[str, Any] = dict(agent_payload or {})
+    payload["mode"] = normalized_mode
+
+    attempted_paths: List[str] = []
+    last_error: Optional[Exception] = None
+
+    with _build_client() as client:
+        for path in _get_register_paths():
+            attempted_paths.append(path)
+            try:
+                response = client.post(path, json=payload)
+            except httpx.HTTPError as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("HOL register_agent request failed for %s: %s", path, exc)
+                break
+
+            if response.status_code == 404:
+                logger.info("HOL register_agent path not found: %s", path)
+                last_error = httpx.HTTPStatusError(
+                    "404 Not Found",
+                    request=response.request,
+                    response=response,
+                )
+                continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPError as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("HOL register_agent failed for %s: %s", path, exc)
+                break
+
+            data = response.json()
+            if not isinstance(data, dict):
+                raise HolClientError(f"Unexpected HOL registration response payload: {data!r}")
+            return data
+
+    attempted = ", ".join(attempted_paths) or "<none>"
+    if isinstance(last_error, httpx.HTTPStatusError) and last_error.response.status_code == 404:
+        raise HolClientError(
+            "HOL register_agent failed: 404 Not Found on all candidate paths "
+            f"({attempted}). Set REGISTRY_BROKER_REGISTER_PATH or "
+            "REGISTRY_BROKER_REGISTER_PATHS to the correct endpoint."
+        ) from last_error
+
+    raise HolClientError(
+        f"HOL register_agent failed after trying paths ({attempted}): {last_error}"
+    ) from last_error
+
+
 def _coerce_str_list(value: Any) -> List[str]:
     if not value:
         return []
@@ -261,4 +353,3 @@ def _coerce_str_list(value: Any) -> List[str]:
                     cleaned_list.append(s)
         return cleaned_list
     return []
-
