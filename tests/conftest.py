@@ -1,8 +1,14 @@
 import os
 import tempfile
 from pathlib import Path
+import sys
 
 import pytest
+
+# Ensure `uv run pytest tests` can import the repo-root Python packages.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # Configure isolated SQLite database and Pinata credentials before app imports
 _temp_dir = Path(tempfile.mkdtemp(prefix="providai-tests-"))

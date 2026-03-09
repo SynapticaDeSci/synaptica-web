@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+
+# Ensure direct script execution can import repo-root packages.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from shared.database import SessionLocal, Agent as AgentModel
 from shared.registry import (
@@ -147,7 +153,7 @@ def register_all_agents() -> None:
 
     if not agents:
         print("\n❌ No active agents found in database")
-        print("   Run: python scripts/register_all_agents.py first")
+        print("   Run: uv run python scripts/register_all_agents.py first")
         return
 
     client = _client()
@@ -228,9 +234,9 @@ def register_all_agents() -> None:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python scripts/register_agents_with_metadata.py test       # Test with one agent")
-        print("  python scripts/register_agents_with_metadata.py list       # List registered agents")
-        print("  python scripts/register_agents_with_metadata.py register   # Register all agents")
+        print("  uv run python scripts/register_agents_with_metadata.py test       # Test with one agent")
+        print("  uv run python scripts/register_agents_with_metadata.py list       # List registered agents")
+        print("  uv run python scripts/register_agents_with_metadata.py register   # Register all agents")
         sys.exit(1)
 
     command = sys.argv[1].lower()

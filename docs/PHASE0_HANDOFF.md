@@ -135,7 +135,7 @@ Key changes:
 
 Backend validation:
 
-- `python -m pytest tests -q`
+- `uv run pytest tests -q`
 - Result: `25 passed`
 
 Frontend validation:

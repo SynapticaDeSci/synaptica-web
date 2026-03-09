@@ -4,7 +4,7 @@ Full Research Pipeline Demo - All 15 Agents
 This demonstrates the complete autonomous research pipeline using all 15 agents
 across the 5 research phases with agent-to-agent micropayments.
 
-Run with: python scripts/demo_full_pipeline.py
+Run with: uv run python scripts/demo_full_pipeline.py
 """
 
 import asyncio

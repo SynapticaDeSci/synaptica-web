@@ -5,7 +5,7 @@ This server runs on port 5001 and provides A2A endpoints for all research agents
 Each agent is accessible at /agents/{agent-id}
 
 Usage:
-    uvicorn agents.research.main:app --port 5001 --reload
+    uv run python -m uvicorn agents.research.main:app --port 5001 --reload
 """
 
 import logging

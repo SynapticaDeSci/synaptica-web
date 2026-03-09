@@ -9,10 +9,10 @@ This script demonstrates how to run the Executor agent to:
 
 Usage:
     # Interactive mode
-    python scripts/run_executor_agent.py
+    uv run python scripts/run_executor_agent.py
 
     # Programmatic mode
-    python scripts/run_executor_agent.py --query "Use agent trading-assistant-001 to analyze BTC/USD"
+    uv run python scripts/run_executor_agent.py --query "Use agent trading-assistant-001 to analyze BTC/USD"
 """
 
 import asyncio
@@ -162,16 +162,16 @@ def main():
         epilog="""
 Examples:
   # Interactive mode
-  python scripts/run_executor_agent.py
+  uv run python scripts/run_executor_agent.py
   
   # Run with query
-  python scripts/run_executor_agent.py --query "List all agents"
+  uv run python scripts/run_executor_agent.py --query "List all agents"
   
   # Run demo
-  python scripts/run_executor_agent.py --demo query-agent
-  python scripts/run_executor_agent.py --demo use-tool
-  python scripts/run_executor_agent.py --demo list-agents
-  python scripts/run_executor_agent.py --demo create-tool
+  uv run python scripts/run_executor_agent.py --demo query-agent
+  uv run python scripts/run_executor_agent.py --demo use-tool
+  uv run python scripts/run_executor_agent.py --demo list-agents
+  uv run python scripts/run_executor_agent.py --demo create-tool
         """
     )
     

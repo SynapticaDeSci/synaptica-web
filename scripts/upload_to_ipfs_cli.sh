@@ -166,5 +166,5 @@ echo "   3. Public gateways may be slow - consider using Pinata gateway for prod
 echo ""
 echo "🚀 Next Steps:"
 echo "   1. Update .env: METADATA_BASE_URL=https://ipfs.io/ipfs/$DIR_CID"
-echo "   2. Or use Pinata for more reliable hosting: python scripts/upload_to_pinata.py"
+echo "   2. Or use Pinata for more reliable hosting: uv run python scripts/upload_to_pinata.py"
 echo ""

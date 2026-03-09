@@ -2,7 +2,7 @@
 """
 Quick test script to verify OpenAI integration is working.
 
-Run with: python scripts/test_openai_integration.py
+Run with: uv run python scripts/test_openai_integration.py
 """
 
 import asyncio
@@ -199,7 +199,7 @@ async def main():
     if all_passed:
         print("🎉 All tests passed! Your OpenAI integration is working correctly.")
         print("\nNext steps:")
-        print("1. Run the full demo: python scripts/demo_research_pipeline.py")
+        print("1. Run the full demo: uv run python scripts/demo_research_pipeline.py")
         print("2. Monitor your OpenAI usage at: https://platform.openai.com/usage")
         print("3. Set up Hedera testnet credentials in .env")
     else:

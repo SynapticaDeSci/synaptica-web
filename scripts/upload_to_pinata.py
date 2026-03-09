@@ -11,7 +11,7 @@ Pinata Setup:
    PINATA_SECRET_KEY=your_secret_key
 
 Usage:
-    python scripts/upload_to_pinata.py
+    uv run python scripts/upload_to_pinata.py
 """
 
 import os

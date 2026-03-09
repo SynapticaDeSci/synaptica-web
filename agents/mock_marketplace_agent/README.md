@@ -13,11 +13,10 @@ Set `MOCK_AGENT_PORT` (and optionally `MOCK_AGENT_HOST`) before launching if you
 ## Running the Agent
 
 ```bash
-source .venv/bin/activate
-uvicorn agents.mock_marketplace_agent.server:app --host 0.0.0.0 --port 6123 --reload
+uv run python -m uvicorn agents.mock_marketplace_agent.server:app --host 0.0.0.0 --port 6123 --reload
 ```
 
-You can also run `python -m agents.mock_marketplace_agent.server` to use the bundled `A2AServer` runner.
+You can also run `uv run python -m agents.mock_marketplace_agent.server` to use the bundled `A2AServer` runner.
 
 ## Smoke Tests
 
