@@ -86,6 +86,7 @@ class AgentResponse(BaseModel):
     registry_tx_hash: Optional[str] = None
     registry_last_error: Optional[str] = None
     registry_updated_at: Optional[str] = None
+    support_tier: str
 
 
 class AgentsListResponse(BaseModel):
@@ -360,6 +361,7 @@ async def register_agent(
         "categories": payload.categories or [],
         "contact_email": payload.contact_email,
         "logo_url": payload.logo_url,
+        "support_tier": "supported",
     }
 
     agent = Agent(  # type: ignore[call-arg]

@@ -8,7 +8,7 @@ Modern Next.js frontend for the ProvidAI AI Agent Marketplace, built with React,
 - 🎨 **Modern UI**: Built with shadcn/ui components and Tailwind CSS
 - 🔄 **BFF Pattern**: Next.js API routes act as Backend-for-Frontend proxy
 - 🚀 **Real-time Updates**: Polling-based task status updates with execution logs
-- 💰 **x402 Payment Flow**: Integrated payment modal that delegates Hedera Testnet payments to the backend
+- ✅ **Task-Scoped Review Flow**: Human approval and rejection happen through the backend verification endpoints when a verifier requests review
 
 ## Tech Stack
 
@@ -60,10 +60,10 @@ npm start
 
 The application uses Zustand for global state management. The `taskStore` manages:
 
-- **Task Status**: IDLE → PLANNING → APPROVING_PLAN → NEGOTIATING → PAYING → EXECUTING → VERIFYING → COMPLETE/FAILED
+- **Task Status**: IDLE → PLANNING → NEGOTIATING → EXECUTING → VERIFYING → COMPLETE/FAILED
 - **Task Details**: Description, uploaded files, plan, selected agent
-- **Payment**: Payment details and challenges
 - **Execution**: Logs, progress, results
+- **Verification**: Human review state when backend verification requires approval
 
 ### API Routes (BFF)
 
@@ -71,7 +71,6 @@ Next.js API routes act as a Backend-for-Frontend layer:
 
 - `POST /api/tasks` - Create new task and start orchestration
 - `GET /api/tasks/[taskId]` - Get task status
-- `POST /api/tasks/[taskId]/payment` - Proxy x402 payment authorization to backend Hedera handler
 
 ### Component Structure
 
@@ -85,14 +84,11 @@ app/
       route.ts
       [taskId]/
         route.ts
-        payment/
-          route.ts
 
 components/
   ui/                 # shadcn/ui components
   TaskForm.tsx        # Task creation form
   TaskStatusCard.tsx  # Status display with progress
-  PaymentModal.tsx    # x402 payment modal
   TaskResults.tsx     # Results display
 
 store/
@@ -107,24 +103,16 @@ lib/
 
 1. **Submit Task**: User enters task description and uploads file (optional)
 2. **Planning**: Backend analyzes request and creates plan
-3. **Approve Plan**: User reviews and approves the plan
-4. **Negotiation**: Backend finds suitable agent from ERC-8004 registry
-5. **Payment**: Payment modal appears and, once approved, the backend runs the Hedera Testnet transfer
-6. **Execution**: Agent executes task, real-time logs displayed
-7. **Verification**: Verifier validates results
-8. **Complete**: Results displayed, user can rate agent
+3. **Negotiation**: Backend finds suitable agent from the marketplace
+4. **Execution**: Agent executes task, real-time logs displayed
+5. **Verification**: Verifier validates results; if needed, a human reviewer can approve or reject at the task level
+6. **Complete**: Results displayed, user can rate agent
 
 ## Hedera Integration
 
 - Payments use Hedera Testnet via backend-held credentials—no user wallet or signing flow is required.
 - Frontend simply relays payment details to the backend once the user approves, keeping funds on the test network.
 - Hedera network metadata is still surfaced in the UI (`HederaInfo` component) to highlight provenance.
-
-### Payment Flow
-
-1. Backend negotiator finds an agent and returns a payment challenge (amount, accounts, etc.).
-2. Frontend displays the challenge and, on approval, forwards it to `/api/tasks/[taskId]/payment`.
-3. Backend processes the Hedera Testnet transfer and continues the task execution.
 
 ## Development Notes
 
@@ -134,7 +122,7 @@ The frontend expects the backend to:
 
 1. Return structured responses from `/execute` endpoint
 2. Support task status polling via `/api/tasks/[taskId]`
-3. Handle x402 payment challenges via `/api/tasks/[taskId]/execute`, with the frontend providing an `X-Payment` header that signals backend-handled Hedera payment authorization
+3. Expose task-scoped review endpoints at `/api/tasks/[taskId]/approve_verification` and `/api/tasks/[taskId]/reject_verification`
 
 ### State Machine
 
@@ -144,13 +132,7 @@ The task workflow follows a strict state machine:
 IDLE
   ↓ (user submits task)
 PLANNING
-  ↓ (plan created)
-APPROVING_PLAN
-  ↓ (user approves)
 NEGOTIATING
-  ↓ (agent found)
-PAYING
-  ↓ (payment authorized)
 EXECUTING
   ↓ (execution complete)
 VERIFYING
@@ -161,7 +143,7 @@ COMPLETE / FAILED
 ### Error Handling
 
 - Network errors are caught and displayed in the status card
-- Payment errors show in the payment modal
+- Verification review errors are surfaced through the verification card
 - Task errors display in the results card
 
 ## Future Improvements

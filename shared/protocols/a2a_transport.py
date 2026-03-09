@@ -17,6 +17,7 @@ from typing import Iterable, List
 
 import httpx
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from shared.database import SessionLocal
 from shared.database.models import A2AEvent
@@ -25,7 +26,12 @@ from .a2a import A2AMessage
 logger = logging.getLogger(__name__)
 
 
-def publish_message(message: A2AMessage, *, tags: Iterable[str] | None = None) -> None:
+def publish_message(
+    message: A2AMessage,
+    *,
+    tags: Iterable[str] | None = None,
+    session: Session | None = None,
+) -> None:
     """Publish an A2A message.
 
     Args:
@@ -50,14 +56,20 @@ def publish_message(message: A2AMessage, *, tags: Iterable[str] | None = None) -
         message.body,
     )
 
-    _persist_event(message, tag_list)
+    _persist_event(message, tag_list, session=session)
     _dispatch_webhooks(message, tag_list)
 
 
-def _persist_event(message: A2AMessage, tags: List[str]) -> None:
+def _persist_event(
+    message: A2AMessage,
+    tags: List[str],
+    *,
+    session: Session | None = None,
+) -> None:
     """Persist the message into the shared database."""
 
-    session = SessionLocal()
+    owns_session = session is None
+    session = session or SessionLocal()
     try:
         existing = (
             session.query(A2AEvent)
@@ -92,12 +104,19 @@ def _persist_event(message: A2AMessage, tags: List[str]) -> None:
                 )
             )
 
-        session.commit()
+        if owns_session:
+            session.commit()
+        else:
+            session.flush()
     except SQLAlchemyError:
-        session.rollback()
+        if owns_session:
+            session.rollback()
         logger.exception("Failed to persist A2A message %s", message.id)
+        if not owns_session:
+            raise
     finally:
-        session.close()
+        if owns_session:
+            session.close()
 
 
 def _dispatch_webhooks(message: A2AMessage, tags: List[str]) -> None:

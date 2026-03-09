@@ -8,6 +8,9 @@ from typing import Any, Dict, Optional
 import httpx
 from strands import tool
 
+from shared.agent_utils import serialize_agent
+from shared.database import Agent as AgentModel
+from shared.database import AgentReputation, SessionLocal
 from shared.task_progress import update_progress
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,26 @@ def _legacy_agent_endpoint(agent_domain: str) -> str:
     return f"{RESEARCH_API_BASE_URL.rstrip('/')}/agents/{agent_domain}"
 
 
+def _load_local_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
+    """Load agent metadata directly from the local marketplace database."""
+
+    session = SessionLocal()
+    try:
+        agent = session.query(AgentModel).filter(AgentModel.agent_id == agent_id).one_or_none()
+        if agent is None:
+            return None
+
+        reputation = (
+            session.query(AgentReputation)
+            .filter(AgentReputation.agent_id == agent_id)
+            .one_or_none()
+        )
+        score = reputation.reputation_score if reputation else None
+        return serialize_agent(agent, reputation_score=score)
+    finally:
+        session.close()
+
+
 async def _fetch_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
     """Fetch agent metadata from the marketplace API with caching."""
     if agent_id in _agent_cache:
@@ -50,6 +73,11 @@ async def _fetch_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
                 return data
     except Exception as error:
         logger.debug("[fetch_agent_record] Failed to fetch agent %s: %s", agent_id, error)
+
+    record = _load_local_agent_record(agent_id)
+    if record:
+        _agent_cache[agent_id] = record
+        return record
 
     return None
 
@@ -139,7 +167,11 @@ async def list_research_agents() -> Dict[str, Any]:
             response.raise_for_status()
             data = response.json()
 
-        agents = data.get("agents", [])
+        agents = [
+            agent
+            for agent in data.get("agents", [])
+            if agent.get("support_tier", "supported") == "supported"
+        ]
         for agent in agents:
             agent_id = agent.get("agent_id")
             if agent_id:
@@ -258,7 +290,18 @@ async def execute_research_agent(
         }
         logger.info(f"[execute_research_agent] Payload: {payload}")
 
-        endpoint = await _resolve_agent_endpoint(agent_domain, endpoint_url)
+        record = await _fetch_agent_record(agent_domain)
+        if record and record.get("support_tier", "supported") != "supported":
+            return {
+                "success": False,
+                "agent_id": agent_domain,
+                "error": f"Agent '{agent_domain}' is not in the supported tier.",
+            }
+
+        endpoint = await _resolve_agent_endpoint(
+            agent_domain,
+            endpoint_url or (record.get("endpoint_url") if record else None),
+        )
         logger.info(f"[execute_research_agent] Calling {endpoint}")
 
         # Emit web_search progress if this is a literature/web search agent and we have a task_id

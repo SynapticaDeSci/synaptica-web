@@ -1,19 +1,28 @@
-"""x402 payment tools for Negotiator."""
+"""x402 payment tools for the phase 0 negotiator/runtime."""
+
+from __future__ import annotations
 
 import logging
 import os
 import uuid
-from typing import Any, Dict, List, cast
+from datetime import datetime
 from decimal import Decimal
+from typing import Any, Dict, List, Optional, cast
 
-from shared.hedera import (
-    get_hedera_client,
-    hedera_account_to_evm_address,
-    HEDERA_SDK_AVAILABLE,
+from shared.hedera import get_hedera_client, hedera_account_to_evm_address
+from shared.payments.service import (
+    PaymentModeError,
+    build_idempotency_key,
+    coerce_payment_mode,
+    get_existing_transition_by_task,
+    get_payment_mode,
+    record_transition,
+    run_idempotent_payment_action,
+    validate_payment_mode,
 )
 from shared.protocols import (
-    X402Payment,
     PaymentRequest,
+    X402Payment,
     build_payment_authorized_message,
     build_payment_proposal_message,
     new_thread_id,
@@ -21,8 +30,61 @@ from shared.protocols import (
 )
 from shared.database import SessionLocal, Payment
 from shared.database.models import PaymentStatus as DBPaymentStatus
+from shared.runtime import PaymentAction, PaymentActionContext, PaymentMode, assert_no_sensitive_payload
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_verifier_addresses() -> tuple[List[str], Optional[str]]:
+    verifier_addresses: List[str] = []
+    default_verifiers = os.getenv("TASK_ESCROW_DEFAULT_VERIFIERS", "").strip()
+    marketplace_treasury = os.getenv("TASK_ESCROW_MARKETPLACE_TREASURY", "").strip()
+
+    for addr in (item.strip() for item in default_verifiers.split(",") if item.strip()):
+        verifier_addresses.append(hedera_account_to_evm_address(addr))
+
+    treasury_address: Optional[str] = None
+    if marketplace_treasury:
+        treasury_address = hedera_account_to_evm_address(marketplace_treasury)
+
+    if not verifier_addresses and treasury_address:
+        verifier_addresses.append(treasury_address)
+    return verifier_addresses, treasury_address
+
+
+def _build_action_context(
+    *,
+    payment_id: Optional[str],
+    task_id: str,
+    action: PaymentAction,
+    action_context: Optional[Dict[str, Any]],
+) -> PaymentActionContext:
+    mode = get_payment_mode()
+    if action_context:
+        payload = dict(action_context)
+        payload["payment_id"] = payment_id
+        payload["task_id"] = task_id
+        payload["action"] = action.value
+        payload["idempotency_key"] = build_idempotency_key(
+            task_id,
+            payload.get("todo_id", "todo_0"),
+            payload.get("attempt_id", "attempt_0"),
+            action,
+        )
+        payload["mode"] = mode.value
+        context = PaymentActionContext.model_validate(payload)
+    else:
+        context = PaymentActionContext(
+            payment_id=payment_id,
+            task_id=task_id,
+            todo_id="todo_0",
+            attempt_id="attempt_0",
+            action=action,
+            idempotency_key=build_idempotency_key(task_id, "todo_0", "attempt_0", action),
+            mode=mode,
+        )
+    assert_no_sensitive_payload(context.model_dump(mode="json"))
+    return context
 
 
 async def create_payment_request(
@@ -32,96 +94,45 @@ async def create_payment_request(
     to_hedera_account: str,
     amount: float,
     description: str = "",
+    action_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Create an x402 payment request.
+    """Create a payment proposal and persist the initial transition."""
 
-    Args:
-        task_id: Associated task ID
-        from_agent_id: Paying agent ID
-        to_agent_id: Receiving agent ID
-        to_hedera_account: Hedera account ID of receiving agent
-        amount: Payment amount in HBAR
-        description: Payment description
+    context = _build_action_context(
+        payment_id=None,
+        task_id=task_id,
+        action=PaymentAction.PROPOSAL,
+        action_context=action_context,
+    )
 
-    Returns:
-        Payment request details
-    """
     db = SessionLocal()
     try:
-        payment_id = str(uuid.uuid4())
-        from_account = os.getenv("HEDERA_ACCOUNT_ID")
+        existing = get_existing_transition_by_task(
+            db,
+            task_id=task_id,
+            action=PaymentAction.PROPOSAL,
+            idempotency_key=context.idempotency_key,
+        )
+        if existing and isinstance(existing.result, dict):
+            return cast(Dict[str, Any], existing.result)
 
-        if not from_account:
-            # Fallback: return mock payment if Hedera not configured
-            logger.debug(f"[create_payment_request] Payment mocked for task {task_id}: HEDERA_ACCOUNT_ID not configured")
-            return {
-                "payment_id": payment_id,
-                "task_id": task_id,
-                "from_agent": from_agent_id,
-                "to_agent": to_agent_id,
-                "amount": amount,
-                "currency": "HBAR",
-                "status": "mock_pending",
-                "description": description,
-                "mock": True,
-                "message": "Payment mocked (HEDERA_ACCOUNT_ID not configured)",
-            }
+        from_account = os.getenv("HEDERA_ACCOUNT_ID", "").strip()
+        mode = coerce_payment_mode(context.mode)
+        validate_payment_mode(mode)
+        if mode != PaymentMode.OFFLINE and not from_account:
+            raise PaymentModeError("Missing HEDERA_ACCOUNT_ID for non-offline payment mode")
 
-        marketplace_treasury = os.getenv("TASK_ESCROW_MARKETPLACE_TREASURY", "").strip()
-        default_verifiers = os.getenv("TASK_ESCROW_DEFAULT_VERIFIERS", "").strip()
+        if not to_hedera_account or not to_hedera_account.strip():
+            raise ValueError("Payee Hedera account is required")
 
-        verifier_addresses: List[str] = []
-        for addr in (
-            addr.strip()
-            for addr in default_verifiers.split(",")
-            if addr.strip()
-        ):
-            try:
-                verifier_addresses.append(hedera_account_to_evm_address(addr))
-            except ValueError:
-                # Skip invalid verifier addresses silently
-                pass
-
-        treasury_address: str | None = None
-        if marketplace_treasury:
-            try:
-                treasury_address = hedera_account_to_evm_address(marketplace_treasury)
-            except ValueError:
-                # Skip invalid treasury address silently
-                pass
-
-        if not verifier_addresses and treasury_address:
-            verifier_addresses.append(treasury_address)
-
+        worker_address = hedera_account_to_evm_address(to_hedera_account)
+        verifier_addresses, treasury_address = _normalize_verifier_addresses()
         approvals_required = int(os.getenv("TASK_ESCROW_DEFAULT_APPROVALS", "1") or 1)
         if approvals_required > len(verifier_addresses) and verifier_addresses:
             approvals_required = len(verifier_addresses)
 
-        marketplace_fee_bps = int(os.getenv("TASK_ESCROW_MARKETPLACE_FEE_BPS", "0") or 0)
-        verifier_fee_bps = int(os.getenv("TASK_ESCROW_VERIFIER_FEE_BPS", "0") or 0)
-
-        # Create payment record
+        payment_id = str(uuid.uuid4())
         thread_id = new_thread_id(task_id, payment_id)
-
-        # Handle invalid Hedera account gracefully
-        try:
-            worker_address = hedera_account_to_evm_address(to_hedera_account)
-        except ValueError:
-            # Fallback: return mock payment if account ID is invalid
-            logger.debug(f"[create_payment_request] Payment mocked for task {task_id}: invalid Hedera account format '{to_hedera_account}'")
-            return {
-                "payment_id": payment_id,
-                "task_id": task_id,
-                "from_agent": from_agent_id,
-                "to_agent": to_agent_id,
-                "amount": amount,
-                "currency": "HBAR",
-                "status": "mock_pending",
-                "description": description,
-                "mock": True,
-                "message": f"Payment mocked (invalid Hedera account format: {to_hedera_account})",
-            }
 
         metadata: Dict[str, Any] = {
             "task_id": task_id,
@@ -131,9 +142,14 @@ async def create_payment_request(
             "worker_address": worker_address,
             "verifier_addresses": verifier_addresses,
             "approvals_required": approvals_required,
-            "marketplace_fee_bps": marketplace_fee_bps,
-            "verifier_fee_bps": verifier_fee_bps,
+            "marketplace_fee_bps": int(os.getenv("TASK_ESCROW_MARKETPLACE_FEE_BPS", "0") or 0),
+            "verifier_fee_bps": int(os.getenv("TASK_ESCROW_VERIFIER_FEE_BPS", "0") or 0),
             "a2a_thread_id": thread_id,
+            "payment_mode": mode.value,
+            "support_tier": "supported",
+            "proposal_idempotency_key": context.idempotency_key,
+            "attempt_id": context.attempt_id,
+            "todo_id": context.todo_id,
         }
         if treasury_address:
             metadata["marketplace_treasury"] = treasury_address
@@ -147,14 +163,11 @@ async def create_payment_request(
             to_agent=to_agent_id,
             verifier_addresses=verifier_addresses,
             approvals_required=approvals_required or 1,
-            marketplace_fee_bps=marketplace_fee_bps,
-            verifier_fee_bps=verifier_fee_bps,
+            marketplace_fee_bps=metadata["marketplace_fee_bps"],
+            verifier_fee_bps=metadata["verifier_fee_bps"],
             thread_id=thread_id,
         )
-        proposal_payload = proposal_message.to_dict()
-        metadata["a2a_messages"] = {proposal_message.type: proposal_payload}
-
-        publish_message(proposal_message, tags=("payment", "proposal"))
+        metadata["a2a_messages"] = {proposal_message.type: proposal_message.to_dict()}
 
         payment = Payment(  # type: ignore[call-arg]
             id=payment_id,
@@ -166,12 +179,11 @@ async def create_payment_request(
             status=DBPaymentStatus.PENDING,
             meta=metadata,
         )
-
         db.add(payment)
-        db.commit()
-        db.refresh(payment)
+        db.flush()
 
-        return {
+        result = {
+            "success": True,
             "payment_id": payment_id,
             "task_id": task_id,
             "from_agent": from_agent_id,
@@ -180,179 +192,138 @@ async def create_payment_request(
             "currency": "HBAR",
             "status": "pending",
             "description": description,
+            "mode": mode.value,
             "a2a": {
                 "thread_id": thread_id,
                 "proposal_message": proposal_message.to_dict(),
             },
         }
+
+        record_transition(
+            db,
+            payment_id=payment_id,
+            task_id=task_id,
+            action=PaymentAction.PROPOSAL,
+            idempotency_key=context.idempotency_key,
+            state="completed",
+            result=result,
+        )
+
+        publish_message(proposal_message, tags=("payment", "proposal"), session=db)
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
 
-async def authorize_payment(payment_id: str) -> Dict[str, Any]:
-    """
-    Authorize a payment (escrow pattern).
+async def authorize_payment(
+    payment_id: str,
+    action_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Authorize a payment proposal using explicit payment modes and idempotency."""
 
-    This marks the payment as authorized and ready for release pending verification.
-
-    Args:
-        payment_id: Payment ID to authorize
-
-    Returns:
-        Authorization details
-    """
     db = SessionLocal()
     try:
-        payment = db.query(Payment).filter(Payment.id == payment_id).first()
+        payment = db.query(Payment).filter(Payment.id == payment_id).one_or_none()
+        if payment is None:
+            raise ValueError(f"Payment {payment_id} not found")
+        task_id = str(payment.task_id)
+    finally:
+        db.close()
 
-        if not payment:
-            # Return mock authorization if payment not found
-            logger.debug(f"[authorize_payment] Payment authorization mocked for {payment_id}: payment record not found")
-            return {
-                "payment_id": payment_id,
-                "authorization_id": f"mock-{uuid.uuid4().hex[:12]}",
-                "status": "mock_authorized",
-                "mock": True,
-                "message": "Payment authorization mocked (payment record not found)",
-            }
+    context = _build_action_context(
+        payment_id=payment_id,
+        task_id=task_id,
+        action=PaymentAction.AUTHORIZE,
+        action_context=action_context,
+    )
 
-        # Create payment request object
+    async def _runner(db: Any) -> Dict[str, Any]:
+        payment = db.query(Payment).filter(Payment.id == payment_id).one()
         payment_row: Any = payment
         metadata = dict(cast(Dict[str, Any], payment_row.meta or {}))
-        thread_id = metadata.get("a2a_thread_id") or new_thread_id(
-            str(payment_row.task_id),
-            payment_id,
+        thread_id = metadata.get("a2a_thread_id") or new_thread_id(str(payment_row.task_id), payment_id)
+
+        worker_address = metadata.get("worker_address") or hedera_account_to_evm_address(
+            metadata.get("to_hedera_account", "")
         )
-
-        # Normalize worker and verifier addresses for legacy records.
-        try:
-            worker_address = metadata.get("worker_address")
-            if worker_address:
-                metadata["worker_address"] = hedera_account_to_evm_address(worker_address)
-            elif metadata.get("to_hedera_account"):
-                metadata["worker_address"] = hedera_account_to_evm_address(
-                    metadata["to_hedera_account"]
-                )
-        except ValueError:
-            # Return mock authorization if invalid worker address
-            logger.debug(f"[authorize_payment] Payment authorization mocked for {payment_id}: invalid worker address")
-            return {
-                "payment_id": payment_id,
-                "authorization_id": f"mock-{uuid.uuid4().hex[:12]}",
-                "status": "mock_authorized",
-                "mock": True,
-                "message": "Payment authorization mocked (invalid worker address)",
-            }
-
-        verifiers = metadata.get("verifier_addresses") or []
-        if isinstance(verifiers, list) and verifiers:
-            try:
-                metadata["verifier_addresses"] = [
-                    hedera_account_to_evm_address(address) for address in verifiers
-                ]
-            except ValueError:
-                # Skip invalid verifier addresses
-                metadata["verifier_addresses"] = []
-        elif metadata.get("marketplace_treasury"):
-            try:
-                metadata["verifier_addresses"] = [
-                    hedera_account_to_evm_address(metadata["marketplace_treasury"])
-                ]
-            except ValueError:
-                # Skip invalid treasury address
-                metadata["verifier_addresses"] = []
+        metadata["worker_address"] = worker_address
 
         payment_request = PaymentRequest(
             payment_id=payment_id,
             from_account=os.getenv("HEDERA_ACCOUNT_ID", ""),
-            to_account=metadata.get("worker_address", metadata.get("to_hedera_account", "")),
-            amount=Decimal(str(payment.amount)),
+            to_account=worker_address,
+            amount=Decimal(str(payment_row.amount)),
             description=metadata.get("description", ""),
             metadata=metadata,
         )
 
-        offline_mode = bool(os.getenv("X402_OFFLINE", "").strip()) or not HEDERA_SDK_AVAILABLE
-
-        if offline_mode:
+        mode = coerce_payment_mode(context.mode)
+        if mode == PaymentMode.OFFLINE:
             auth_id = f"offline-{uuid.uuid4().hex[:12]}"
         else:
             hedera_client = get_hedera_client()
             x402 = X402Payment(hedera_client)
             auth_id = await x402.authorize_payment(payment_request)
 
-        # Update payment record
         payment_row.authorization_id = auth_id
         payment_row.transaction_id = auth_id
         payment_row.status = DBPaymentStatus.AUTHORIZED
+        metadata["payment_mode"] = mode.value
 
         authorized_message = build_payment_authorized_message(
             payment_id=payment_id,
             task_id=str(payment_row.task_id),
-            amount=Decimal(str(payment.amount)),
+            amount=Decimal(str(payment_row.amount)),
             currency=str(payment_row.currency),
             from_agent=str(payment_row.from_agent_id),
             to_agent=str(payment_row.to_agent_id),
             transaction_id=auth_id,
             thread_id=thread_id,
         )
-
-        authorized_payload = authorized_message.to_dict()
         messages = dict(cast(Dict[str, Any], metadata.get("a2a_messages") or {}))
-        messages[authorized_message.type] = authorized_payload
+        messages[authorized_message.type] = authorized_message.to_dict()
         metadata["a2a_thread_id"] = thread_id
         metadata["a2a_messages"] = messages
         payment_row.meta = metadata
 
-        publish_message(authorized_message, tags=("payment", "authorized"))
-
-        db.commit()
-        db.refresh(payment)
+        publish_message(authorized_message, tags=("payment", "authorized"), session=db)
 
         return {
+            "success": True,
             "payment_id": payment_id,
             "authorization_id": auth_id,
             "status": "authorized",
+            "mode": mode.value,
             "message": "Payment authorized. Waiting for verification to release funds.",
             "a2a": {
                 "thread_id": thread_id,
                 "authorized_message": authorized_message.to_dict(),
             },
         }
-    finally:
-        db.close()
+
+    return await run_idempotent_payment_action(
+        payment_id=payment_id,
+        context=context,
+        runner=_runner,
+    )
 
 
 async def get_payment_status(payment_id: str) -> Dict[str, Any]:
-    """
-    Get current payment status.
+    """Get the current payment status and transition metadata."""
 
-    Args:
-        payment_id: Payment ID
-
-    Returns:
-        Payment status and details
-    """
     db = SessionLocal()
     try:
         payment = db.query(Payment).filter(Payment.id == payment_id).first()
-
         if not payment:
             raise ValueError(f"Payment {payment_id} not found")
 
         payment_row: Any = payment
         metadata = dict(cast(Dict[str, Any], payment_row.meta or {}))
-        a2a_info = None
-        thread_id = metadata.get("a2a_thread_id")
-        if thread_id or metadata.get("a2a_messages"):
-            a2a_info = {
-                "thread_id": thread_id,
-                "messages": metadata.get("a2a_messages", {}),
-            }
-
         completed_at_value = payment_row.completed_at
-        completed_at_iso = (
-            completed_at_value.isoformat() if completed_at_value is not None else None
-        )
 
         return {
             "payment_id": str(payment_row.id),
@@ -363,8 +334,12 @@ async def get_payment_status(payment_id: str) -> Dict[str, Any]:
             "transaction_id": payment_row.transaction_id,
             "authorization_id": payment_row.authorization_id,
             "created_at": payment_row.created_at.isoformat(),
-            "completed_at": completed_at_iso,
-            "a2a": a2a_info,
+            "completed_at": completed_at_value.isoformat() if completed_at_value else None,
+            "a2a": {
+                "thread_id": metadata.get("a2a_thread_id"),
+                "messages": metadata.get("a2a_messages", {}),
+            },
+            "mode": metadata.get("payment_mode", get_payment_mode().value),
         }
     finally:
         db.close()

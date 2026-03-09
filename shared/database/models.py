@@ -133,6 +133,38 @@ class Payment(Base):
     to_agent = relationship(
         "Agent", foreign_keys=[to_agent_id], back_populates="payments_received"
     )
+    state_transitions = relationship(
+        "PaymentStateTransition",
+        back_populates="payment",
+        cascade="all, delete-orphan",
+    )
+
+
+class PaymentStateTransition(Base):
+    """Idempotent payment state transitions."""
+
+    __tablename__ = "payment_state_transitions"
+    __table_args__ = (
+        UniqueConstraint(
+            "payment_id",
+            "action",
+            "idempotency_key",
+            name="uq_payment_state_transitions_idempotency",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    action = Column(String, nullable=False)
+    idempotency_key = Column(String, nullable=False)
+    state = Column(String, nullable=False, default="completed")
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    payment = relationship("Payment", back_populates="state_transitions")
+    task = relationship("Task")
 
 
 class DynamicTool(Base):

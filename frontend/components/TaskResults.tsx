@@ -393,7 +393,7 @@ export function TaskResults() {
 
         {result.report && (
           <div className="p-4 bg-muted rounded-lg">
-            <h4 className="font-semibold mb-2">Verifier's Report:</h4>
+            <h4 className="font-semibold mb-2">Verifier&apos;s Report:</h4>
             <p className="text-sm whitespace-pre-wrap">{result.report}</p>
           </div>
         )}
@@ -462,4 +462,3 @@ export function TaskResults() {
     </Card>
   )
 }
-

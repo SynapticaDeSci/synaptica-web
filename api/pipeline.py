@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """
-Research Pipeline API Endpoint
-Integrates with the payment and agent system for research tasks
+Legacy demo-only research pipeline API.
+
+This module is not mounted by ``api.main`` and is retained only as a reference
+for the original hackathon prototype. The active phase 0 runtime uses
+``POST /execute`` in ``api.main`` instead.
 """
 
 import os

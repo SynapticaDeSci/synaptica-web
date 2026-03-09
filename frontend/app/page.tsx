@@ -5,7 +5,6 @@ import Image from 'next/image'
 import { HederaInfo } from '@/components/HederaInfo'
 import { TaskForm } from '@/components/TaskForm'
 import { TaskStatusCard } from '@/components/TaskStatusCard'
-import { PaymentModal } from '@/components/PaymentModal'
 import { TaskResults } from '@/components/TaskResults'
 import { Tabs } from '@/components/Tabs'
 import { Transactions } from '@/components/Transactions'
@@ -21,9 +20,7 @@ import { Button } from '@/components/ui/button'
 const statusMessages: Record<TaskStatus, string> = {
   IDLE: 'Ready for your research query',
   PLANNING: 'Analyzing research requirements',
-  APPROVING_PLAN: 'Research plan ready for review',
   NEGOTIATING: 'Matching with specialist agent',
-  PAYING: 'Processing microtransaction on Hedera',
   EXECUTING: 'Research agent collecting & analyzing data',
   VERIFYING: 'Independent verification in progress',
   COMPLETE: 'Research complete & verified',
@@ -89,12 +86,9 @@ const flowSteps: Array<{ badge: string; title: string; description: string; icon
 export default function Home() {
   const {
     status,
-    taskId,
     description,
     setStatus,
     setTaskId,
-    setSelectedAgent,
-    setPaymentDetails,
     addExecutionLog,
     setProgressLogs,
     setVerificationPending,
@@ -228,14 +222,15 @@ export default function Home() {
           if (lastProgress.step === 'initialization' || lastProgress.step === 'orchestrator_analysis') {
             setStatus('PLANNING')
           } else if (lastProgress.step === 'planning') {
-            setStatus('APPROVING_PLAN')
-          } else if (lastProgress.step === 'negotiator') {
+            setStatus('PLANNING')
+          } else if (lastProgress.step === 'negotiator' || lastProgress.step.startsWith('negotiator_')) {
             setStatus('NEGOTIATING')
-          } else if (lastProgress.step === 'payment') {
-            setStatus('PAYING')
-          } else if (lastProgress.step === 'executor') {
+          } else if (lastProgress.step === 'executor' || lastProgress.step.startsWith('executor_')) {
             setStatus('EXECUTING')
-          } else if (lastProgress.step.startsWith('verification_')) {
+          } else if (
+            lastProgress.step === 'verifier' ||
+            lastProgress.step.startsWith('verification_')
+          ) {
             setStatus('VERIFYING')
           }
         }
@@ -280,53 +275,6 @@ export default function Home() {
     }
 
     poll()
-  }
-
-  // Handle plan approval
-  const handleApprovePlan = async () => {
-    if (!taskId) return
-
-    try {
-      setStatus('NEGOTIATING')
-      addExecutionLog({
-        timestamp: new Date().toLocaleTimeString(),
-        message: 'Finding suitable agent...',
-        source: 'negotiator',
-      })
-
-      setTimeout(() => {
-        const mockAgent = {
-          agentId: 'databot_v3',
-          name: 'DataBot_v3',
-          description: 'AI agent specialized in data analysis',
-          reputation: 4.8,
-          price: 4.5,
-          currency: 'USDC',
-          capabilities: ['Python data analysis', 'CSV ingestion', 'Statistical analysis'],
-        }
-
-        setSelectedAgent(mockAgent)
-        setPaymentDetails({
-          paymentId: `payment_${Date.now()}`,
-          amount: 4.5,
-          currency: 'USDC',
-          fromAccount: 'user_wallet',
-          toAccount: mockAgent.agentId,
-          agentName: mockAgent.name,
-          description: `Task execution payment for ${mockAgent.name}`,
-        })
-
-        addExecutionLog({
-          timestamp: new Date().toLocaleTimeString(),
-          message: `Agent found: ${mockAgent.name} (${mockAgent.reputation} stars) for $${mockAgent.price}`,
-          source: 'negotiator',
-        })
-      }, 2000)
-    } catch (error: any) {
-      console.error('Error approving plan:', error)
-      setError(error.message || 'Failed to approve plan')
-      setStatus('FAILED')
-    }
   }
 
   const statusIndicatorClass =
@@ -415,8 +363,6 @@ export default function Home() {
                                 </div>
                               )}
                             </div>
-
-                            <PaymentModal />
                           </>
                         ),
                       },

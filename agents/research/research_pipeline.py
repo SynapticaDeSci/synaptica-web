@@ -1,4 +1,9 @@
-"""Research Pipeline orchestration for coordinating research agents."""
+"""Legacy demo research pipeline orchestration.
+
+This class is retained as a reference for the original hackathon prototype.
+It is not part of the active phase 0 runtime, which now runs through
+``POST /execute`` in ``api.main``.
+"""
 
 import uuid
 import json

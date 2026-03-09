@@ -1,4 +1,7 @@
-"""Payment management routes."""
+"""Legacy payment-management routes kept for reference only.
+
+These routes are not mounted by ``api.main`` in the active phase 0 runtime.
+"""
 
 from typing import Any, Dict, List, Optional, cast
 from fastapi import APIRouter, Depends, HTTPException
