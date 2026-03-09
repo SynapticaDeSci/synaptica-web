@@ -2,7 +2,7 @@
 """
 View research artifacts stored in the database.
 
-Run with: python scripts/view_artifacts.py
+Run with: uv run python scripts/view_artifacts.py
 """
 
 import sys
@@ -195,7 +195,7 @@ def main():
         pipelines = view_pipelines()
         if pipelines:
             print("\nTo view details of a pipeline, run:")
-            print(f"python scripts/view_artifacts.py --pipeline {pipelines[0].id}")
+            print(f"uv run python scripts/view_artifacts.py --pipeline {pipelines[0].id}")
     else:
         # Default: show latest pipeline
         db = SessionLocal()
@@ -206,7 +206,7 @@ def main():
                 view_pipeline_details(latest.id)
             else:
                 print("No pipelines found in database!")
-                print("\nRun the demo first: python scripts/demo_research_pipeline.py")
+                print("\nRun the demo first: uv run python scripts/demo_research_pipeline.py")
         finally:
             db.close()
 

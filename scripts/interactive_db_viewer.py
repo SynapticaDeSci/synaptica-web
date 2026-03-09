@@ -2,7 +2,7 @@
 """
 Interactive database viewer for research artifacts.
 
-Run with: python scripts/interactive_db_viewer.py
+Run with: uv run python scripts/interactive_db_viewer.py
 """
 
 import sys

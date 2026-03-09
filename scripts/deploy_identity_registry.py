@@ -117,9 +117,9 @@ try:
         print(f"   1. Update your .env file:")
         print(f"      IDENTITY_REGISTRY_ADDRESS={contract_address}")
         print(f"   2. Test registration:")
-        print(f"      python scripts/register_agents_on_chain.py test")
+        print(f"      uv run python scripts/register_agents_on_chain.py test")
         print(f"   3. Register all agents:")
-        print(f"      python scripts/register_agents_on_chain.py register")
+        print(f"      uv run python scripts/register_agents_on_chain.py register")
 
     else:
         print(f"\n❌ Deployment failed!")

@@ -2,7 +2,7 @@
 """
 Register all research agents in the database.
 
-Run with: python scripts/register_all_agents.py
+Run with: uv run python scripts/register_all_agents.py
 """
 
 import sys

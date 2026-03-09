@@ -42,7 +42,7 @@ x402 Payment Tasks        Checks
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.12
 - Node.js 18+
 - PostgreSQL (or SQLite for development)
 - OpenAI API key (for agents)
@@ -51,7 +51,10 @@ x402 Payment Tasks        Checks
 
 ```bash
 # Install Python dependencies
-uv pip install -r requirements.txt
+uv sync
+
+# Or use the shortcut
+make sync
 
 # Install frontend dependencies
 cd frontend
@@ -63,7 +66,9 @@ cp .env.example .env
 # Edit .env with your credentials
 
 # Initialize database
-python -c "from shared.database import Base, engine; Base.metadata.create_all(engine)"
+uv run python -c "from shared.database import Base, engine; Base.metadata.create_all(engine)"
+# Or use the shortcut
+make db-init
 ```
 
 ### Configuration
@@ -111,20 +116,21 @@ Start all services in separate terminals:
 
 ```bash
 # Terminal 1: Frontend
-cd frontend
-npm run dev
+make frontend-dev
 # Runs at http://localhost:3000
 
 # Terminal 2: Backend API
-python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+make api
 # Runs at http://localhost:8000
 
 # Terminal 3: Sample Research Agents
-python -m uvicorn agents.research.main:app --reload --host 0.0.0.0 --port 5001
+make research
 # Runs at http://localhost:5001
 ```
 
 Visit http://localhost:3000 to use the platform.
+
+Common shortcuts are available in [`Makefile`](/Users/tiencheng/Projects/Personal/synaptica-web/Makefile). Run `make help` to see the full list.
 
 ### Agent Marketplace Submission
 
@@ -138,7 +144,7 @@ When a builder submits an agent:
 
 - The backend validates the payload, stores it in the `agents` table, and uploads ERC-8004 metadata to Pinata.
 - A Pinata CID and gateway URL are returned in the success screen.
-- The API automatically queues on-chain registration after the Pinata upload. The response now includes `registry_status` / `registry_last_error` fields so builders can see whether the transaction succeeded. Use `python scripts/register_agents_with_metadata.py register` only for backfilling legacy agents or manual retries.
+- The API automatically queues on-chain registration after the Pinata upload. The response now includes `registry_status` / `registry_last_error` fields so builders can see whether the transaction succeeded. Use `uv run python scripts/register_agents_with_metadata.py register` only for backfilling legacy agents or manual retries.
 
 The Add Agent button is available at the top-right of the marketplace grid in the web UI.
 
@@ -151,7 +157,7 @@ When legacy metadata still points at `http://localhost:5001`, set `AGENT_ENDPOIN
 The API now treats the ERC-8004 Identity Registry as the source of truth. Configure `IDENTITY_CONTRACT_ADDRESS`, `HEDERA_RPC_URL`, and (optionally) `AGENT_METADATA_GATEWAY_URL` plus `AGENT_REGISTRY_CACHE_TTL_SECONDS` in `.env`. Run a manual sync at any time with:
 
 ```bash
-python scripts/sync_agents_from_registry.py --force
+uv run python scripts/sync_agents_from_registry.py --force
 ```
 
 This command fetches domains from the on-chain registry, resolves metadata, merges reputation/validation stats, and updates the local SQLite cache used by the marketplace API.
@@ -167,6 +173,8 @@ This command fetches domains from the on-chain registry, resolves metadata, merg
 5. View results and transaction history
 
 ## Project Structure
+
+This repository is a monorepo with one shared Python application environment plus one separate Next.js frontend app. The Python runtime spans `api/`, `agents/`, and `shared/` under the root `pyproject.toml`.
 
 ```
 SynapticaWeb/
@@ -195,7 +203,8 @@ SynapticaWeb/
 │   ├── database/            # SQLAlchemy models
 │   ├── hedera/              # Hedera integration
 │   └── protocols/           # ERC-8004, x402
-└── requirements.txt
+├── pyproject.toml           # Root Python project and dependencies
+└── uv.lock                  # Locked Python dependency resolution
 ```
 
 ## Smart Contracts
@@ -223,10 +232,12 @@ The smart contracts are deployed on Hedera testnet and integrated with this plat
 ## Testing
 
 ```bash
-python3 -m pytest
+uv run pytest tests
+# Or use:
+make test
 ```
 
-> Install dependencies with `pip install -r requirements.txt` before running the test suite.
+Install dependencies with `uv sync` before running the test suite.
 
 ## Protocols
 

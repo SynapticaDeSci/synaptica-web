@@ -222,7 +222,7 @@ def register_all_agents():
 
         if not agents:
             print("\n❌ No active agents found in database")
-            print("   Run: python scripts/register_all_agents.py first")
+            print("   Run: uv run python scripts/register_all_agents.py first")
             return
 
         print(f"\n📋 Found {len(agents)} active agents in database")
@@ -363,9 +363,9 @@ def main():
         else:
             print(f"❌ Unknown command: {command}")
             print("\nUsage:")
-            print("  python scripts/register_agents_on_chain.py test       # Test with one agent")
-            print("  python scripts/register_agents_on_chain.py list       # List registered agents")
-            print("  python scripts/register_agents_on_chain.py register   # Register all agents")
+            print("  uv run python scripts/register_agents_on_chain.py test       # Test with one agent")
+            print("  uv run python scripts/register_agents_on_chain.py list       # List registered agents")
+            print("  uv run python scripts/register_agents_on_chain.py register   # Register all agents")
     else:
         print("\n" + "="*80)
         print("ProvidAI Agent Registration Script")
@@ -375,9 +375,9 @@ def main():
         print("  list       - List agents registered on-chain")
         print("  register   - Register all agents from database")
         print("\nUsage:")
-        print("  python scripts/register_agents_on_chain.py <command>")
+        print("  uv run python scripts/register_agents_on_chain.py <command>")
         print("\nExample:")
-        print("  python scripts/register_agents_on_chain.py test")
+        print("  uv run python scripts/register_agents_on_chain.py test")
 
 
 if __name__ == "__main__":

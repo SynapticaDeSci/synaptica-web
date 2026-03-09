@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
@@ -25,6 +26,11 @@ from hiero_sdk_python import (
 from hiero_sdk_python.exceptions import PrecheckError, ReceiptStatusError
 from hiero_sdk_python.crypto.private_key import PrivateKey
 from web3 import Web3
+
+# Ensure direct script execution can import repo-root packages.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from shared.database import Agent as AgentModel
 from shared.database import SessionLocal

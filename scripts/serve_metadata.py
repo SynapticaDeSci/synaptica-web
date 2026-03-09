@@ -8,7 +8,7 @@ This is for testing/development. For production, upload metadata to:
 - Your own API server
 
 Usage:
-    python scripts/serve_metadata.py
+    uv run python scripts/serve_metadata.py
 
 Then metadata will be available at:
     http://localhost:8001/problem-framer-001.json
@@ -46,7 +46,7 @@ def serve_metadata():
 
     if not METADATA_DIR.exists():
         print(f"❌ Metadata directory not found: {METADATA_DIR}")
-        print("\nRun first: python scripts/generate_agent_metadata.py")
+        print("\nRun first: uv run python scripts/generate_agent_metadata.py")
         return
 
     # Change to metadata directory

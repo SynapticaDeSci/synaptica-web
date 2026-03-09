@@ -15,8 +15,8 @@ Advantages:
 - No credit card required
 
 Usage:
-    pip install web3-storage
-    python scripts/upload_to_web3storage.py
+    uv sync
+    uv run python scripts/upload_to_web3storage.py
 """
 
 import os
@@ -42,7 +42,7 @@ def check_dependencies():
     except ImportError:
         print("❌ Required package not installed")
         print("\nInstall with:")
-        print("   pip install requests")
+        print("   uv add requests")
         return False
 
 
@@ -189,7 +189,7 @@ def upload_all_metadata():
     print(f"      curl {result['url']}/{agent_id}.json")
     print()
     print("   3. Use this URL when registering agents:")
-    print(f"      python scripts/register_agents_with_metadata.py register")
+    print(f"      uv run python scripts/register_agents_with_metadata.py register")
     print()
     print("📌 Notes:")
     print("   • Files are permanently pinned on web3.storage")

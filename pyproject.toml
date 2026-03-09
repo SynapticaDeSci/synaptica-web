@@ -1,0 +1,45 @@
+[project]
+name = "synaptica-web"
+version = "0.1.0"
+description = "Synaptica monorepo Python application for API, agents, and shared runtime services."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic>=0.34.0",
+    "openai>=1.0.0",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.2",
+    "strands-agents",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0.0",
+    "alembic>=1.13.0",
+    "psycopg2-binary>=2.9.0",
+    "aiosqlite>=0.20.0",
+    "python-dotenv>=1.0.0",
+    "pydantic[email]>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.27.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bs4",
+    "web3>=6.0.0",
+    "eth-account>=0.13.0",
+    "py-solc-x>=2.0.0",
+    "arxiv>=2.0.0",
+    "semanticscholar>=0.3.0",
+    "biopython>=1.83",
+    "networkx>=3.0",
+    "ipfshttpclient",
+    "python-docx>=1.0.0",
+    "reportlab>=4.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]

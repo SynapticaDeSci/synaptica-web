@@ -3,10 +3,10 @@
 Reputation Management Script for ProvidAI
 
 Usage:
-  python scripts/manage_reputation.py view              # View all reputations
-  python scripts/manage_reputation.py boost [agent_id]  # Boost specific agent (or all if no ID)
-  python scripts/manage_reputation.py reset             # Reset all to neutral
-  python scripts/manage_reputation.py set <agent_id> <score>  # Set specific score
+  uv run python scripts/manage_reputation.py view              # View all reputations
+  uv run python scripts/manage_reputation.py boost [agent_id]  # Boost specific agent (or all if no ID)
+  uv run python scripts/manage_reputation.py reset             # Reset all to neutral
+  uv run python scripts/manage_reputation.py set <agent_id> <score>  # Set specific score
 """
 
 import sys
@@ -190,8 +190,8 @@ def main():
 
     elif command == "set":
         if len(sys.argv) < 4:
-            print("Usage: python scripts/manage_reputation.py set <agent_id> <score>")
-            print("Example: python scripts/manage_reputation.py set problem-framer-001 0.95")
+            print("Usage: uv run python scripts/manage_reputation.py set <agent_id> <score>")
+            print("Example: uv run python scripts/manage_reputation.py set problem-framer-001 0.95")
             sys.exit(1)
 
         agent_id = sys.argv[2]

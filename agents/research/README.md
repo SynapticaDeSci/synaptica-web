@@ -33,5 +33,5 @@ This directory contains all research agents and a FastAPI server to host them on
 
 ```bash
 # From the project root
-uvicorn agents.research.main:app --port 5001 --reload
+uv run python -m uvicorn agents.research.main:app --port 5001 --reload
 ```

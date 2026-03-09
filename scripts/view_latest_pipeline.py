@@ -122,7 +122,7 @@ def view_latest_pipeline():
 
         print("\n" + "=" * 100)
         print("To view full artifact content, use:")
-        print(f"  python scripts/view_artifacts.py --pipeline {pipeline.id}")
+        print(f"  uv run python scripts/view_artifacts.py --pipeline {pipeline.id}")
         print("=" * 100)
 
     finally:

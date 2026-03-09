@@ -8,7 +8,7 @@ This script demonstrates the full research pipeline with:
 - Interpretation
 - Publication
 
-Run with: python scripts/demo_research_pipeline.py
+Run with: uv run python scripts/demo_research_pipeline.py
 """
 
 import asyncio

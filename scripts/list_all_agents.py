@@ -2,7 +2,7 @@
 """
 List all research agents in the registry.
 
-Run with: python scripts/list_all_agents.py
+Run with: uv run python scripts/list_all_agents.py
 """
 
 import sys
