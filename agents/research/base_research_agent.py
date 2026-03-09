@@ -4,7 +4,7 @@ import os
 import re
 from typing import Dict, Any, List, Optional
 from abc import ABC, abstractmethod
-from shared.openai_agent import Agent
+from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 from shared.database import SessionLocal, Agent as AgentModel, AgentReputation
 from datetime import datetime
 from shared.research.catalog import default_research_endpoint, infer_support_tier
@@ -29,7 +29,7 @@ class BaseResearchAgent(ABC):
         description: str,
         capabilities: List[str],
         pricing: Dict[str, Any],
-        model: str = "gpt-4-turbo-preview",
+        model: str = "gpt-5.4",
     ):
         """
         Initialize base research agent.
@@ -57,7 +57,7 @@ class BaseResearchAgent(ABC):
         # No need to create client here, will be created in create_agent()
 
         # Initialize agent (will be created in create_agent)
-        self.agent: Optional[Agent] = None
+        self.agent: Optional[AsyncStrandsAgent] = None
 
         # Register agent in database
         self._register_in_database()
@@ -206,17 +206,20 @@ class BaseResearchAgent(ABC):
         """
         pass
 
-    def create_agent(self) -> Agent:
+    def create_agent(self) -> AsyncStrandsAgent:
         """
         Create OpenAI agent instance.
 
         Returns:
             Configured Agent instance
         """
-        self.agent = Agent(
-            model=self.model,
+        self.agent = create_strands_openai_agent(
             system_prompt=self.get_system_prompt(),
             tools=self.get_tools(),
+            model=self.model,
+            agent_id=self.agent_id,
+            name=self.name,
+            description=self.description,
         )
         return self.agent
 

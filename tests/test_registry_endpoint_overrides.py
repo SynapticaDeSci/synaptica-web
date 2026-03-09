@@ -68,3 +68,15 @@ def test_health_override_falls_back_to_primary_env(monkeypatch):
     result = _call(url, kind="health")
 
     assert result == "https://agents.example.com/agents/bias-detector-001/health"
+
+
+def test_supported_agents_keep_local_reputation_floor():
+    result = registry_sync._effective_reputation_score("problem-framer-001", 0.0)
+
+    assert result == 0.8
+
+
+def test_non_supported_agents_use_raw_reputation_score():
+    result = registry_sync._effective_reputation_score("bias-detector-001", 0.25)
+
+    assert result == 0.25

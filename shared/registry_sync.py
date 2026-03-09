@@ -26,11 +26,13 @@ from shared.agents_cache import rebuild_agents_cache
 from shared.handlers.identity_registry_handlers import get_all_domains, resolve_by_domain
 from shared.handlers.reputation_registry_handlers import get_full_reputation_info
 from shared.handlers.validation_registry_handlers import get_full_validation_info
+from shared.research.catalog import SUPPORTED_AGENT_DETAILS
 
 logger = logging.getLogger(__name__)
 
 _SYNC_LOCK = threading.Lock()
 _METADATA_CACHE_LOCK = threading.Lock()
+SUPPORTED_AGENT_REPUTATION_FLOOR = 0.8
 
 
 class RegistrySyncError(RuntimeError):
@@ -665,6 +667,10 @@ def _apply_snapshots(session: Session, snapshots: List[AgentSnapshot]) -> List[s
 
 
 def _upsert_reputation(session: Session, snapshot: AgentSnapshot) -> None:
+    effective_reputation_score = _effective_reputation_score(
+        snapshot.agent_id,
+        snapshot.reputation_score,
+    )
     reputation = (
         session.query(AgentReputation)
         .filter(AgentReputation.agent_id == snapshot.agent_id)
@@ -674,11 +680,11 @@ def _upsert_reputation(session: Session, snapshot: AgentSnapshot) -> None:
     if reputation is None:
         reputation = AgentReputation(  # type: ignore[call-arg]
             agent_id=snapshot.agent_id,
-            reputation_score=snapshot.reputation_score,
+            reputation_score=effective_reputation_score,
         )
         session.add(reputation)
     else:
-        reputation.reputation_score = snapshot.reputation_score
+        reputation.reputation_score = effective_reputation_score
 
     meta = dict(reputation.meta or {})
     meta.update(
@@ -876,6 +882,15 @@ def _normalize_reputation_score(reputation: Dict[str, Any]) -> float:
     if score > 1:
         score = score / 100.0
     return max(0.0, min(1.0, score))
+
+
+def _effective_reputation_score(agent_id: str, raw_score: float) -> float:
+    """Keep curated supported agents runnable even when registry reputation is empty."""
+
+    normalized = max(0.0, min(1.0, float(raw_score)))
+    if agent_id in SUPPORTED_AGENT_DETAILS:
+        return max(normalized, SUPPORTED_AGENT_REPUTATION_FLOOR)
+    return normalized
 
 
 def _safe_reputation_lookup(agent_id: int) -> Dict[str, Any]:

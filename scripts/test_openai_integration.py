@@ -49,7 +49,7 @@ async def test_openai_connection():
 
         print("Testing GPT-3.5-turbo (cheaper model)...")
         response = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-5.4",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": "Say 'Hello, ProvidAI is working!' in exactly those words."}
@@ -66,7 +66,7 @@ async def test_openai_connection():
         # Test GPT-4 if you want (more expensive)
         print("Testing GPT-4-turbo (advanced model)...")
         response2 = await client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model="gpt-5.4",
             messages=[
                 {"role": "system", "content": "You are a research assistant."},
                 {"role": "user", "content": "In one sentence, what is blockchain?"}
@@ -99,7 +99,7 @@ async def test_openai_agent_wrapper():
 
         # Create agent
         agent = Agent(
-            model="gpt-3.5-turbo",
+            model="gpt-5.4",
             system_prompt="You are a helpful research assistant specialized in blockchain technology.",
             tools=[]
         )

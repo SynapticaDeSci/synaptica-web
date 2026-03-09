@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import Image from 'next/image'
+import Link from 'next/link'
 import { HederaInfo } from '@/components/HederaInfo'
 import { TaskForm } from '@/components/TaskForm'
 import { TaskStatusCard } from '@/components/TaskStatusCard'
@@ -307,6 +308,13 @@ export default function Home() {
                   <p className="text-sm text-slate-300">AI research assistant powered by specialized agents and microtransactions</p>
                 </div>
               </div>
+              <Button
+                asChild
+                variant="outline"
+                className="border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+              >
+                <Link href="/research-runs">Open Research Runs Beta</Link>
+              </Button>
             </nav>
 
             <div className="w-full">

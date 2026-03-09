@@ -19,6 +19,17 @@ export interface TaskResponse {
   error?: string;
 }
 
+export interface TaskVerificationData {
+  todo_id: string;
+  payment_id: string;
+  quality_score: number;
+  dimension_scores: Record<string, number>;
+  feedback: string;
+  task_result: any;
+  agent_name: string;
+  ethics_passed: boolean;
+}
+
 export interface TaskStatusResponse {
   task_id: string;
   status: string;
@@ -66,16 +77,85 @@ export interface TaskStatusResponse {
   };
   error?: string;
   verification_pending?: boolean;
-  verification_data?: {
-    todo_id: string;
-    payment_id: string;
-    quality_score: number;
-    dimension_scores: Record<string, number>;
-    feedback: string;
-    task_result: any;
-    agent_name: string;
-    ethics_passed: boolean;
-  };
+  verification_data?: TaskVerificationData;
+}
+
+export type ResearchRunStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_for_review'
+  | 'completed'
+  | 'failed';
+
+export type ResearchRunNodeStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_for_review'
+  | 'completed'
+  | 'failed'
+  | 'blocked';
+
+export interface CreateResearchRunRequest {
+  description: string;
+  budget_limit?: number;
+  verification_mode?: string;
+}
+
+export interface ResearchRunAttemptResponse {
+  attempt_id: string;
+  attempt_number: number;
+  status: ResearchRunNodeStatus;
+  task_id?: string | null;
+  payment_id?: string | null;
+  agent_id?: string | null;
+  verification_score?: number | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+}
+
+export interface ResearchRunNodeResponse {
+  node_id: string;
+  title: string;
+  description: string;
+  capability_requirements: string;
+  assigned_agent_id: string;
+  execution_order: number;
+  status: ResearchRunNodeStatus;
+  task_id?: string | null;
+  payment_id?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+  attempts: ResearchRunAttemptResponse[];
+}
+
+export interface ResearchRunEdgeResponse {
+  from_node_id: string;
+  to_node_id: string;
+}
+
+export interface ResearchRunResponse {
+  id: string;
+  title: string;
+  description: string;
+  status: ResearchRunStatus;
+  workflow_template: string;
+  workflow: string;
+  budget_limit?: number | null;
+  verification_mode: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+  nodes: ResearchRunNodeResponse[];
+  edges: ResearchRunEdgeResponse[];
 }
 
 /**
@@ -93,6 +173,30 @@ export async function createTask(request: CreateTaskRequest): Promise<TaskRespon
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create task' }));
     throw new Error(error.error || 'Failed to create task');
+  }
+
+  return response.json();
+}
+
+/**
+ * Create and immediately start a research run.
+ */
+export async function createResearchRun(
+  request: CreateResearchRunRequest
+): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to create research run' }));
+    throw new Error(error.detail || error.error || 'Failed to create research run');
   }
 
   return response.json();
@@ -120,6 +224,28 @@ export async function getTask(taskId: string): Promise<TaskStatusResponse> {
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Task not found' }));
     throw new Error(error.error || 'Task not found');
+  }
+
+  return response.json();
+}
+
+/**
+ * Get research run status and node graph.
+ */
+export async function getResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run not found' }));
+    throw new Error(error.detail || error.error || 'Research run not found');
   }
 
   return response.json();
