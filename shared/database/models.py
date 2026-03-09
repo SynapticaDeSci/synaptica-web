@@ -151,6 +151,12 @@ class PaymentStateTransition(Base):
             "idempotency_key",
             name="uq_payment_state_transitions_idempotency",
         ),
+        UniqueConstraint(
+            "task_id",
+            "action",
+            "idempotency_key",
+            name="uq_payment_state_transitions_task_idempotency",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

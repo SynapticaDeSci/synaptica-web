@@ -12,7 +12,7 @@ The task-backed runtime remains the main entrypoint through `POST /execute`, the
 
 Worktree used for this implementation:
 
-- Path: `/Users/tiencheng/Projects/Personal/synaptica-web-phase0`
+- Path: `<local checkout path>`
 - Branch: `feat/phase0-foundation`
 
 ## What Was Done

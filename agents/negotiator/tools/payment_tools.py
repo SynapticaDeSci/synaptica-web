@@ -14,6 +14,7 @@ from shared.payments.service import (
     PaymentModeError,
     build_idempotency_key,
     coerce_payment_mode,
+    get_completed_transition_result_by_task,
     get_existing_transition_by_task,
     get_payment_mode,
     record_transition,
@@ -31,6 +32,7 @@ from shared.protocols import (
 from shared.database import SessionLocal, Payment
 from shared.database.models import PaymentStatus as DBPaymentStatus
 from shared.runtime import PaymentAction, PaymentActionContext, PaymentMode, assert_no_sensitive_payload
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +214,17 @@ async def create_payment_request(
         publish_message(proposal_message, tags=("payment", "proposal"), session=db)
         db.commit()
         return result
+    except IntegrityError:
+        db.rollback()
+        existing_result = get_completed_transition_result_by_task(
+            db,
+            task_id=task_id,
+            action=PaymentAction.PROPOSAL,
+            idempotency_key=context.idempotency_key,
+        )
+        if existing_result is not None:
+            return cast(Dict[str, Any], existing_result)
+        raise
     except Exception:
         db.rollback()
         raise

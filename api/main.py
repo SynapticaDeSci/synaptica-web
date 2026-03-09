@@ -486,6 +486,11 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
 
                 total_cost += payment.amount
 
+            runtime_meta = {}
+            if task.meta and isinstance(task.meta, dict):
+                runtime_meta = dict(task.meta.get("runtime") or {})
+            persisted_runtime_status = str(runtime_meta.get("status") or "").lower()
+
             # Map task status to frontend format
             status_mapping = {
                 "pending": "in_progress",
@@ -493,9 +498,12 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
                 "in_progress": "in_progress",
                 "completed": "completed",
                 "failed": "failed",
-                "CANCELLED": "cancelled",
+                "cancelled": "cancelled",
             }
-            frontend_status = status_mapping.get(task.status.value, "in_progress")
+            frontend_status = status_mapping.get(
+                persisted_runtime_status or task.status.value,
+                "in_progress",
+            )
 
             responses.append(TaskHistoryResponse(
                 id=task.id,

@@ -1,12 +1,16 @@
 import asyncio
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from api.main import app
 from agents.executor.tools import research_api_executor
 from agents.negotiator.tools.payment_tools import create_payment_request, authorize_payment
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
+from shared.payments.service import run_idempotent_payment_action
+from shared.runtime import PaymentAction, PaymentActionContext
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
@@ -17,6 +21,7 @@ from shared.database import (
     SessionLocal,
     Task,
 )
+from shared.database.models import PaymentStatus as DBPaymentStatus, TaskStatus
 
 
 def _reset_runtime_state():
@@ -240,6 +245,96 @@ async def test_sensitive_payment_metadata_is_rejected(monkeypatch):
         )
 
 
+@pytest.mark.asyncio
+async def test_create_payment_request_recovers_from_duplicate_proposal_race(monkeypatch):
+    _reset_runtime_state()
+    monkeypatch.setenv("PAYMENT_MODE", "offline")
+
+    expected = {
+        "success": True,
+        "payment_id": "existing-payment-id",
+        "task_id": "task-proposal-race",
+        "status": "pending",
+    }
+
+    def _raise_integrity_error(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(
+        "agents.negotiator.tools.payment_tools.record_transition",
+        _raise_integrity_error,
+    )
+    monkeypatch.setattr(
+        "agents.negotiator.tools.payment_tools.get_completed_transition_result_by_task",
+        lambda *args, **kwargs: expected,
+    )
+
+    result = await create_payment_request(
+        task_id="task-proposal-race",
+        from_agent_id="orchestrator-agent",
+        to_agent_id="problem-framer-001",
+        to_hedera_account="0.0.7001",
+        amount=5.0,
+        description="proposal race",
+        action_context={"todo_id": "todo_0", "attempt_id": "attempt_race"},
+    )
+    assert result == expected
+
+
+@pytest.mark.asyncio
+async def test_run_idempotent_payment_action_returns_existing_result_after_integrity_race(monkeypatch):
+    _reset_runtime_state()
+    session = SessionLocal()
+    try:
+        payment = Payment(  # type: ignore[call-arg]
+            id="payment-race",
+            task_id="task-race",
+            from_agent_id="orchestrator-agent",
+            to_agent_id="problem-framer-001",
+            amount=5.0,
+            currency="HBAR",
+            status=DBPaymentStatus.AUTHORIZED,
+            meta={},
+        )
+        session.add(payment)
+        session.commit()
+    finally:
+        session.close()
+
+    expected = {
+        "success": True,
+        "payment_id": "payment-race",
+        "status": "completed",
+    }
+
+    def _raise_integrity_error(*args, **kwargs):
+        raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+    monkeypatch.setattr(
+        "shared.payments.service.record_transition",
+        _raise_integrity_error,
+    )
+    monkeypatch.setattr(
+        "shared.payments.service.get_completed_transition_result",
+        lambda *args, **kwargs: expected,
+    )
+
+    result = await run_idempotent_payment_action(
+        payment_id="payment-race",
+        context=PaymentActionContext(
+            payment_id="payment-race",
+            task_id="task-race",
+            todo_id="todo_0",
+            attempt_id="attempt_race",
+            action=PaymentAction.RELEASE,
+            idempotency_key="task-race:todo_0:attempt_race:release",
+            mode="offline",
+        ),
+        runner=lambda db: expected,
+    )
+    assert result == expected
+
+
 def test_executor_rejects_experimental_agents(client: TestClient):
     session = SessionLocal()
     try:
@@ -262,3 +357,33 @@ def test_executor_rejects_experimental_agents(client: TestClient):
     )
     assert result["success"] is False
     assert "supported tier" in result["error"]
+
+
+def test_task_history_uses_persisted_runtime_cancelled_status(client: TestClient):
+    session = SessionLocal()
+    try:
+        task = Task(  # type: ignore[call-arg]
+            id="task-cancelled",
+            title="Cancelled task",
+            description="Task rejected during verification",
+            status=TaskStatus.FAILED,
+            created_by="orchestrator-agent",
+            created_at=datetime.utcnow(),
+            meta={
+                "runtime": {
+                    "status": "cancelled",
+                    "progress": [],
+                    "progress_snapshot": {},
+                }
+            },
+        )
+        session.add(task)
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/tasks/history")
+    assert response.status_code == 200
+    payload = response.json()
+    cancelled = next(item for item in payload if item["id"] == "task-cancelled")
+    assert cancelled["status"] == "cancelled"

@@ -6,6 +6,7 @@ import inspect
 import os
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shared.database import SessionLocal
@@ -34,6 +35,16 @@ class PaymentModeError(RuntimeError):
 
 class PaymentConflictError(RuntimeError):
     """Raised when a duplicate or conflicting payment transition is attempted."""
+
+
+def _completed_transition_result(
+    transition: Optional[PaymentStateTransition],
+) -> Optional[Dict[str, Any]]:
+    """Return the stored result for a completed transition, if available."""
+
+    if transition and transition.state == "completed" and isinstance(transition.result, dict):
+        return transition.result
+    return None
 
 
 def get_payment_mode() -> PaymentMode:
@@ -139,6 +150,42 @@ def get_existing_transition_by_task(
     )
 
 
+def get_completed_transition_result(
+    db: Session,
+    *,
+    payment_id: str,
+    action: PaymentAction | str,
+    idempotency_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the completed transition result for a payment/action/idempotency key."""
+
+    transition = get_existing_transition(
+        db,
+        payment_id=payment_id,
+        action=action,
+        idempotency_key=idempotency_key,
+    )
+    return _completed_transition_result(transition)
+
+
+def get_completed_transition_result_by_task(
+    db: Session,
+    *,
+    task_id: str,
+    action: PaymentAction | str,
+    idempotency_key: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the completed transition result for a task/action/idempotency key."""
+
+    transition = get_existing_transition_by_task(
+        db,
+        task_id=task_id,
+        action=action,
+        idempotency_key=idempotency_key,
+    )
+    return _completed_transition_result(transition)
+
+
 def record_transition(
     db: Session,
     *,
@@ -217,14 +264,14 @@ async def run_idempotent_payment_action(
         if payment is None:
             raise PaymentConflictError(f"Payment {payment_id} not found")
 
-        existing = get_existing_transition(
+        existing_result = get_completed_transition_result(
             db,
             payment_id=payment_id,
             action=context.action,
             idempotency_key=context.idempotency_key,
         )
-        if existing and existing.state == "completed" and isinstance(existing.result, dict):
-            return existing.result  # type: ignore[return-value]
+        if existing_result is not None:
+            return existing_result  # type: ignore[return-value]
 
         ensure_no_terminal_conflict(db, payment, context.action)
 
@@ -245,6 +292,17 @@ async def run_idempotent_payment_action(
         )
         db.commit()
         return result  # type: ignore[return-value]
+    except IntegrityError:
+        db.rollback()
+        existing_result = get_completed_transition_result(
+            db,
+            payment_id=payment_id,
+            action=context.action,
+            idempotency_key=context.idempotency_key,
+        )
+        if existing_result is not None:
+            return existing_result  # type: ignore[return-value]
+        raise
     except Exception as exc:
         db.rollback()
         payment = db.query(Payment).filter(Payment.id == payment_id).one_or_none()
