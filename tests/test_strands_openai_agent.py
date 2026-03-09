@@ -10,6 +10,7 @@ from strands.telemetry.metrics import EventLoopMetrics
 from agents.executor.agent import create_executor_agent
 from agents.research.phase1_ideation.problem_framer.agent import ProblemFramerAgent
 from shared.strands_openai_agent import create_strands_openai_agent
+from strands.models.openai import OpenAIModel
 
 
 class DummyModel(Model):
@@ -66,6 +67,18 @@ async def test_create_strands_openai_agent_runs_and_returns_text(monkeypatch):
 
     assert "Echo: hello from strands" in result
     assert agent.model == "gpt-5.4"
+
+
+def test_create_strands_openai_agent_uses_openai_model_provider(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    agent = create_strands_openai_agent(
+        system_prompt="You are a test agent.",
+        tools=[],
+        model="gpt-5.4",
+    )
+
+    assert isinstance(agent.agent.model, OpenAIModel)
 
 
 @pytest.mark.asyncio

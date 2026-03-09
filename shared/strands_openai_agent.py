@@ -1,4 +1,4 @@
-"""Native Strands OpenAI Responses helpers for the active runtime."""
+"""Native Strands OpenAI helpers for the active runtime."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any, Callable, List, Optional
 
 from strands import Agent as StrandsAgent
 from strands.models.model import Model
-from strands.models.openai_responses import OpenAIResponsesModel
+from strands.models.openai import OpenAIModel
 
 
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
@@ -59,14 +59,14 @@ def create_strands_openai_agent(
     description: Optional[str] = None,
     model_provider: Optional[Model] = None,
 ) -> AsyncStrandsAgent:
-    """Create an async-compatible Strands agent backed by OpenAI Responses."""
+    """Create an async-compatible Strands agent backed by Strands' OpenAI provider."""
 
     resolved_model = resolve_openai_model(model, env_var=model_env_var)
     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
     if model_provider is None and not resolved_api_key:
         raise ValueError("OPENAI_API_KEY not set")
 
-    provider = model_provider or OpenAIResponsesModel(
+    provider = model_provider or OpenAIModel(
         client_args={"api_key": resolved_api_key},
         model_id=resolved_model,
     )
