@@ -1,8 +1,10 @@
 """Literature Miner Agent implementation."""
 
+import asyncio
 import json
-from typing import Dict, Any, List, Optional
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from agents.research.base_research_agent import BaseResearchAgent
 from .system_prompt import LITERATURE_MINER_SYSTEM_PROMPT
 from .tools import (
@@ -17,6 +19,17 @@ from .tools import (
 )
 from agents.research.tools.tavily_search import tavily_search, tavily_research_search
 from shared.research.validators import validate_literature_corpus
+from shared.research_runs.deep_research import (
+    build_citation_cards,
+    build_source_summary,
+    dedupe_sources,
+    enrich_source_cards,
+    normalize_source_card,
+    search_web,
+    sort_sources,
+    validate_source_requirements,
+)
+from shared.research_runs.planner import SourceRequirements
 
 
 class LiteratureMinerAgent(BaseResearchAgent):
@@ -69,6 +82,161 @@ class LiteratureMinerAgent(BaseResearchAgent):
             create_paper_url,
             extract_paper_metadata,
         ]
+
+    async def execute(self, request: str, **kwargs) -> Dict[str, Any]:
+        context = kwargs.get("context") or {}
+        node_strategy = context.get("node_strategy")
+        if node_strategy == "gather_evidence":
+            return await self._execute_gather_evidence(request, context)
+        if node_strategy == "curate_sources":
+            return await self._execute_curate_sources(request, context)
+        return await super().execute(request, **kwargs)
+
+    async def _execute_gather_evidence(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        query_plan = dict(context.get("query_plan") or {})
+        original_query = str(query_plan.get("query") or context.get("original_description") or request)
+        search_queries = list(query_plan.get("search_queries") or [])
+        keywords = list(query_plan.get("keywords") or context.get("query_keywords") or [])
+        classified_mode = str(context.get("classified_mode") or "literature")
+        rounds_planned = dict(context.get("rounds_planned") or {})
+        evidence_rounds = int(rounds_planned.get("evidence_rounds", 1) or 1)
+        max_results = 6 if str(context.get("depth_mode") or "standard") == "deep" else 4
+
+        gathered_sources: List[Dict[str, Any]] = []
+        scout_notes: List[Dict[str, Any]] = []
+
+        for round_number in range(1, evidence_rounds + 1):
+            round_queries = self._build_round_queries(
+                original_query,
+                keywords=keywords,
+                search_queries=search_queries,
+                classified_mode=classified_mode,
+                round_number=round_number,
+            )
+            round_results = await asyncio.gather(
+                *[
+                    search_web(
+                        query=query_spec["query"],
+                        max_results=max_results,
+                        time_range=query_spec.get("time_range"),
+                    )
+                    for query_spec in round_queries
+                ]
+            )
+            round_count = 0
+            for query_spec, results in zip(round_queries, round_results):
+                normalized = [
+                    normalize_source_card(item, scout_role=query_spec["role"], round_number=round_number)
+                    for item in results
+                    if item.get("url") and item.get("title")
+                ]
+                round_count += len(normalized)
+                gathered_sources.extend(normalized)
+            scout_notes.append(
+                {
+                    "round_number": round_number,
+                    "queries": round_queries,
+                    "source_count": round_count,
+                }
+            )
+
+        sources = sort_sources(
+            dedupe_sources(
+                await enrich_source_cards(
+                    gathered_sources,
+                    max_fetches=10 if classified_mode == "live_analysis" else 6,
+                )
+            )
+        )
+        if not sources:
+            self._update_reputation(success=False, quality_score=0.0)
+            return {
+                "success": False,
+                "agent_id": self.agent_id,
+                "error": "No evidence sources were discovered for this research run.",
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "model": self.model,
+                },
+            }
+
+        self._update_reputation(success=True, quality_score=0.84)
+        return {
+            "success": True,
+            "agent_id": self.agent_id,
+            "result": {
+                "query": original_query,
+                "classified_mode": classified_mode,
+                "sources": sources,
+                "source_count": len(sources),
+                "scout_notes": scout_notes,
+                "rounds_completed": {
+                    "evidence_rounds": evidence_rounds,
+                    "critique_rounds": 0,
+                },
+            },
+            "metadata": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "model": self.model,
+            },
+        }
+
+    async def _execute_curate_sources(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        del request
+        gathered = dict(context.get("gathered_evidence") or {})
+        requirements = SourceRequirements.model_validate(context.get("source_requirements") or {})
+        classified_mode = str(context.get("classified_mode") or "literature")
+        scenario_requested = bool(context.get("scenario_analysis_requested"))
+
+        curated_sources = sort_sources(dedupe_sources(gathered.get("sources") or []))
+        validation = validate_source_requirements(curated_sources, requirements=requirements)
+        source_summary = build_source_summary(curated_sources, requirements=requirements)
+        freshness_summary = {
+            "required": requirements.min_fresh_sources > 0,
+            "window_days": requirements.freshness_window_days,
+            "minimum_fresh_sources": requirements.min_fresh_sources,
+            "fresh_sources": source_summary["fresh_sources"],
+            "requirements_met": validation["passed"],
+            "issues": validation["issues"],
+        }
+
+        if classified_mode == "live_analysis" and not scenario_requested and not validation["passed"]:
+            self._update_reputation(success=False, quality_score=0.0)
+            return {
+                "success": False,
+                "agent_id": self.agent_id,
+                "error": "insufficient_fresh_evidence",
+                "details": {
+                    "issues": validation["issues"],
+                    "source_summary": source_summary,
+                    "freshness_summary": freshness_summary,
+                },
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "model": self.model,
+                },
+            }
+
+        self._update_reputation(success=True, quality_score=0.88)
+        return {
+            "success": True,
+            "agent_id": self.agent_id,
+            "result": {
+                "sources": curated_sources,
+                "citations": build_citation_cards(curated_sources, limit=requirements.total_sources),
+                "source_summary": source_summary,
+                "freshness_summary": freshness_summary,
+                "issues": validation["issues"],
+                "rounds_completed": dict(
+                    gathered.get("rounds_completed")
+                    or {"evidence_rounds": 0, "critique_rounds": 0}
+                ),
+            },
+            "metadata": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "model": self.model,
+            },
+        }
 
     async def search_literature(
         self,
@@ -257,6 +425,45 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 "max_results": 10
             }
         }
+
+    def _build_round_queries(
+        self,
+        original_query: str,
+        *,
+        keywords: List[str],
+        search_queries: List[Dict[str, Any]],
+        classified_mode: str,
+        round_number: int,
+    ) -> List[Dict[str, Any]]:
+        if round_number == 1 and search_queries:
+            return search_queries
+
+        keyword_text = " ".join(keywords[:6])
+        follow_up_queries: List[Dict[str, Any]] = []
+        if classified_mode in {"live_analysis", "hybrid"}:
+            follow_up_queries.extend(
+                [
+                    {
+                        "role": "latest-confirmation-scout",
+                        "query": f"{original_query} updated latest confirmed developments {keyword_text}",
+                        "time_range": "w",
+                    },
+                    {
+                        "role": "counterpoint-scout",
+                        "query": f"{original_query} uncertainty disputed conflicting reports {keyword_text}",
+                        "time_range": "w",
+                    },
+                ]
+            )
+        if classified_mode in {"literature", "hybrid"}:
+            follow_up_queries.append(
+                {
+                    "role": "methods-scout",
+                    "query": f"{original_query} methodology evidence review {keyword_text}",
+                    "time_range": None,
+                }
+            )
+        return follow_up_queries or search_queries
 
 
 # Create singleton instance

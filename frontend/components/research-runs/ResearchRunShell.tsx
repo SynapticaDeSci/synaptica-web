@@ -37,7 +37,7 @@ export function ResearchRunShell({
             </div>
             <div>
               <p className="text-xl font-semibold text-white">Synaptica</p>
-              <p className="text-sm text-slate-300">Research runs beta</p>
+              <p className="text-sm text-slate-300">Deep research runs</p>
             </div>
           </Link>
 
@@ -69,7 +69,7 @@ export function ResearchRunShell({
       </main>
 
       <footer className="border-t border-white/10 py-8 text-center text-sm text-slate-400">
-        Synaptica research runs are powered by the Phase 1A graph-backed runtime.
+        Synaptica research runs are powered by the Phase 1C deep-research runtime.
       </footer>
     </div>
   )

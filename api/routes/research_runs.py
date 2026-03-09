@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -69,6 +69,13 @@ class ResearchRunResponse(BaseModel):
     workflow: str
     budget_limit: Optional[float] = None
     verification_mode: str
+    research_mode: str
+    classified_mode: str
+    depth_mode: str
+    freshness_required: bool = False
+    source_requirements: Dict[str, Any] = Field(default_factory=dict)
+    rounds_planned: Dict[str, int] = Field(default_factory=dict)
+    rounds_completed: Dict[str, int] = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     started_at: Optional[str] = None
@@ -85,6 +92,8 @@ class ResearchRunCreateRequest(BaseModel):
     description: str = Field(..., min_length=1)
     budget_limit: Optional[float] = Field(default=None, ge=0)
     verification_mode: str = "standard"
+    research_mode: Literal["auto", "literature", "live_analysis", "hybrid"] = "auto"
+    depth_mode: Literal["standard", "deep"] = "standard"
 
 
 async def _run_research_run_job(research_run_id: str) -> None:
@@ -103,6 +112,8 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
         description=request.description,
         budget_limit=request.budget_limit,
         verification_mode=request.verification_mode,
+        research_mode=request.research_mode,
+        depth_mode=request.depth_mode,
     )
     task = asyncio.create_task(_run_research_run_job(research_run_id))
     _running_jobs[research_run_id] = task

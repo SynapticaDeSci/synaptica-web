@@ -19,9 +19,9 @@ export default function ResearchRunsPage() {
 
   return (
     <ResearchRunShell
-      eyebrow="Phase 1B"
-      title="Research runs are now frontend-testable"
-      description="Create a graph-backed research run, watch each node execute in sequence, and review paused verification steps from a dedicated detail page."
+      eyebrow="Phase 1C"
+      title="Deep research runs are live"
+      description="Create a freshness-aware research run, watch the six-node backbone execute, and inspect evidence, critique, and revision from a dedicated detail page."
     >
       <ResearchRunForm
         onSubmit={async (request) => {

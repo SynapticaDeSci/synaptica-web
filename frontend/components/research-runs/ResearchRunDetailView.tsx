@@ -6,6 +6,7 @@ import {
   Clock3,
   Coins,
   DatabaseZap,
+  ExternalLink,
   Loader2,
   RefreshCw,
   ShieldCheck,
@@ -19,10 +20,13 @@ import {
   approveVerification,
   getResearchRun,
   getTask,
+  type ResearchClaim,
+  type ResearchCriticFinding,
   rejectVerification,
   type ResearchRunNodeResponse,
   type ResearchRunNodeStatus,
   type ResearchRunResponse,
+  type ResearchSourceCard,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -62,9 +66,13 @@ function stringifyValue(value: unknown) {
 }
 
 function getRunHeadline(run: ResearchRunResponse): string | null {
-  const report = run.result && typeof run.result === 'object' ? run.result.report : null
-  if (report && typeof report === 'object' && typeof report.summary === 'string') {
-    return report.summary
+  const payload = run.result && typeof run.result === 'object' ? run.result : null
+  if (payload && typeof payload.answer === 'string') {
+    return payload.answer
+  }
+  const report = payload && typeof payload.report === 'object' ? payload.report : null
+  if (report && typeof report.answer === 'string') {
+    return report.answer
   }
   if (run.error) {
     return run.error
@@ -73,11 +81,51 @@ function getRunHeadline(run: ResearchRunResponse): string | null {
 }
 
 function getRunFindings(run: ResearchRunResponse): string[] {
-  const report = run.result && typeof run.result === 'object' ? run.result.report : null
-  if (report && typeof report === 'object' && Array.isArray(report.key_findings)) {
-    return report.key_findings.filter((item: unknown): item is string => typeof item === 'string')
+  const payload = run.result && typeof run.result === 'object' ? run.result : null
+  if (payload && Array.isArray(payload.claims)) {
+    return payload.claims
+      .map((item: unknown) =>
+        item && typeof item === 'object' && typeof (item as ResearchClaim).claim === 'string'
+          ? (item as ResearchClaim).claim
+          : null,
+      )
+      .filter((item: string | null): item is string => Boolean(item))
   }
   return []
+}
+
+function getRunSources(run: ResearchRunResponse): ResearchSourceCard[] {
+  const payload = run.result && typeof run.result === 'object' ? run.result : null
+  if (!payload || !Array.isArray(payload.sources)) {
+    return []
+  }
+  return payload.sources.filter(
+    (item: unknown): item is ResearchSourceCard =>
+      Boolean(item) && typeof item === 'object' && typeof (item as ResearchSourceCard).title === 'string',
+  )
+}
+
+function getCriticFindings(run: ResearchRunResponse): ResearchCriticFinding[] {
+  const payload = run.result && typeof run.result === 'object' ? run.result : null
+  if (!payload || !Array.isArray(payload.critic_findings)) {
+    return []
+  }
+  return payload.critic_findings.filter(
+    (item: unknown): item is ResearchCriticFinding =>
+      Boolean(item) && typeof item === 'object' && typeof (item as ResearchCriticFinding).issue === 'string',
+  )
+}
+
+function formatMode(value: string) {
+  return value.replace(/_/g, ' ')
+}
+
+function cleanDisplayText(value: string) {
+  return value
+    .replace(/\r/g, '')
+    .replace(/(^|\n)#{1,6}\s*/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function pickFocusNode(nodes: ResearchRunNodeResponse[]) {
@@ -100,6 +148,52 @@ function pickFocusNode(nodes: ResearchRunNodeResponse[]) {
   return nodes[0] ?? null
 }
 
+function ExpandableText({
+  content,
+  className,
+  collapsedHeight = 'max-h-72',
+  buttonLabel = 'Show more',
+}: {
+  content: string
+  className?: string
+  collapsedHeight?: string
+  buttonLabel?: string
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const normalized = useMemo(() => cleanDisplayText(content), [content])
+  const shouldCollapse = normalized.length > 420 || normalized.split('\n').length > 7
+
+  return (
+    <div className="space-y-3">
+      <div className="relative">
+        <div
+          className={cn(
+            'min-w-0 whitespace-pre-wrap break-words text-sm leading-relaxed',
+            !expanded && shouldCollapse && `overflow-hidden ${collapsedHeight}`,
+            className,
+          )}
+        >
+          {normalized}
+        </div>
+        {!expanded && shouldCollapse && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 rounded-b-2xl bg-gradient-to-t from-slate-900/95 via-slate-900/75 to-transparent" />
+        )}
+      </div>
+
+      {shouldCollapse && (
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => setExpanded((current) => !current)}
+          className="h-auto px-0 text-xs font-semibold uppercase tracking-[0.2em] text-sky-200 hover:bg-transparent hover:text-sky-100"
+        >
+          {expanded ? 'Show less' : buttonLabel}
+        </Button>
+      )}
+    </div>
+  )
+}
+
 function JsonPreview({
   title,
   value,
@@ -120,7 +214,7 @@ function JsonPreview({
       <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">{title}</p>
       <pre
         className={cn(
-          'max-h-72 overflow-auto rounded-2xl border p-4 text-xs leading-relaxed',
+          'max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-2xl border p-4 text-xs leading-relaxed',
           tone === 'dark'
             ? 'border-white/10 bg-slate-950/90 text-slate-200'
             : 'border-slate-200 bg-slate-50 text-slate-700',
@@ -128,6 +222,61 @@ function JsonPreview({
       >
         {content}
       </pre>
+    </div>
+  )
+}
+
+function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
+  if (sources.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Linked sources</p>
+      <div className="space-y-3">
+        {sources.map((source) => (
+          <a
+            key={`${source.url}-${source.title}`}
+            href={source.url}
+            target="_blank"
+            rel="noreferrer"
+            className="block rounded-3xl border border-white/10 bg-white/5 p-4 transition hover:bg-white/10"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 space-y-2">
+                <p className="text-sm font-semibold text-white">{source.title}</p>
+                <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+                  {source.publisher && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                      {source.publisher}
+                    </span>
+                  )}
+                  {source.source_type && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 capitalize">
+                      {formatMode(source.source_type)}
+                    </span>
+                  )}
+                  {source.published_at && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                      {formatDateTime(source.published_at)}
+                    </span>
+                  )}
+                </div>
+                {source.snippet && (
+                  <ExpandableText
+                    content={source.snippet}
+                    collapsedHeight="max-h-36"
+                    buttonLabel="Read snippet"
+                    className="text-slate-300"
+                  />
+                )}
+              </div>
+              <ExternalLink className="mt-1 h-4 w-4 shrink-0 text-sky-300" />
+            </div>
+          </a>
+        ))}
+      </div>
     </div>
   )
 }
@@ -258,6 +407,8 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const researchRun = researchRunQuery.data
   const headline = getRunHeadline(researchRun)
   const findings = getRunFindings(researchRun)
+  const runSources = getRunSources(researchRun)
+  const criticFindings = getCriticFindings(researchRun)
   const selectedNodeAttempts = [...(selectedNode?.attempts ?? [])].sort(
     (left, right) => right.attempt_number - left.attempt_number,
   )
@@ -328,7 +479,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
             </CardHeader>
 
             <CardContent className="space-y-6">
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Budget</p>
                   <p className="mt-2 text-lg font-semibold text-white">{formatBudget(researchRun.budget_limit)}</p>
@@ -340,6 +491,33 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                   </p>
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Requested mode</p>
+                  <p className="mt-2 text-lg font-semibold capitalize text-white">
+                    {formatMode(researchRun.research_mode)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Classified mode</p>
+                  <p className="mt-2 text-lg font-semibold capitalize text-white">
+                    {formatMode(researchRun.classified_mode)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Depth</p>
+                  <p className="mt-2 text-lg font-semibold capitalize text-white">
+                    {formatMode(researchRun.depth_mode)}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Freshness</p>
+                  <p className="mt-2 text-lg font-semibold text-white">
+                    {researchRun.freshness_required ? 'Required' : 'Advisory'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-4">
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Created</p>
                   <p className="mt-2 text-sm font-medium text-white">{formatDateTime(researchRun.created_at)}</p>
                 </div>
@@ -347,13 +525,55 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                   <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Updated</p>
                   <p className="mt-2 text-sm font-medium text-white">{formatDateTime(researchRun.updated_at)}</p>
                 </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Evidence rounds</p>
+                  <p className="mt-2 text-sm font-medium text-white">
+                    {(researchRun.rounds_completed.evidence_rounds ?? 0)}/
+                    {researchRun.rounds_planned.evidence_rounds ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Critique rounds</p>
+                  <p className="mt-2 text-sm font-medium text-white">
+                    {(researchRun.rounds_completed.critique_rounds ?? 0)}/
+                    {researchRun.rounds_planned.critique_rounds ?? 0}
+                  </p>
+                </div>
               </div>
 
               <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                 <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Workflow</p>
-                <p className="mt-2 font-mono text-sm text-sky-100">{researchRun.workflow}</p>
+                <p className="mt-2 whitespace-pre-wrap break-words font-mono text-sm text-sky-100">
+                  {researchRun.workflow}
+                </p>
                 <p className="mt-3 text-xs text-slate-400">Run ID: {researchRun.id}</p>
               </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Source requirements</p>
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-300">
+                  <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                    Total: {researchRun.source_requirements.total_sources ?? 0}
+                  </span>
+                  {(researchRun.source_requirements.min_academic_or_primary ?? 0) > 0 && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                      Academic/Primary: {researchRun.source_requirements.min_academic_or_primary}
+                    </span>
+                  )}
+                  {(researchRun.source_requirements.min_fresh_sources ?? 0) > 0 && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                      Fresh: {researchRun.source_requirements.min_fresh_sources} in{' '}
+                      {researchRun.source_requirements.freshness_window_days}d
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {researchRun.error?.includes('insufficient_fresh_evidence') && (
+                <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+                  The run stopped because it could not collect enough fresh evidence for a time-sensitive query.
+                </div>
+              )}
 
               {(headline || findings.length > 0) && (
                 <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-5">
@@ -361,7 +581,16 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                     <ShieldCheck className="h-4 w-4" />
                     <p className="text-sm font-semibold uppercase tracking-[0.3em]">Final result</p>
                   </div>
-                  {headline && <p className="mt-3 text-base leading-relaxed text-white">{headline}</p>}
+                  {headline && (
+                    <div className="mt-3">
+                      <ExpandableText
+                        content={headline}
+                        collapsedHeight="max-h-80"
+                        buttonLabel="Read full answer"
+                        className="text-base text-white"
+                      />
+                    </div>
+                  )}
                   {findings.length > 0 && (
                     <ul className="mt-4 space-y-2 text-sm text-emerald-50">
                       {findings.map((finding: string) => (
@@ -371,8 +600,35 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       ))}
                     </ul>
                   )}
+                  {criticFindings.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
+                        Critic findings incorporated
+                      </p>
+                      {criticFindings.map((finding) => (
+                        <div
+                          key={`${finding.issue}-${finding.recommendation}`}
+                          className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-emerald-50"
+                        >
+                          <span className="font-medium">{finding.issue}</span>
+                          {finding.recommendation && (
+                            <div className="mt-2">
+                              <ExpandableText
+                                content={finding.recommendation}
+                                collapsedHeight="max-h-24"
+                                buttonLabel="Expand finding"
+                                className="text-emerald-50/90"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
+
+              <SourceCards sources={runSources} />
             </CardContent>
           </Card>
 
@@ -380,7 +636,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
             <CardHeader className="space-y-3">
               <CardTitle className="text-2xl text-white">Pipeline rail</CardTitle>
               <CardDescription className="text-slate-300">
-                Each node maps to one persisted task attempt and reuses the Phase 0 verification and payment flow.
+                Each node maps to one persisted task attempt while the run adds internal scout, critic, and revision loops behind the scenes.
               </CardDescription>
             </CardHeader>
 
@@ -497,15 +753,40 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       {selectedNode.task_id || 'Not created yet'}
                     </p>
                   </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Rounds completed</p>
+                    <p className="mt-2 text-sm font-medium text-white">
+                      {(selectedNode.result && typeof selectedNode.result === 'object'
+                        ? (selectedNode.result as Record<string, any>).rounds_completed?.evidence_rounds ?? 0
+                        : 0)}
+                      {' / '}
+                      {(selectedNode.result && typeof selectedNode.result === 'object'
+                        ? (selectedNode.result as Record<string, any>).rounds_completed?.critique_rounds ?? 0
+                        : 0)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                    <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Sources linked</p>
+                    <p className="mt-2 text-sm font-medium text-white">
+                      {selectedNode.result && typeof selectedNode.result === 'object' && Array.isArray((selectedNode.result as Record<string, any>).sources)
+                        ? (selectedNode.result as Record<string, any>).sources.length
+                        : 0}
+                    </p>
+                  </div>
                 </div>
 
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                   <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
                     Description
                   </p>
-                  <p className="mt-3 text-sm leading-relaxed text-slate-200">
-                    {selectedNode.description}
-                  </p>
+                  <div className="mt-3">
+                    <ExpandableText
+                      content={selectedNode.description}
+                      collapsedHeight="max-h-24"
+                      buttonLabel="Read description"
+                      className="text-slate-200"
+                    />
+                  </div>
                 </div>
 
                 {selectedNode.error && (
@@ -515,6 +796,45 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                 )}
 
                 <JsonPreview title="Node result" value={selectedNode.result} />
+
+                {selectedNode.result &&
+                  typeof selectedNode.result === 'object' &&
+                  Array.isArray((selectedNode.result as Record<string, any>).critic_findings) &&
+                  ((selectedNode.result as Record<string, any>).critic_findings as ResearchCriticFinding[]).length > 0 && (
+                    <div className="space-y-3">
+                      <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                        Critic findings
+                      </p>
+                      {((selectedNode.result as Record<string, any>).critic_findings as ResearchCriticFinding[]).map(
+                        (finding) => (
+                          <div
+                            key={`${finding.issue}-${finding.recommendation}`}
+                            className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-200"
+                          >
+                            <p className="font-medium text-white">{finding.issue}</p>
+                            {finding.recommendation && (
+                              <div className="mt-2">
+                                <ExpandableText
+                                  content={finding.recommendation}
+                                  collapsedHeight="max-h-24"
+                                  buttonLabel="Expand finding"
+                                  className="text-slate-300"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  )}
+
+                {selectedNode.result &&
+                  typeof selectedNode.result === 'object' &&
+                  Array.isArray((selectedNode.result as Record<string, any>).sources) && (
+                    <SourceCards
+                      sources={(selectedNode.result as Record<string, any>).sources as ResearchSourceCard[]}
+                    />
+                  )}
 
                 <div className="space-y-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">

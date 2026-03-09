@@ -27,7 +27,16 @@ from shared.database import (
 from shared.database.models import TaskStatus
 from shared.runtime import HandoffContext, initialize_runtime_state, load_task_snapshot, redact_sensitive_payload
 
-from .planner import SUPPORTED_RESEARCH_RUN_WORKFLOW, ResearchRunPlan, build_research_run_plan
+from .planner import (
+    SUPPORTED_RESEARCH_RUN_WORKFLOW,
+    DepthMode,
+    ResearchMode,
+    ResearchRunPlan,
+    ResearchRunProfile,
+    RoundsPlan,
+    SourceRequirements,
+    build_research_run_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +80,26 @@ def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
 
 
+def _normalize_rounds_completed(result: Any) -> Dict[str, int]:
+    if isinstance(result, dict):
+        rounds = result.get("rounds_completed")
+        if isinstance(rounds, dict):
+            return {
+                "evidence_rounds": int(rounds.get("evidence_rounds", 0) or 0),
+                "critique_rounds": int(rounds.get("critique_rounds", 0) or 0),
+            }
+    return {"evidence_rounds": 0, "critique_rounds": 0}
+
+
+def _merge_rounds_completed(*payloads: Any) -> Dict[str, int]:
+    merged = {"evidence_rounds": 0, "critique_rounds": 0}
+    for payload in payloads:
+        rounds = _normalize_rounds_completed(payload)
+        merged["evidence_rounds"] = max(merged["evidence_rounds"], rounds["evidence_rounds"])
+        merged["critique_rounds"] = max(merged["critique_rounds"], rounds["critique_rounds"])
+    return merged
+
+
 def _build_research_run_title(description: str) -> str:
     snippet = " ".join(description.split())
     snippet = snippet[:57].rstrip()
@@ -82,10 +111,16 @@ def create_research_run(
     description: str,
     budget_limit: Optional[float],
     verification_mode: str,
+    research_mode: str = ResearchMode.AUTO.value,
+    depth_mode: str = DepthMode.STANDARD.value,
 ) -> str:
     """Persist a research run plus its template graph."""
 
-    plan = build_research_run_plan(description)
+    plan = build_research_run_plan(
+        description,
+        research_mode=ResearchMode(research_mode),
+        depth_mode=DepthMode(depth_mode),
+    )
     research_run_id = str(uuid.uuid4())
 
     db = SessionLocal()
@@ -98,7 +133,19 @@ def create_research_run(
             workflow_template=plan.workflow_template,
             budget_limit=budget_limit,
             verification_mode=verification_mode,
-            meta={"workflow": plan.workflow},
+            meta={
+                "workflow": plan.workflow,
+                "research_mode": plan.profile.requested_mode.value,
+                "classified_mode": plan.profile.classified_mode.value,
+                "depth_mode": plan.profile.depth_mode.value,
+                "freshness_required": plan.profile.freshness_required,
+                "source_requirements": plan.profile.source_requirements.model_dump(),
+                "rounds_planned": plan.profile.rounds_planned.model_dump(),
+                "rounds_completed": {"evidence_rounds": 0, "critique_rounds": 0},
+                "planner_notes": plan.profile.planner_notes,
+                "scenario_analysis_requested": plan.profile.scenario_analysis_requested,
+                "generated_at": plan.profile.generated_at,
+            },
         )
         db.add(record)
 
@@ -142,6 +189,7 @@ def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
     db = SessionLocal()
     try:
         run_record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one()
+        meta = run_record.meta or {}
         nodes = (
             db.query(ResearchRunNode)
             .filter(ResearchRunNode.research_run_id == research_run_id)
@@ -156,7 +204,26 @@ def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
         )
         return ResearchRunPlan(
             workflow_template=run_record.workflow_template,
-            workflow=(run_record.meta or {}).get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+            workflow=meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+            profile=ResearchRunProfile(
+                requested_mode=ResearchMode(meta.get("research_mode", ResearchMode.AUTO.value)),
+                classified_mode=ResearchMode(
+                    meta.get("classified_mode", ResearchMode.LITERATURE.value)
+                ),
+                depth_mode=DepthMode(meta.get("depth_mode", DepthMode.STANDARD.value)),
+                freshness_required=bool(meta.get("freshness_required", False)),
+                source_requirements=SourceRequirements.model_validate(
+                    meta.get("source_requirements")
+                    or SourceRequirements(total_sources=6, min_academic_or_primary=3).model_dump()
+                ),
+                rounds_planned=RoundsPlan.model_validate(
+                    meta.get("rounds_planned")
+                    or RoundsPlan(evidence_rounds=1, critique_rounds=1).model_dump()
+                ),
+                scenario_analysis_requested=bool(meta.get("scenario_analysis_requested", False)),
+                planner_notes=list(meta.get("planner_notes") or []),
+                generated_at=str(meta.get("generated_at") or run_record.created_at.isoformat()),
+            ),
             nodes=[
                 {
                     "node_id": node.node_id,
@@ -309,6 +376,7 @@ class ResearchRunExecutor:
         db = SessionLocal()
         try:
             record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
+            record_meta = record.meta or {}
             nodes = (
                 db.query(ResearchRunNode)
                 .filter(ResearchRunNode.research_run_id == self.research_run_id)
@@ -327,15 +395,94 @@ class ResearchRunExecutor:
                 }
                 for node in nodes
             ]
+            planning = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "plan_query"),
+                None,
+            )
+            evidence = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "gather_evidence"),
+                None,
+            )
+            curated_sources = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "curate_sources"),
+                None,
+            )
+            draft = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "draft_synthesis"),
+                None,
+            )
+            critique = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "critique_and_fact_check"),
+                None,
+            )
+            final_answer = next(
+                (item["result"] for item in node_payloads if item["node_id"] == "revise_final_answer"),
+                None,
+            )
+            rounds_completed = _merge_rounds_completed(evidence, critique, final_answer)
             result = {
                 "research_run_id": record.id,
-                "workflow": (record.meta or {}).get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+                "workflow": record_meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
                 "template": record.workflow_template,
+                "research_mode": record_meta.get("research_mode", ResearchMode.AUTO.value),
+                "classified_mode": record_meta.get(
+                    "classified_mode", ResearchMode.LITERATURE.value
+                ),
+                "depth_mode": record_meta.get("depth_mode", DepthMode.STANDARD.value),
+                "freshness_required": record_meta.get("freshness_required", False),
+                "source_requirements": record_meta.get("source_requirements") or {},
+                "rounds_planned": record_meta.get("rounds_planned") or {},
+                "rounds_completed": rounds_completed,
                 "steps": node_payloads,
-                "framing": next((item["result"] for item in node_payloads if item["node_id"] == "problem_framing"), None),
-                "evidence": next((item["result"] for item in node_payloads if item["node_id"] == "literature_mining"), None),
-                "report": next((item["result"] for item in node_payloads if item["node_id"] == "knowledge_synthesis"), None),
+                "planning": planning,
+                "evidence": evidence,
+                "curated_sources": curated_sources,
+                "draft": draft,
+                "critique": critique,
+                "report": final_answer,
+                "answer": final_answer.get("answer") if isinstance(final_answer, dict) else None,
+                "citations": final_answer.get("citations", []) if isinstance(final_answer, dict) else [],
+                "source_summary": (
+                    final_answer.get("source_summary")
+                    if isinstance(final_answer, dict)
+                    else None
+                ) or (
+                    curated_sources.get("source_summary")
+                    if isinstance(curated_sources, dict)
+                    else None
+                ),
+                "freshness_summary": (
+                    final_answer.get("freshness_summary")
+                    if isinstance(final_answer, dict)
+                    else None
+                ) or (
+                    curated_sources.get("freshness_summary")
+                    if isinstance(curated_sources, dict)
+                    else None
+                ),
+                "limitations": final_answer.get("limitations", []) if isinstance(final_answer, dict) else [],
+                "claims": final_answer.get("claims", []) if isinstance(final_answer, dict) else [],
+                "critic_findings": (
+                    critique.get("critic_findings", []) if isinstance(critique, dict) else []
+                ),
+                "sources": (
+                    final_answer.get("sources")
+                    if isinstance(final_answer, dict)
+                    else None
+                )
+                or (
+                    curated_sources.get("sources")
+                    if isinstance(curated_sources, dict)
+                    else None
+                )
+                or (
+                    evidence.get("sources")
+                    if isinstance(evidence, dict)
+                    else []
+                ),
             }
+            record_meta["rounds_completed"] = rounds_completed
+            record.meta = record_meta
             record.status = ResearchRunStatus.COMPLETED
             record.completed_at = _utcnow()
             record.result = redact_sensitive_payload(result)
@@ -351,8 +498,13 @@ class ResearchRunExecutor:
             record.status = ResearchRunStatus.FAILED
             record.completed_at = _utcnow()
             record.error = error
+            record_meta = record.meta or {}
             if record.result is None:
-                record.result = {"error": error}
+                record.result = {
+                    "error": error,
+                    "classified_mode": record_meta.get("classified_mode"),
+                    "depth_mode": record_meta.get("depth_mode"),
+                }
             db.commit()
         finally:
             db.close()
@@ -724,15 +876,29 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
     if run_status == ResearchRunStatus.RUNNING.value and any_waiting_for_review:
         run_status = ResearchRunStatus.WAITING_FOR_REVIEW.value
 
+    meta = record.meta or {}
     return {
         "id": record.id,
         "title": record.title,
         "description": record.description,
         "status": run_status,
         "workflow_template": record.workflow_template,
-        "workflow": (record.meta or {}).get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+        "workflow": meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
         "budget_limit": record.budget_limit,
         "verification_mode": record.verification_mode,
+        "research_mode": meta.get("research_mode", ResearchMode.AUTO.value),
+        "classified_mode": meta.get("classified_mode", ResearchMode.LITERATURE.value),
+        "depth_mode": meta.get("depth_mode", DepthMode.STANDARD.value),
+        "freshness_required": bool(meta.get("freshness_required", False)),
+        "source_requirements": meta.get("source_requirements") or {},
+        "rounds_planned": meta.get("rounds_planned") or {},
+        "rounds_completed": (
+            (record.result or {}).get("rounds_completed")
+            if isinstance(record.result, dict)
+            else None
+        )
+        or meta.get("rounds_completed")
+        or {"evidence_rounds": 0, "critique_rounds": 0},
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
         "started_at": record.started_at.isoformat() if record.started_at else None,

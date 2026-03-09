@@ -95,10 +95,38 @@ export type ResearchRunNodeStatus =
   | 'failed'
   | 'blocked';
 
+export type ResearchMode = 'auto' | 'literature' | 'live_analysis' | 'hybrid';
+export type DepthMode = 'standard' | 'deep';
+
 export interface CreateResearchRunRequest {
   description: string;
   budget_limit?: number;
   verification_mode?: string;
+  research_mode?: ResearchMode;
+  depth_mode?: DepthMode;
+}
+
+export interface ResearchSourceCard {
+  title: string;
+  url: string;
+  publisher?: string | null;
+  published_at?: string | null;
+  source_type?: string | null;
+  snippet?: string | null;
+  relevance_score?: number | null;
+}
+
+export interface ResearchClaim {
+  claim: string;
+  supporting_citations?: string[];
+  confidence?: string;
+}
+
+export interface ResearchCriticFinding {
+  issue: string;
+  severity?: string;
+  recommendation?: string;
+  round_number?: number;
 }
 
 export interface ResearchRunAttemptResponse {
@@ -148,6 +176,24 @@ export interface ResearchRunResponse {
   workflow: string;
   budget_limit?: number | null;
   verification_mode: string;
+  research_mode: ResearchMode;
+  classified_mode: Exclude<ResearchMode, 'auto'>;
+  depth_mode: DepthMode;
+  freshness_required: boolean;
+  source_requirements: {
+    total_sources?: number;
+    min_academic_or_primary?: number;
+    min_fresh_sources?: number;
+    freshness_window_days?: number | null;
+  };
+  rounds_planned: {
+    evidence_rounds?: number;
+    critique_rounds?: number;
+  };
+  rounds_completed: {
+    evidence_rounds?: number;
+    critique_rounds?: number;
+  };
   created_at?: string | null;
   updated_at?: string | null;
   started_at?: string | null;

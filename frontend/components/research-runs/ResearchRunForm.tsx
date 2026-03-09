@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, type FormEvent } from 'react'
-import { ArrowRight, Network, ShieldCheck, Sparkles } from 'lucide-react'
+import { ArrowRight, Layers3, Network, ShieldCheck, Sparkles } from 'lucide-react'
 
 import type { CreateResearchRunRequest } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -17,19 +17,24 @@ interface ResearchRunFormProps {
 
 const fixedSteps = [
   {
-    title: 'Problem framing',
-    description: 'Turns your prompt into a scoped research question and execution brief.',
+    title: 'Query planning',
+    description: 'Classifies the brief, sets freshness rules, and expands the investigation plan.',
     icon: Sparkles,
   },
   {
-    title: 'Literature mining',
-    description: 'Queries the supported literature agent and gathers source material.',
+    title: 'Evidence gathering',
+    description: 'Runs bounded scout searches across fresh web, official, and literature-oriented sources.',
     icon: Network,
   },
   {
-    title: 'Knowledge synthesis',
-    description: 'Produces the final synthesis and enters verification when quality needs review.',
+    title: 'Source curation',
+    description: 'Deduplicates evidence, checks freshness, and enforces source thresholds before synthesis.',
     icon: ShieldCheck,
+  },
+  {
+    title: 'Draft, critique, revise',
+    description: 'Builds a draft answer, runs a critic pass, and revises into a citation-backed final answer.',
+    icon: Layers3,
   },
 ]
 
@@ -41,6 +46,8 @@ export function ResearchRunForm({
   const [description, setDescription] = useState('')
   const [budgetLimit, setBudgetLimit] = useState('25')
   const [verificationMode, setVerificationMode] = useState('standard')
+  const [researchMode, setResearchMode] = useState<'auto' | 'literature' | 'live_analysis' | 'hybrid'>('auto')
+  const [depthMode, setDepthMode] = useState<'standard' | 'deep'>('standard')
   const [validationError, setValidationError] = useState<string | null>(null)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -66,6 +73,8 @@ export function ResearchRunForm({
       description: description.trim(),
       budget_limit: parsedBudget,
       verification_mode: verificationMode,
+      research_mode: researchMode,
+      depth_mode: depthMode,
     })
   }
 
@@ -74,12 +83,12 @@ export function ResearchRunForm({
       <Card className="overflow-hidden rounded-[28px] border border-white/15 bg-white/95 shadow-[0_40px_100px_-50px_rgba(56,189,248,0.8)]">
         <CardHeader className="space-y-4 border-b border-slate-100 pb-6">
           <span className="inline-flex w-fit items-center rounded-full border border-sky-100 bg-sky-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.35em] text-sky-700">
-            New research run
+            Deep research run
           </span>
           <div className="space-y-2">
-            <CardTitle className="text-3xl text-slate-950">Launch a graph-backed research run</CardTitle>
+            <CardTitle className="text-3xl text-slate-950">Launch a freshness-aware research run</CardTitle>
             <CardDescription className="text-base leading-relaxed text-slate-500">
-              This beta flow runs the fixed Phase 1 literature-review pipeline and exposes per-node status, attempts, and verification review.
+              This beta flow plans the run dynamically, gathers fresher evidence, and adds critique/revision rounds before the final answer.
             </CardDescription>
           </div>
         </CardHeader>
@@ -104,7 +113,7 @@ export function ResearchRunForm({
               </p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <div className="space-y-3">
                 <label htmlFor="research-run-budget" className="text-sm font-medium text-slate-700">
                   Budget limit (USD)
@@ -136,6 +145,40 @@ export function ResearchRunForm({
                   <option value="enhanced">Enhanced</option>
                 </select>
               </div>
+
+              <div className="space-y-3">
+                <label htmlFor="research-run-mode" className="text-sm font-medium text-slate-700">
+                  Research mode
+                </label>
+                <select
+                  id="research-run-mode"
+                  value={researchMode}
+                  onChange={(event) => setResearchMode(event.target.value as typeof researchMode)}
+                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
+                  disabled={isSubmitting}
+                >
+                  <option value="auto">Auto-detect</option>
+                  <option value="literature">Literature</option>
+                  <option value="live_analysis">Live analysis</option>
+                  <option value="hybrid">Hybrid</option>
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                <label htmlFor="research-run-depth" className="text-sm font-medium text-slate-700">
+                  Depth mode
+                </label>
+                <select
+                  id="research-run-depth"
+                  value={depthMode}
+                  onChange={(event) => setDepthMode(event.target.value as typeof depthMode)}
+                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
+                  disabled={isSubmitting}
+                >
+                  <option value="standard">Standard</option>
+                  <option value="deep">Deep</option>
+                </select>
+              </div>
             </div>
 
             {(validationError || error) && (
@@ -146,7 +189,7 @@ export function ResearchRunForm({
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5">
               <p className="max-w-xl text-sm text-slate-500">
-                After submission, Synaptica will create the run, start execution immediately, and redirect you to a live detail page with node-level polling.
+                After submission, Synaptica will classify the query, start the run immediately, and redirect you to a live detail page with node-level polling, source cards, and freshness checks.
               </p>
               <Button
                 type="submit"
@@ -164,11 +207,11 @@ export function ResearchRunForm({
       <Card className="rounded-[28px] border border-white/15 bg-slate-900/70 text-slate-100 shadow-[0_40px_100px_-60px_rgba(16,185,129,0.5)] backdrop-blur-xl">
         <CardHeader className="space-y-3">
           <span className="inline-flex w-fit items-center rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.35em] text-emerald-200">
-            Fixed Phase 1 pipeline
+            Phase 1C backbone
           </span>
           <CardTitle className="text-2xl text-white">What runs today</CardTitle>
           <CardDescription className="text-slate-300">
-            The beta UI follows the supported literature-review workflow already persisted in the backend.
+            The run still persists as a graph-backed workflow, but it now adds freshness-aware evidence gathering and a bounded critique/revision loop.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

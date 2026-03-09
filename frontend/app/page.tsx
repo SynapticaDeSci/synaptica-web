@@ -313,7 +313,7 @@ export default function Home() {
                 variant="outline"
                 className="border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
               >
-                <Link href="/research-runs">Open Research Runs Beta</Link>
+                <Link href="/research-runs">Open Deep Research</Link>
               </Button>
             </nav>
 
