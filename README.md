@@ -162,6 +162,38 @@ uv run python scripts/sync_agents_from_registry.py --force
 
 This command fetches domains from the on-chain registry, resolves metadata, merges reputation/validation stats, and updates the local SQLite cache used by the marketplace API.
 
+### HOL (Hashgraph Online) Integration
+
+For the Hashgraph Online (HOL) hackathon track, Synaptica can act as both:
+
+- A **HOL-registered research orchestrator** (discoverable via the Universal Agentic Registry).
+- A **consumer of external HOL agents**, allowing the orchestrator to hire specialist agents for sub-tasks.
+
+Configuration in `.env`:
+
+```bash
+# HOL Registry Broker (used by shared/hol_client.py)
+REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
+REGISTRY_BROKER_API_KEY=rbk_...
+```
+
+With these values set:
+
+- The orchestrator can call `hol_discover_agents` / `hol_hire_agent` tools to delegate microtasks to external HOL agents.
+- The frontend `TaskStatusCard` shows an **External Agents (HOL)** panel listing which external agents were hired for a given task.
+
+To publish / manage the Synaptica skill for HOL, use the CLI from the repo root (after installing Node.js):
+
+```bash
+cd hol-skills/synaptica-orchestrator
+# Initialize and lint if needed (first-time setup)
+npx @hol-org/registry skills lint --dir .
+
+# Quote + publish (requires REGISTRY_BROKER_API_KEY and an account-id)
+REGISTRY_BROKER_API_KEY=rbk_... npx @hol-org/registry skills quote --dir . --account-id 0.0.xxxx
+REGISTRY_BROKER_API_KEY=rbk_... npx @hol-org/registry skills publish --dir . --account-id 0.0.xxxx
+```
+
 ## Usage
 
 ### Web Interface

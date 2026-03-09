@@ -78,6 +78,49 @@ export interface TaskStatusResponse {
   };
 }
 
+// HOL Registry ----------------------------------------------------------------
+
+export interface HolAgentRecord {
+  uaid: string;
+  name: string;
+  description: string;
+  capabilities: string[];
+  categories: string[];
+  transports: string[];
+  pricing: {
+    rate?: number;
+    currency?: string;
+    rate_type?: string;
+    [key: string]: any;
+  };
+  registry?: string | null;
+}
+
+export async function searchHolAgents(
+  query: string
+): Promise<{ agents: HolAgentRecord[]; query: string }> {
+  const q = query.trim() || 'research';
+  const url = new URL(`${BACKEND_BASE_URL}/api/hol/agents/search`);
+  url.searchParams.set('q', q);
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const message =
+      (payload && (payload as any).detail) ||
+      (payload && (payload as any).error) ||
+      'Failed to search HOL agents';
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
 /**
  * Create a new task
  */

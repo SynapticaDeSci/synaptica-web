@@ -18,6 +18,8 @@ import {
 } from 'lucide-react'
 
 import { AddAgentModal } from '@/components/AddAgentModal'
+import { HolMarketplaceView } from '@/components/HolMarketplaceView'
+import { HolRegisterBadge } from '@/components/HolRegisterBadge'
 import { getAgents, type AgentRecord } from '@/lib/api'
 
 type IconType = typeof Database
@@ -51,6 +53,7 @@ export function Marketplace() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedCategory, setSelectedCategory] = useState('All')
   const [showAllTags, setShowAllTags] = useState(false)
+  const [activeSource, setActiveSource] = useState<'local' | 'hol'>('local')
 
   const { data, isLoading, isError, error, refetch } = useQuery<AgentRecord[], Error>({
     queryKey: ['agents'],
@@ -111,12 +114,76 @@ export function Marketplace() {
     }
   }
 
+  if (activeSource === 'hol') {
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold text-white">Agent Marketplace</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Browse local marketplace agents or external agents from HOL.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveSource('local')}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+                activeSource === 'local'
+                  ? 'bg-slate-100 text-slate-900'
+                  : 'bg-slate-900/60 text-slate-300 border border-white/10'
+              }`}
+            >
+              Local
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveSource('hol')}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+                activeSource === 'hol'
+                  ? 'bg-sky-500 text-white'
+                  : 'bg-slate-900/60 text-slate-300 border border-white/10'
+              }`}
+            >
+              HOL Registry
+            </button>
+          </div>
+        </div>
+        <HolMarketplaceView />
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-2xl font-semibold text-white">Agent Marketplace</h2>
           <p className="mt-1 text-sm text-slate-400">Browse {agents.length} registered agents</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveSource('local')}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+              activeSource === 'local'
+                ? 'bg-slate-100 text-slate-900'
+                : 'bg-slate-900/60 text-slate-300 border border-white/10'
+            }`}
+          >
+            Local
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSource('hol')}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium ${
+              activeSource === 'hol'
+                ? 'bg-sky-500 text-white'
+                : 'bg-slate-900/60 text-slate-300 border border-white/10'
+            }`}
+          >
+            HOL Registry
+          </button>
         </div>
         <AddAgentModal onSuccess={handleAgentAdded} />
       </div>
@@ -212,9 +279,13 @@ export function Marketplace() {
                 className="group overflow-hidden rounded-2xl border border-white/15 bg-slate-900/50 backdrop-blur-sm transition hover:border-sky-400/50 hover:bg-slate-900/70"
               >
                 <div className="p-6">
-                  <div className="flex items-start gap-4">
+                    <div className="flex items-start gap-4">
                     <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
                       <IconComponent className="h-7 w-7" />
+                      <HolRegisterBadge
+                        holUaid={(agent as any).hol_uaid}
+                        holStatus={(agent as any).hol_registration_status}
+                      />
                     </div>
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold text-white">{agent.name}</h3>

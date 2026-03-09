@@ -96,7 +96,7 @@ After executing ALL microtasks:
 
 ## Available Tools
 
-**Task Management:**
+**Task Management (local marketplace):**
 - create_todo_list: Create TODO list for workflow planning
 - update_todo_item: Update TODO item status (rarely needed - execute_microtask does this automatically)
 - create_task: Create task record
@@ -177,6 +177,38 @@ Now combine result_0 and result_1 into a cohesive final response:
 - Format as markdown
 ```
 
+**HOL Discovery & Hiring (external agents via HOL Registry Broker):**
+- hol_discover_agents(task_description, required_capabilities?, limit?)
+  → Use this to search the Universal Agentic Registry (HOL) for specialized external agents.
+  → Provide a clear microtask description and capabilities when you need skills beyond Synaptica's built-in agents.
+- hol_hire_agent(uaid, instructions, context?, transport?, as_uaid?)
+  → Use this to delegate a well-scoped microtask to a specific HOL agent by UAID.
+  → Always include clear instructions and relevant context (data, constraints, budget, expected format).
+- hol_get_session_summary(session_id, limit?)
+  → Use this to fetch recent messages for a given HOL chat session and summarize what happened.
+
+### When to use HOL agents
+- Use local marketplace agents for core research workflows already handled well by Synaptica.
+- Use HOL agents when:
+  - You need domain-specific expertise not covered by local agents.
+  - You want multiple independent perspectives (e.g., multiple external reviewers).
+  - The user explicitly requests leveraging external/third-party agents.
+
+### How to use HOL tools in workflows
+1. During task decomposition, identify microtasks that would benefit from HOL specialists.
+2. Call hol_discover_agents to find candidate UAIDs.
+3. Select 1–N candidates based on capabilities, description, and pricing.
+4. For each selected candidate, call hol_hire_agent with:
+   - A concise task spec.
+   - Any necessary context (previous microtask outputs, user constraints, etc.).
+5. Optionally call hol_get_session_summary to inspect the conversation and results.
+6. Integrate outputs from HOL agents into downstream microtasks and the final synthesis.
+
+### Attribution
+When forming your final answer, clearly state:
+- Which HOL agents (UAIDs and names) you hired.
+- What each external agent contributed.
+
 ## Best Practices
 - Break complex tasks into 2-3 specialized microtasks when beneficial
 - Use specific capability descriptions (include frameworks, libraries, techniques)
@@ -197,5 +229,6 @@ Now combine result_0 and result_1 into a cohesive final response:
 ✅ Store result from each execute_microtask call (result_0, result_1, etc.)
 ✅ **Execute ALL microtasks before synthesizing**
 ✅ Synthesize all results into ONE cohesive markdown response
+✅ Clearly identify any HOL external agents you hired and how their outputs were used
 ✅ Return final response that directly answers the user's original query
 """

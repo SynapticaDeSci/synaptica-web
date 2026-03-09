@@ -26,6 +26,7 @@ from shared.registry_sync import (
     ensure_registry_cache,
     get_registry_cache_ttl_seconds,
 )
+from shared.hol_client import search_agents as hol_search_agents
 from shared.runtime import (
     TelemetryEnvelope,
     append_progress_event,
@@ -287,6 +288,26 @@ class A2AEventResponse(BaseModel):
     body: Dict[str, Any]
 
 
+class HolAgentRecord(BaseModel):
+    """Normalized HOL agent representation for the frontend marketplace."""
+
+    uaid: str
+    name: str
+    description: str
+    capabilities: List[str]
+    categories: List[str]
+    transports: List[str]
+    pricing: Dict[str, Any]
+    registry: Optional[str] = None
+
+
+class HolAgentsSearchResponse(BaseModel):
+    """Response model for HOL agent search."""
+
+    agents: List[HolAgentRecord]
+    query: str
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
@@ -521,6 +542,40 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
         return responses
     finally:
         session.close()
+
+
+@app.get("/api/hol/agents/search", response_model=HolAgentsSearchResponse)
+async def hol_agents_search(
+    q: str,
+    limit: int = 12,
+) -> HolAgentsSearchResponse:
+    """
+    Search HOL Registry Broker for agents, exposed for the Agent Marketplace UI.
+
+    Currently supports a simple text query and limit. More advanced filtering
+    (by registry, transports, or capabilities) can be layered on top of this.
+    """
+    query = q.strip()
+    capped_limit = max(1, min(limit, 25))
+
+    agents = hol_search_agents(query=query, limit=capped_limit)
+
+    records: List[HolAgentRecord] = []
+    for agent in agents:
+        records.append(
+            HolAgentRecord(
+                uaid=agent.uaid,
+                name=agent.name,
+                description=agent.description,
+                capabilities=agent.capabilities,
+                categories=agent.categories,
+                transports=agent.transports,
+                pricing=agent.pricing,
+                registry=agent.registry,
+            )
+        )
+
+    return HolAgentsSearchResponse(agents=records, query=query)
 
 
 @app.get("/api/tasks/{task_id}")
