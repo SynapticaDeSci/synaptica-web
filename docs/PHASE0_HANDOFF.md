@@ -4,7 +4,7 @@
 
 This branch implements the Phase 0 foundation plan for the Synaptica DeSci runtime.
 
-The goal of this phase was to harden the existing hackathon codebase without introducing the future campaign/DAG model yet. The supported production path is now:
+The goal of this phase was to harden the existing hackathon codebase without introducing the future research-run/DAG model yet. The supported production path is now:
 
 `problem-framer-001 -> literature-miner-001 -> knowledge-synthesizer-001 -> verification/payment`
 
@@ -201,12 +201,12 @@ Right now the old pipeline/routes are clearly marked as legacy. A future cleanup
 
 ### 4. Phase 1 design work
 
-Phase 1 should begin the campaign/DAG model on top of the now-stabilized phase 0 runtime instead of trying to revive the old hackathon orchestration patterns.
+Phase 1 should begin the research-run/DAG model on top of the now-stabilized phase 0 runtime instead of trying to revive the old hackathon orchestration patterns.
 
 Recommended Phase 1 preparation:
 
-- define campaign/task graph entities explicitly
-- design how marketplace discovery maps onto campaign planning
+- define research-run/task graph entities explicitly
+- design how marketplace discovery maps onto research-run planning
 - define smart-contract touchpoints only after the off-chain runtime/state model is stable
 
 ### 5. Address pre-existing deprecation warnings

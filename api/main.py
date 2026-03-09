@@ -40,6 +40,7 @@ from agents.orchestrator.tools import create_todo_list, execute_microtask
 from .middleware import logging_middleware
 from .routes import agents as agents_routes
 from .routes import data_agent as data_agent_routes
+from .routes import research_runs as research_runs_routes
 
 # Load environment variables
 load_dotenv()
@@ -373,6 +374,7 @@ app.middleware("http")(logging_middleware)
 # Include routers
 app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 app.include_router(data_agent_routes.router, prefix="/api/data-agent", tags=["data-agent"])
+app.include_router(research_runs_routes.router, prefix="/api/research-runs", tags=["research-runs"])
 
 
 @app.get("/")
@@ -390,6 +392,8 @@ async def root():
         ],
         "endpoints": {
             "/execute": "POST - Execute a task using marketplace agents",
+            "/api/research-runs": "POST - Create and start a graph-backed research run",
+            "/api/research-runs/{id}": "GET - Inspect research run status, nodes, and attempts",
             "/health": "GET - Health check",
             "/api/tasks/{task_id}": "GET - Poll task status and progress",
             "/api/tasks/history": "GET - Retrieve task history with payments",

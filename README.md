@@ -13,6 +13,14 @@ The active runtime in phase 0 is intentionally narrow and deterministic:
 
 Legacy/demo code such as `api/pipeline.py`, `agents/research/research_pipeline.py`, and the unmounted `api/routes/tasks.py` / `api/routes/payments.py` modules is retained for reference only and is not part of the active runtime.
 
+## Research Runs
+
+The repo now also includes an opt-in Phase 1A research-run backbone:
+
+- `POST /api/research-runs` creates and auto-starts a graph-backed research run
+- `GET /api/research-runs/{id}` returns graph state, node attempts, linked task/payment IDs, and terminal results
+- The initial template is the same supported literature-review flow used by Phase 0, but persisted as a research run with node-level execution state
+
 ## Architecture
 
 ### 4-Agent System
@@ -65,8 +73,8 @@ cd ..
 cp .env.example .env
 # Edit .env with your credentials
 
-# Initialize database
-uv run python -c "from shared.database import Base, engine; Base.metadata.create_all(engine)"
+# Initialize or upgrade database schema
+uv run alembic upgrade head
 # Or use the shortcut
 make db-init
 ```
@@ -172,6 +180,8 @@ This command fetches domains from the on-chain registry, resolves metadata, merg
 4. Approve/reject human verification only when the verifier requests review
 5. View results and transaction history
 
+For the graph-backed backend API, create a research run with `POST /api/research-runs` and poll `GET /api/research-runs/{id}` for node-level status.
+
 ## Project Structure
 
 This repository is a monorepo with one shared Python application environment plus one separate Next.js frontend app. The Python runtime spans `api/`, `agents/`, and `shared/` under the root `pyproject.toml`.
@@ -223,6 +233,7 @@ The smart contracts are deployed on Hedera testnet and integrated with this plat
 ### Key Features
 
 - **Deterministic Phase 0 Workflow**: Fixed literature-review pipeline with typed handoff and payment contracts
+- **Research Run Backbone**: Graph-backed research runs persist nodes, edges, attempts, and linked task/payment execution
 - **Real-time Progress**: Task progress and verification state persist in `Task.meta`
 - **Transaction History**: View all research queries with costs and agent details
 - **Explicit Payment Modes**: `offline`, `dev_env`, and `managed` replace implicit mock settlement

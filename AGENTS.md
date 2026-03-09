@@ -6,6 +6,7 @@
   - `make frontend-install`
   - `cp .env.example .env`
   - `make db-init`
+  - `make db-init` runs `uv run alembic upgrade head`
 - Dev servers:
   - `make api`
   - `make research`
@@ -22,6 +23,7 @@
 - Repo-specific constraint:
   - Keep the Python codebase as one shared app rooted at the repo; do not split `api` / `agents` / `shared` into separate Python packages or workspaces unless explicitly asked.
   - For repo scripts, use `uv run python scripts/...` from the repo root.
+  - Database schema changes should ship as Alembic revisions under `alembic/versions/`; avoid reintroducing `Base.metadata.create_all(...)` as the primary local setup path.
 - Safe edits:
   - Treat `.env`, local DB files, and files under `agent_metadata/` as potentially sensitive; do not commit secrets or generated local data.
   - If a change affects local developer workflow, update `README.md` and this file in the same change.

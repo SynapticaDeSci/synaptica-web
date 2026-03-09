@@ -67,7 +67,7 @@ def _build_action_context(
         payload["payment_id"] = payment_id
         payload["task_id"] = task_id
         payload["action"] = action.value
-        payload["idempotency_key"] = build_idempotency_key(
+        payload["idempotency_key"] = payload.get("idempotency_key") or build_idempotency_key(
             task_id,
             payload.get("todo_id", "todo_0"),
             payload.get("attempt_id", "attempt_0"),

@@ -17,6 +17,7 @@ from agents.verifier.tools.payment_tools import reject_and_refund, release_payme
 from agents.verifier.tools.research_verification_tools import calculate_quality_score
 from shared.database import Agent, AgentReputation, SessionLocal
 from shared.payments.service import get_payment_mode
+from shared.payments.service import build_idempotency_key
 from shared.research.catalog import select_supported_agent_for_todo
 from shared.runtime import (
     AgentSelectionResult,
@@ -78,7 +79,14 @@ def _build_payment_action_context(context: HandoffContext, action: PaymentAction
         todo_id=context.todo_id,
         attempt_id=context.attempt_id,
         action=action,
-        idempotency_key=f"{context.task_id}:{context.todo_id}:{context.attempt_id}:{action.value}",
+        idempotency_key=build_idempotency_key(
+            context.task_id,
+            context.todo_id,
+            context.attempt_id,
+            action,
+            research_run_id=context.research_run_id,
+            node_id=context.node_id,
+        ),
         mode=get_payment_mode(),
         metadata={"handoff_context": context.model_dump(mode="json")},
     ).model_dump(mode="json")
@@ -482,6 +490,7 @@ async def execute_microtask(
     min_reputation_score: Optional[float] = 0.2,
     execution_parameters: Optional[Dict[str, Any]] = None,
     todo_list: Optional[list] = None,
+    handoff_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the full negotiation -> payment -> execution -> verification flow."""
 
@@ -494,7 +503,7 @@ async def execute_microtask(
     context = _to_handoff_context(
         task_id,
         todo_id,
-        None,
+        handoff_context,
         budget_remaining=budget_limit,
     )
     persist_handoff_context(task_id, context)

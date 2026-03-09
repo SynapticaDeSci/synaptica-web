@@ -79,10 +79,15 @@ def build_idempotency_key(
     todo_id: str,
     attempt_id: str,
     action: PaymentAction | str,
+    *,
+    research_run_id: str | None = None,
+    node_id: str | None = None,
 ) -> str:
     """Build the shared idempotency key format used across payment actions."""
 
     action = coerce_payment_action(action)
+    if research_run_id and node_id:
+        return f"{research_run_id}:{node_id}:{attempt_id}:{action.value}"
     return f"{task_id}:{todo_id}:{attempt_id}:{action.value}"
 
 

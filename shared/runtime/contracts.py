@@ -42,6 +42,8 @@ class HandoffContext(BaseModel):
     task_id: str
     todo_id: str
     attempt_id: str
+    research_run_id: Optional[str] = None
+    node_id: Optional[str] = None
     payment_id: Optional[str] = None
     agent_id: Optional[str] = None
     budget_remaining: Optional[float] = None

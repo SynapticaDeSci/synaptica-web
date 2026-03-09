@@ -17,8 +17,12 @@ from shared.database import (
     Agent as AgentModel,
     AgentReputation,
     AgentsCacheEntry,
+    ExecutionAttempt,
     Payment,
     PaymentStateTransition,
+    ResearchRun,
+    ResearchRunEdge,
+    ResearchRunNode,
     SessionLocal,
     Task,
 )
@@ -26,8 +30,13 @@ from shared.database.models import PaymentStatus as DBPaymentStatus, TaskStatus
 
 
 def _reset_runtime_state():
+    research_api_executor._agent_cache.clear()
     session = SessionLocal()
     try:
+        session.query(ExecutionAttempt).delete()
+        session.query(ResearchRunEdge).delete()
+        session.query(ResearchRunNode).delete()
+        session.query(ResearchRun).delete()
         session.query(PaymentStateTransition).delete()
         session.query(A2AEvent).delete()
         session.query(Payment).delete()
