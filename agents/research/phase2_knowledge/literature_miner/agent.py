@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +21,7 @@ from .tools import (
 from agents.research.tools.tavily_search import tavily_search, tavily_research_search
 from shared.research.validators import validate_literature_corpus
 from shared.research_runs.deep_research import (
+    assign_citation_ids,
     build_citation_cards,
     build_source_summary,
     dedupe_sources,
@@ -97,6 +99,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
         query_plan = dict(context.get("query_plan") or {})
         original_query = str(query_plan.get("query") or context.get("original_description") or request)
         search_queries = list(query_plan.get("search_queries") or [])
+        claim_targets = list(query_plan.get("claim_targets") or context.get("claim_targets") or [])
         keywords = list(query_plan.get("keywords") or context.get("query_keywords") or [])
         classified_mode = str(context.get("classified_mode") or "literature")
         rounds_planned = dict(context.get("rounds_planned") or {})
@@ -107,12 +110,23 @@ class LiteratureMinerAgent(BaseResearchAgent):
         scout_notes: List[Dict[str, Any]] = []
 
         for round_number in range(1, evidence_rounds + 1):
+            current_sources = sort_sources(dedupe_sources(gathered_sources))
+            coverage_summary = self._assess_coverage(
+                current_sources,
+                claim_targets=claim_targets,
+                source_requirements=context.get("source_requirements") or {},
+            )
+            if round_number > 1 and coverage_summary["ready_for_synthesis"]:
+                break
+
             round_queries = self._build_round_queries(
                 original_query,
                 keywords=keywords,
                 search_queries=search_queries,
                 classified_mode=classified_mode,
                 round_number=round_number,
+                claim_targets=claim_targets,
+                coverage_summary=coverage_summary,
             )
             round_results = await asyncio.gather(
                 *[
@@ -161,6 +175,11 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 },
             }
 
+        coverage_summary = self._assess_coverage(
+            sources,
+            claim_targets=claim_targets,
+            source_requirements=context.get("source_requirements") or {},
+        )
         self._update_reputation(success=True, quality_score=0.84)
         return {
             "success": True,
@@ -171,8 +190,11 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 "sources": sources,
                 "source_count": len(sources),
                 "scout_notes": scout_notes,
+                "search_lanes_used": sorted({str(note_query.get("lane") or note_query.get("role")) for note in scout_notes for note_query in note.get("queries", [])}),
+                "coverage_summary": coverage_summary,
+                "uncovered_claim_targets": coverage_summary["uncovered_claim_targets"],
                 "rounds_completed": {
-                    "evidence_rounds": evidence_rounds,
+                    "evidence_rounds": max(1, len(scout_notes)),
                     "critique_rounds": 0,
                 },
             },
@@ -195,8 +217,16 @@ class LiteratureMinerAgent(BaseResearchAgent):
             classified_mode=classified_mode,
         )
         curated_sources = sort_sources(filtered_payload["selected_sources"])
+        curated_sources, citations = assign_citation_ids(curated_sources, limit=requirements.total_sources)
         validation = validate_source_requirements(curated_sources, requirements=requirements)
         source_summary = build_source_summary(curated_sources, requirements=requirements)
+        coverage_summary = dict(gathered.get("coverage_summary") or {})
+        coverage_summary["source_diversity"] = {
+            "unique_publishers": len({str(source.get("publisher")) for source in curated_sources if source.get("publisher")}),
+            "source_type_mix": dict(Counter(str(source.get("source_type") or "unknown") for source in curated_sources)),
+        }
+        coverage_summary["citation_count"] = len(citations)
+        coverage_summary["citation_ready"] = len(citations) > 0
         freshness_summary = {
             "required": requirements.min_fresh_sources > 0,
             "window_days": requirements.freshness_window_days,
@@ -229,9 +259,11 @@ class LiteratureMinerAgent(BaseResearchAgent):
             "agent_id": self.agent_id,
             "result": {
                 "sources": curated_sources,
-                "citations": build_citation_cards(curated_sources, limit=requirements.total_sources),
+                "citations": citations or build_citation_cards(curated_sources, limit=requirements.total_sources),
                 "source_summary": source_summary,
                 "freshness_summary": freshness_summary,
+                "coverage_summary": coverage_summary,
+                "uncovered_claim_targets": list(gathered.get("uncovered_claim_targets") or []),
                 "issues": validation["issues"],
                 "filtered_sources": filtered_payload["filtered_sources"],
                 "rounds_completed": dict(
@@ -441,22 +473,27 @@ class LiteratureMinerAgent(BaseResearchAgent):
         search_queries: List[Dict[str, Any]],
         classified_mode: str,
         round_number: int,
+        claim_targets: List[Dict[str, Any]],
+        coverage_summary: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
         if round_number == 1 and search_queries:
             return search_queries
 
         keyword_text = " ".join(keywords[:6])
         follow_up_queries: List[Dict[str, Any]] = []
+        uncovered = list(coverage_summary.get("uncovered_claim_targets") or [])
         if classified_mode in {"live_analysis", "hybrid"}:
             follow_up_queries.extend(
                 [
                     {
                         "role": "latest-confirmation-scout",
+                        "lane": "breaking-developments",
                         "query": f"{original_query} updated latest confirmed developments {keyword_text}",
                         "time_range": "w",
                     },
                     {
                         "role": "counterpoint-scout",
+                        "lane": "counterpoints",
                         "query": f"{original_query} uncertainty disputed conflicting reports {keyword_text}",
                         "time_range": "w",
                     },
@@ -466,11 +503,91 @@ class LiteratureMinerAgent(BaseResearchAgent):
             follow_up_queries.append(
                 {
                     "role": "methods-scout",
+                    "lane": "methods-and-gaps",
                     "query": f"{original_query} methodology evidence review {keyword_text}",
                     "time_range": None,
                 }
             )
+        for target in uncovered[:2]:
+            claim_text = str(target.get("claim_target") or "")
+            if not claim_text:
+                continue
+            follow_up_queries.append(
+                {
+                    "role": "claim-gap-scout",
+                    "lane": target.get("lane") or "claim-gap",
+                    "query": f"{original_query} {claim_text} evidence confirmation {keyword_text}",
+                    "time_range": "w" if classified_mode != "literature" else None,
+                }
+            )
         return follow_up_queries or search_queries
+
+    def _assess_coverage(
+        self,
+        sources: List[Dict[str, Any]],
+        *,
+        claim_targets: List[Dict[str, Any]],
+        source_requirements: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        requirements = SourceRequirements.model_validate(
+            source_requirements
+            or SourceRequirements(total_sources=6, min_academic_or_primary=0).model_dump()
+        )
+        source_summary = build_source_summary(
+            sources,
+            requirements=requirements,
+        )
+        publishers = {str(source.get("publisher")) for source in sources if source.get("publisher")}
+        source_type_mix = Counter(str(source.get("source_type") or "unknown") for source in sources)
+        covered_claims: List[str] = []
+        uncovered_claim_targets: List[Dict[str, Any]] = []
+        for claim_target in claim_targets:
+            if self._claim_target_matches_sources(claim_target, sources):
+                covered_claims.append(str(claim_target.get("claim_id")))
+            else:
+                uncovered_claim_targets.append(claim_target)
+
+        ready_for_synthesis = (
+            source_summary["requirements_met"]
+            and len(publishers) >= 3
+            and len(uncovered_claim_targets) == 0
+        )
+        return {
+            "source_summary": source_summary,
+            "source_diversity": {
+                "unique_publishers": len(publishers),
+                "source_type_mix": dict(source_type_mix),
+            },
+            "covered_claim_ids": covered_claims,
+            "uncovered_claim_targets": uncovered_claim_targets,
+            "ready_for_synthesis": ready_for_synthesis,
+        }
+
+    def _claim_target_matches_sources(
+        self,
+        claim_target: Dict[str, Any],
+        sources: List[Dict[str, Any]],
+    ) -> bool:
+        claim_text = str(claim_target.get("claim_target") or "").lower()
+        lane = str(claim_target.get("lane") or "").lower()
+        claim_tokens = {token for token in claim_text.split() if len(token) > 4}
+        if not claim_tokens and lane:
+            claim_tokens = {token for token in lane.replace("-", " ").split() if len(token) > 3}
+
+        for source in sources:
+            haystack = " ".join(
+                [
+                    str(source.get("title") or ""),
+                    str(source.get("snippet") or ""),
+                    str(source.get("publisher") or ""),
+                    str(source.get("scout_role") or ""),
+                ]
+            ).lower()
+            if lane and lane.replace("-", " ") in haystack:
+                return True
+            if claim_tokens and sum(1 for token in claim_tokens if token in haystack) >= 2:
+                return True
+        return False
 
 
 # Create singleton instance

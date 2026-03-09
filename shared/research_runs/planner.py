@@ -256,6 +256,151 @@ def _build_rounds_plan(depth_mode: DepthMode) -> RoundsPlan:
     return RoundsPlan(evidence_rounds=1, critique_rounds=1)
 
 
+def _build_success_criteria(classified_mode: ResearchMode) -> List[str]:
+    criteria = [
+        "Answer the user query directly and stay grounded in collected evidence.",
+        "Include explicit limitations and unresolved uncertainties.",
+    ]
+    if classified_mode in {ResearchMode.LIVE_ANALYSIS, ResearchMode.HYBRID}:
+        criteria.extend(
+            [
+                "Use absolute dates for live-event claims.",
+                "Prefer primary and independently confirmed sources for market-moving claims.",
+                "State uncertainty clearly when reporting is still evolving.",
+            ]
+        )
+    else:
+        criteria.extend(
+            [
+                "Prioritize academic and primary evidence over commentary.",
+                "Identify recurring findings, methodological patterns, and research gaps.",
+            ]
+        )
+    return criteria
+
+
+def _build_excluded_assumptions(classified_mode: ResearchMode) -> List[str]:
+    assumptions = [
+        "Do not assume facts that are not present in cited evidence.",
+        "Do not treat model priors as evidence.",
+    ]
+    if classified_mode in {ResearchMode.LIVE_ANALYSIS, ResearchMode.HYBRID}:
+        assumptions.extend(
+            [
+                "Do not frame the event as hypothetical unless the user explicitly requests scenario analysis.",
+                "Do not assume causality where reporting only supports correlation or attribution.",
+            ]
+        )
+    return assumptions
+
+
+def _build_source_priorities(classified_mode: ResearchMode) -> List[str]:
+    if classified_mode == ResearchMode.LIVE_ANALYSIS:
+        return [
+            "official_or_primary",
+            "independent_wire_reporting",
+            "market_or_policy_data",
+            "secondary_analysis",
+        ]
+    if classified_mode == ResearchMode.HYBRID:
+        return [
+            "official_or_primary",
+            "independent_wire_reporting",
+            "academic_background",
+            "secondary_analysis",
+        ]
+    return ["academic", "primary", "peer_reviewed_review", "contextual_analysis"]
+
+
+def _build_key_entities(description: str, keywords: List[str]) -> List[str]:
+    tokens = re.findall(r"[A-Z][A-Za-z0-9\-\+]+(?:\s+[A-Z][A-Za-z0-9\-\+]+)*", description)
+    entities: List[str] = []
+    for token in tokens + keywords:
+        normalized = token.strip()
+        if not normalized:
+            continue
+        if normalized.lower() in {item.lower() for item in entities}:
+            continue
+        entities.append(normalized)
+    return entities[:10]
+
+
+def _build_claim_targets(description: str, classified_mode: ResearchMode) -> List[Dict[str, Any]]:
+    base_targets = [
+        {
+            "claim_id": "C1",
+            "claim_target": f"Direct answer to: {description.strip()}",
+            "lane": "core-answer",
+            "priority": "high",
+        },
+        {
+            "claim_id": "C2",
+            "claim_target": "Key uncertainty, caveat, or limitation that must remain explicit.",
+            "lane": "uncertainty",
+            "priority": "high",
+        },
+    ]
+    if classified_mode in {ResearchMode.LIVE_ANALYSIS, ResearchMode.HYBRID}:
+        base_targets.extend(
+            [
+                {
+                    "claim_id": "C3",
+                    "claim_target": "Freshly reported developments and their timing.",
+                    "lane": "breaking-developments",
+                    "priority": "high",
+                },
+                {
+                    "claim_id": "C4",
+                    "claim_target": "Primary or official confirmation relevant to the event.",
+                    "lane": "official-confirmation",
+                    "priority": "high",
+                },
+                {
+                    "claim_id": "C5",
+                    "claim_target": "Immediate market, policy, or operational impact already observed.",
+                    "lane": "market-data-confirmation",
+                    "priority": "medium",
+                },
+            ]
+        )
+    else:
+        base_targets.extend(
+            [
+                {
+                    "claim_id": "C3",
+                    "claim_target": "Most consistent findings across the strongest literature.",
+                    "lane": "core-literature",
+                    "priority": "high",
+                },
+                {
+                    "claim_id": "C4",
+                    "claim_target": "Methodological or evidentiary disagreements in the literature.",
+                    "lane": "methods-and-disagreement",
+                    "priority": "medium",
+                },
+            ]
+        )
+    return base_targets
+
+
+def _build_quality_requirements(classified_mode: ResearchMode) -> Dict[str, Any]:
+    base = {
+        "min_claim_count": 3,
+        "min_citation_coverage": 1.0,
+        "require_inline_citations": True,
+        "required_sections": ["Summary", "Evidence", "Limitations"],
+    }
+    if classified_mode in {ResearchMode.LIVE_ANALYSIS, ResearchMode.HYBRID}:
+        base.update(
+            {
+                "require_absolute_dates": True,
+                "require_uncertainty_language": True,
+                "strict_live_analysis": True,
+            }
+        )
+    return base
+
+
 def classify_research_mode(
     description: str,
     requested_mode: ResearchMode | str = ResearchMode.AUTO,
@@ -337,6 +482,8 @@ def build_research_run_plan(
         depth_mode=depth_mode,
     )
     keywords = _extract_keywords(description)
+    claim_targets = _build_claim_targets(description, profile.classified_mode)
+    quality_requirements = _build_quality_requirements(profile.classified_mode)
     shared_parameters = {
         "research_mode": profile.requested_mode.value,
         "classified_mode": profile.classified_mode.value,
@@ -347,10 +494,12 @@ def build_research_run_plan(
         "scenario_analysis_requested": profile.scenario_analysis_requested,
         "query_keywords": keywords,
         "original_description": description,
+        "claim_targets": claim_targets,
+        "quality_requirements": quality_requirements,
     }
 
     return ResearchRunPlan(
-        workflow_template=f"phase1c_{profile.classified_mode.value}_{profile.depth_mode.value}",
+        workflow_template=f"phase1e_{profile.classified_mode.value}_{profile.depth_mode.value}",
         workflow=SUPPORTED_RESEARCH_RUN_WORKFLOW,
         profile=profile,
         nodes=[
@@ -369,6 +518,15 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "ideation",
                     "node_strategy": "plan_query",
+                    "expected_format": {
+                        "required": [
+                            "research_question",
+                            "rewritten_research_brief",
+                            "success_criteria",
+                            "claim_targets",
+                            "search_queries",
+                        ]
+                    },
                 },
             ),
             ResearchRunPlanNode(
@@ -385,6 +543,14 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "knowledge_retrieval",
                     "node_strategy": "gather_evidence",
+                    "expected_format": {
+                        "required": [
+                            "sources",
+                            "coverage_summary",
+                            "uncovered_claim_targets",
+                            "rounds_completed",
+                        ]
+                    },
                 },
                 input_bindings={"query_plan": "plan_query"},
             ),
@@ -401,6 +567,14 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "knowledge_retrieval",
                     "node_strategy": "curate_sources",
+                    "expected_format": {
+                        "required": [
+                            "sources",
+                            "citations",
+                            "source_summary",
+                            "freshness_summary",
+                        ]
+                    },
                 },
                 input_bindings={
                     "query_plan": "plan_query",
@@ -421,6 +595,9 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "knowledge_retrieval",
                     "node_strategy": "draft_synthesis",
+                    "expected_format": {
+                        "required": ["answer_markdown", "claims", "limitations"]
+                    },
                 },
                 input_bindings={
                     "query_plan": "plan_query",
@@ -440,6 +617,9 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "knowledge_retrieval",
                     "node_strategy": "critique_and_fact_check",
+                    "expected_format": {
+                        "required": ["critic_findings", "rounds_completed"]
+                    },
                 },
                 input_bindings={
                     "query_plan": "plan_query",
@@ -461,6 +641,14 @@ def build_research_run_plan(
                     **shared_parameters,
                     "phase": "knowledge_retrieval",
                     "node_strategy": "revise_final_answer",
+                    "expected_format": {
+                        "required": [
+                            "answer_markdown",
+                            "claims",
+                            "limitations",
+                            "quality_summary",
+                        ]
+                    },
                 },
                 input_bindings={
                     "query_plan": "plan_query",

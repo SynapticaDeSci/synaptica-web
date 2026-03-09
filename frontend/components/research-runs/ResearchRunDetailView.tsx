@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
 
 import { VerificationReviewCard } from '@/components/VerificationReviewCard'
 import { Button } from '@/components/ui/button'
@@ -28,6 +29,7 @@ import {
   type ResearchRunNodeResponse,
   type ResearchRunNodeStatus,
   type ResearchRunResponse,
+  type ResearchQualitySummary,
   type ResearchSourceCard,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -67,6 +69,10 @@ function stringifyValue(value: unknown) {
   return JSON.stringify(value, null, 2)
 }
 
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
 function getRunHeadline(run: ResearchRunResponse): string | null {
   const payload = run.result && typeof run.result === 'object' ? run.result : null
   if (payload && typeof payload.answer_markdown === 'string') {
@@ -85,16 +91,16 @@ function getRunHeadline(run: ResearchRunResponse): string | null {
   return null
 }
 
-function getRunFindings(run: ResearchRunResponse): string[] {
+function getRunClaims(run: ResearchRunResponse): ResearchClaim[] {
   const payload = run.result && typeof run.result === 'object' ? run.result : null
   if (payload && Array.isArray(payload.claims)) {
     return payload.claims
       .map((item: unknown) =>
         item && typeof item === 'object' && typeof (item as ResearchClaim).claim === 'string'
-          ? (item as ResearchClaim).claim
+          ? (item as ResearchClaim)
           : null,
       )
-      .filter((item: string | null): item is string => Boolean(item))
+      .filter((item: ResearchClaim | null): item is ResearchClaim => Boolean(item))
   }
   return []
 }
@@ -125,6 +131,11 @@ function getRunPayload(run: ResearchRunResponse): Record<string, any> | null {
   return run.result && typeof run.result === 'object' ? (run.result as Record<string, any>) : null
 }
 
+function getRunQualitySummary(run: ResearchRunResponse): ResearchQualitySummary | null {
+  const payload = getRunPayload(run)
+  return isRecord(payload?.quality_summary) ? (payload.quality_summary as ResearchQualitySummary) : null
+}
+
 function formatMode(value: string) {
   return value.replace(/_/g, ' ')
 }
@@ -135,6 +146,84 @@ function cleanDisplayText(value: string) {
     .replace(/(^|\n)#{1,6}\s*/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (typeof value === 'string') {
+    return value.trim() ? [value] : []
+  }
+
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+}
+
+function formatCoverage(value?: number | null) {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null
+  }
+
+  const normalized = value <= 1 ? value * 100 : value
+  return `${Math.round(normalized)}%`
+}
+
+function formatSourceDiversity(
+  value: ResearchQualitySummary['source_diversity'],
+): string | null {
+  if (typeof value === 'number') {
+    return `${value} source groups`
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value
+  }
+
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const parts = Object.entries(value)
+    .filter(([, item]) => typeof item === 'string' || typeof item === 'number')
+    .map(([key, item]) => `${formatMode(key)}: ${item}`)
+
+  return parts.length > 0 ? parts.join(' • ') : null
+}
+
+function getCitationId(source: ResearchSourceCard) {
+  return typeof source.citation_id === 'string' && source.citation_id.trim().length > 0
+    ? source.citation_id.trim()
+    : null
+}
+
+function citationAnchorId(citationId: string) {
+  return `citation-${citationId.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+}
+
+function citationSourceKey(source: ResearchSourceCard) {
+  return getCitationId(source) || source.url || source.title
+}
+
+function dedupeSources(sources: ResearchSourceCard[]) {
+  const seen = new Map<string, ResearchSourceCard>()
+
+  for (const source of sources) {
+    seen.set(citationSourceKey(source), source)
+  }
+
+  return [...seen.values()]
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function linkInlineCitations(markdown: string, citationIds: string[]) {
+  return citationIds.reduce((current, citationId) => {
+    const pattern = new RegExp(`\\[(${escapeRegExp(citationId)})\\](?!\\()`, 'g')
+    return current.replace(pattern, `[$1](#${citationAnchorId(citationId)})`)
+  }, markdown)
 }
 
 function pickFocusNode(nodes: ResearchRunNodeResponse[]) {
@@ -275,6 +364,11 @@ function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
               <div className="min-w-0 space-y-2">
                 <p className="text-sm font-semibold text-white">{source.title}</p>
                 <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+                  {getCitationId(source) && (
+                    <span className="rounded-full border border-sky-400/20 bg-sky-400/10 px-2 py-1 font-semibold uppercase tracking-[0.18em] text-sky-100">
+                      {getCitationId(source)}
+                    </span>
+                  )}
                   {source.publisher && (
                     <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
                       {source.publisher}
@@ -315,6 +409,222 @@ function SourceCards({ sources }: { sources: ResearchSourceCard[] }) {
       </div>
     </div>
   )
+}
+
+function QualitySummaryPanel({
+  qualitySummary,
+  sourceSummary,
+  freshnessSummary,
+}: {
+  qualitySummary: ResearchQualitySummary | null
+  sourceSummary: Record<string, any> | null
+  freshnessSummary: Record<string, any> | null
+}) {
+  const verificationNotes = normalizeStringList(qualitySummary?.verification_notes)
+  const citationCoverage = formatCoverage(qualitySummary?.citation_coverage)
+  const sourceDiversity = formatSourceDiversity(qualitySummary?.source_diversity)
+  const uncoveredClaims =
+    typeof qualitySummary?.uncovered_claims === 'number'
+      ? qualitySummary.uncovered_claims
+      : Array.isArray(qualitySummary?.uncovered_claims)
+        ? qualitySummary.uncovered_claims.length
+        : null
+
+  if (!qualitySummary && !sourceSummary && !freshnessSummary) {
+    return null
+  }
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-300">
+          Quality summary
+        </p>
+        {typeof qualitySummary?.strict_live_analysis_checks_passed === 'boolean' && (
+          <span
+            className={cn(
+              'rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em]',
+              qualitySummary.strict_live_analysis_checks_passed
+                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+            )}
+          >
+            {qualitySummary.strict_live_analysis_checks_passed ? 'Strict checks passed' : 'Needs review'}
+          </span>
+        )}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-200">
+        {citationCoverage && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+            Citation coverage: {citationCoverage}
+          </span>
+        )}
+        {typeof uncoveredClaims === 'number' && (
+          <span
+            className={cn(
+              'rounded-full border px-2 py-1',
+              uncoveredClaims === 0
+                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+            )}
+          >
+            Uncovered claims: {uncoveredClaims}
+          </span>
+        )}
+        {sourceDiversity && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+            {sourceDiversity}
+          </span>
+        )}
+        {typeof sourceSummary?.total_sources === 'number' && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+            Sources: {sourceSummary.total_sources}
+          </span>
+        )}
+        {typeof sourceSummary?.fresh_sources === 'number' && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+            Fresh: {sourceSummary.fresh_sources}
+          </span>
+        )}
+        {typeof sourceSummary?.academic_or_primary_sources === 'number' && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+            Primary/Academic: {sourceSummary.academic_or_primary_sources}
+          </span>
+        )}
+        {freshnessSummary?.required && (
+          <span
+            className={cn(
+              'rounded-full border px-2 py-1',
+              freshnessSummary.requirements_met
+                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+            )}
+          >
+            Freshness {freshnessSummary.requirements_met ? 'met' : 'warning'}
+          </span>
+        )}
+      </div>
+
+      {verificationNotes.length > 0 && (
+        <ul className="mt-3 space-y-2 text-sm text-slate-200">
+          {verificationNotes.map((note) => (
+            <li key={note} className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
+              {note}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {Array.isArray(freshnessSummary?.issues) && freshnessSummary.issues.length > 0 && (
+        <ul className="mt-3 space-y-2 text-sm text-amber-100">
+          {freshnessSummary.issues.map((issue: string) => (
+            <li key={issue} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+              {issue}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function ClaimCards({
+  claims,
+  citationLookup,
+}: {
+  claims: ResearchClaim[]
+  citationLookup: Map<string, ResearchSourceCard>
+}) {
+  if (claims.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="mt-4 space-y-3">
+      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
+        Claim grounding
+      </p>
+      <div className="space-y-3">
+        {claims.map((claim, index) => {
+          const citationRefs = [
+            ...(claim.supporting_citation_ids ?? []),
+            ...((claim.supporting_citations ?? []).filter(
+              (item, refIndex, source) => source.indexOf(item) === refIndex,
+            )),
+          ]
+
+          return (
+            <div
+              key={claim.claim_id || `${claim.claim}-${index}`}
+              className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-emerald-50"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <p className="flex-1 font-medium text-white">{claim.claim}</p>
+                {claim.confidence && (
+                  <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100">
+                    {claim.confidence}
+                  </span>
+                )}
+              </div>
+
+              {citationRefs.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {citationRefs.map((reference) => {
+                    const linkedCitation = citationLookup.get(reference)
+                    const citationId = linkedCitation ? getCitationId(linkedCitation) : null
+
+                    if (linkedCitation && citationId) {
+                      return (
+                        <a
+                          key={`${claim.claim}-${reference}`}
+                          href={`#${citationAnchorId(citationId)}`}
+                          className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100 transition hover:bg-emerald-400/20"
+                          title={linkedCitation.title}
+                        >
+                          {citationId}
+                        </a>
+                      )
+                    }
+
+                    return (
+                      <span
+                        key={`${claim.claim}-${reference}`}
+                        className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-emerald-50/90"
+                      >
+                        {reference}
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+const markdownComponents: Components = {
+  a: ({ href, children, ...props }) => {
+    const isInlineCitation = typeof href === 'string' && href.startsWith('#citation-')
+
+    return (
+      <a
+        {...props}
+        href={href}
+        target={isInlineCitation ? undefined : '_blank'}
+        rel={isInlineCitation ? undefined : 'noreferrer'}
+        className={cn(
+          isInlineCitation &&
+            'rounded-full border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-100 no-underline transition hover:bg-emerald-400/20',
+        )}
+      >
+        {children}
+      </a>
+    )
+  },
 }
 
 export function ResearchRunDetailView({ researchRunId }: { researchRunId: string }) {
@@ -443,9 +753,10 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const researchRun = researchRunQuery.data
   const reportPayload = getRunPayload(researchRun)
   const headline = getRunHeadline(researchRun)
-  const findings = getRunFindings(researchRun)
+  const claims = getRunClaims(researchRun)
   const runSources = getRunSources(researchRun)
   const criticFindings = getCriticFindings(researchRun)
+  const qualitySummary = getRunQualitySummary(researchRun)
   const citations = Array.isArray(reportPayload?.citations)
     ? (reportPayload?.citations as ResearchSourceCard[])
     : []
@@ -460,6 +771,34 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     reportPayload && typeof reportPayload.source_summary === 'object'
       ? (reportPayload.source_summary as Record<string, any>)
       : null
+  const citedSources = dedupeSources([
+    ...citations,
+    ...runSources.filter((source) => Boolean(getCitationId(source))),
+  ])
+  const citationLookup = (() => {
+    const lookup = new Map<string, ResearchSourceCard>()
+
+    for (const source of citedSources) {
+      const citationId = getCitationId(source)
+      if (citationId) {
+        lookup.set(citationId, source)
+      }
+      lookup.set(source.title, source)
+    }
+
+    return lookup
+  })()
+  const linkedHeadline = (() => {
+    if (!headline) {
+      return null
+    }
+
+    const citationIds = citedSources
+      .map((source) => getCitationId(source))
+      .filter((citationId): citationId is string => Boolean(citationId))
+
+    return citationIds.length > 0 ? linkInlineCitations(headline, citationIds) : headline
+  })()
   const selectedNodeAttempts = [...(selectedNode?.attempts ?? [])].sort(
     (left, right) => right.attempt_number - left.attempt_number,
   )
@@ -626,26 +965,36 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                 </div>
               )}
 
-              {(headline || findings.length > 0) && (
+              {!(headline || claims.length > 0 || citedSources.length > 0) &&
+                (qualitySummary || sourceSummary || freshnessSummary) && (
+                  <QualitySummaryPanel
+                    qualitySummary={qualitySummary}
+                    sourceSummary={sourceSummary}
+                    freshnessSummary={freshnessSummary}
+                  />
+                )}
+
+              {(headline || claims.length > 0 || citedSources.length > 0) && (
                 <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-5">
                   <div className="flex items-center gap-2 text-emerald-200">
                     <ShieldCheck className="h-4 w-4" />
                     <p className="text-sm font-semibold uppercase tracking-[0.3em]">Final result</p>
                   </div>
+                  <div className="mt-4">
+                    <QualitySummaryPanel
+                      qualitySummary={qualitySummary}
+                      sourceSummary={sourceSummary}
+                      freshnessSummary={freshnessSummary}
+                    />
+                  </div>
                   {headline && (
                     <div className="prose prose-invert prose-sm mt-4 max-w-none prose-headings:text-white prose-p:text-slate-100 prose-strong:text-white prose-a:text-sky-200 prose-li:text-slate-100 prose-blockquote:border-sky-400/30 prose-blockquote:text-slate-200 prose-code:text-emerald-100">
-                      <ReactMarkdown>{headline}</ReactMarkdown>
+                      <ReactMarkdown components={markdownComponents}>
+                        {linkedHeadline}
+                      </ReactMarkdown>
                     </div>
                   )}
-                  {findings.length > 0 && (
-                    <ul className="mt-4 space-y-2 text-sm text-emerald-50">
-                      {findings.map((finding: string) => (
-                        <li key={finding} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                          {finding}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                  <ClaimCards claims={claims} citationLookup={citationLookup} />
                   {criticFindings.length > 0 && (
                     <div className="mt-4 space-y-2">
                       <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
@@ -685,15 +1034,19 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       </ul>
                     </div>
                   )}
-                  {citations.length > 0 && (
+                  {citedSources.length > 0 && (
                     <div className="mt-4 space-y-2">
                       <p className="text-xs font-semibold uppercase tracking-[0.25em] text-emerald-200/80">
                         Cited sources
                       </p>
                       <div className="grid gap-2">
-                        {citations.map((citation) => (
+                        {citedSources.map((citation) => {
+                          const citationId = getCitationId(citation)
+
+                          return (
                           <a
-                            key={`${citation.url}-${citation.title}`}
+                            key={citationSourceKey(citation)}
+                            id={citationId ? citationAnchorId(citationId) : undefined}
                             href={citation.url}
                             target="_blank"
                             rel="noreferrer"
@@ -701,9 +1054,16 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="font-medium text-white">{citation.title}</p>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {citationId && (
+                                    <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100">
+                                      {citationId}
+                                    </span>
+                                  )}
+                                  <p className="font-medium text-white">{citation.title}</p>
+                                </div>
                                 <p className="mt-1 text-xs text-emerald-100/80">
-                                  {[citation.publisher, citation.published_at ? formatDateTime(citation.published_at) : null]
+                                  {[citation.publisher, citation.source_type ? formatMode(citation.source_type) : null, citation.published_at ? formatDateTime(citation.published_at) : null]
                                     .filter(Boolean)
                                     .join(' • ')}
                                 </p>
@@ -711,55 +1071,10 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                               <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-emerald-200" />
                             </div>
                           </a>
-                        ))}
+                          )
+                        })}
                       </div>
                     </div>
-                  )}
-                </div>
-              )}
-
-              {(sourceSummary || freshnessSummary) && (
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-300">
-                    Evidence at a glance
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-200">
-                    {typeof sourceSummary?.total_sources === 'number' && (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                        Sources: {sourceSummary.total_sources}
-                      </span>
-                    )}
-                    {typeof sourceSummary?.fresh_sources === 'number' && (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                        Fresh: {sourceSummary.fresh_sources}
-                      </span>
-                    )}
-                    {typeof sourceSummary?.academic_or_primary_sources === 'number' && (
-                      <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-                        Primary/Academic: {sourceSummary.academic_or_primary_sources}
-                      </span>
-                    )}
-                    {freshnessSummary?.required && (
-                      <span
-                        className={cn(
-                          'rounded-full border px-2 py-1',
-                          freshnessSummary.requirements_met
-                            ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
-                            : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
-                        )}
-                      >
-                        Freshness {freshnessSummary.requirements_met ? 'met' : 'warning'}
-                      </span>
-                    )}
-                  </div>
-                  {Array.isArray(freshnessSummary?.issues) && freshnessSummary.issues.length > 0 && (
-                    <ul className="mt-3 space-y-2 text-sm text-amber-100">
-                      {freshnessSummary.issues.map((issue: string) => (
-                        <li key={issue} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
-                          {issue}
-                        </li>
-                      ))}
-                    </ul>
                   )}
                 </div>
               )}

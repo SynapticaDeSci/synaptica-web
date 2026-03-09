@@ -1,4 +1,5 @@
 from shared.research_runs.deep_research import (
+    assign_citation_ids,
     build_source_summary,
     clean_source_snippet,
     filter_sources_for_curation,
@@ -125,3 +126,32 @@ def test_filter_sources_for_curation_drops_low_signal_live_sources_when_not_need
 
     assert len(filtered["selected_sources"]) == 2
     assert any(source["title"] == weak_source["title"] for source in filtered["filtered_sources"])
+
+
+def test_assign_citation_ids_adds_stable_ids_to_sources_and_citations():
+    sources = [
+        normalize_source_card(
+            {
+                "title": "Reuters oil market update",
+                "url": "https://www.reuters.com/world/example-2026-03-09/",
+                "content": "Oil prices rose as markets priced in geopolitical risk.",
+            },
+            scout_role="breaking-news-scout",
+            round_number=1,
+        ),
+        normalize_source_card(
+            {
+                "title": "OPEC market note",
+                "url": "https://www.opec.org/example",
+                "content": "Supply commentary from OPEC.",
+            },
+            scout_role="official-confirmation",
+            round_number=1,
+        ),
+    ]
+
+    updated_sources, citations = assign_citation_ids(sources)
+
+    assert [source["citation_id"] for source in updated_sources] == ["S1", "S2"]
+    assert [citation["citation_id"] for citation in citations] == ["S1", "S2"]
+    assert citations[0]["title"] == "Reuters oil market update"

@@ -7,6 +7,7 @@ Synthesizes, critiques, and revises source-grounded research answers.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any, Dict, List
 
@@ -81,6 +82,8 @@ You produce concise, source-grounded outputs that preserve uncertainty."""
         curated_sources = dict(context.get("curated_sources") or {})
         sources = list(curated_sources.get("sources") or [])
         citations = list(curated_sources.get("citations") or [])
+        claim_targets = list(query_plan.get("claim_targets") or context.get("claim_targets") or [])
+        quality_requirements = dict(context.get("quality_requirements") or {})
 
         if not sources:
             self._update_reputation(success=False, quality_score=0.0)
@@ -91,10 +94,17 @@ Create a source-grounded draft answer.
 
 User query: {query_plan.get('query') or context.get('original_description') or request}
 Research question: {query_plan.get('research_question')}
+Rewritten research brief: {query_plan.get('rewritten_research_brief')}
 Classified mode: {context.get('classified_mode')}
 Depth mode: {context.get('depth_mode')}
 Freshness required: {context.get('freshness_required')}
 As-of date: {datetime.now(UTC).date().isoformat()}
+
+Success criteria:
+{json.dumps(query_plan.get('success_criteria') or [], indent=2)}
+
+Claim targets:
+{json.dumps(claim_targets, indent=2)}
 
 Subquestions:
 {json.dumps(query_plan.get('subquestions') or [], indent=2)}
@@ -105,16 +115,20 @@ Source summary:
 Freshness summary:
 {json.dumps(curated_sources.get('freshness_summary') or {}, indent=2)}
 
+Citation catalog:
+{json.dumps(citations, indent=2)}
+
 Sources:
 {self._format_sources_for_prompt(sources)}
 
 Return JSON with this shape:
 {{
-  "answer": "<direct answer in markdown that cites the evidence and uses absolute dates when relevant>",
+  "answer_markdown": "<direct answer in markdown with inline citations like [S1] that uses absolute dates when relevant>",
   "claims": [
     {{
+      "claim_id": "<claim target id such as C1>",
       "claim": "<specific claim>",
-      "supporting_citations": ["<source title>", "<source title>"],
+      "supporting_citation_ids": ["S1", "S2"],
       "confidence": "<high|medium|low>"
     }}
   ],
@@ -124,8 +138,10 @@ Return JSON with this shape:
 Rules:
 - Do not invent events or outcomes that are not reflected in the sources.
 - If the topic is live/current, state the answer as of the date above.
-- Keep claims tied to sources.
-- Format the answer in markdown with a short opening summary, followed by concise sections when useful.
+- Keep claims tied to the supplied citation IDs.
+- Use section headings for Summary, Evidence, and Limitations.
+- Every material factual claim should have at least one inline citation marker such as [S1].
+- If the freshest evidence is mixed, say so explicitly and preserve uncertainty.
 """
 
         parsed = await self._run_role_prompt(
@@ -134,11 +150,25 @@ Rules:
             ),
             prompt=prompt,
         )
-        draft_result = self._normalize_answer_payload(parsed, fallback_query=str(query_plan.get("query") or request))
+        draft_result = self._normalize_answer_payload(
+            parsed,
+            fallback_query=str(query_plan.get("query") or request),
+            citations=citations,
+        )
         draft_result["citations"] = citations
         draft_result["sources"] = sources
         draft_result["source_summary"] = curated_sources.get("source_summary") or {}
         draft_result["freshness_summary"] = curated_sources.get("freshness_summary") or {}
+        draft_result["quality_summary"] = self._build_quality_summary(
+            answer_markdown=draft_result.get("answer_markdown", ""),
+            claims=draft_result.get("claims") or [],
+            citations=citations,
+            source_summary=draft_result["source_summary"],
+            freshness_summary=draft_result["freshness_summary"],
+            critic_findings=[],
+            quality_requirements=quality_requirements,
+            classified_mode=str(context.get("classified_mode") or ""),
+        )
         draft_result["rounds_completed"] = {
             "evidence_rounds": int((context.get("rounds_planned") or {}).get("evidence_rounds", 0) or 0),
             "critique_rounds": 0,
@@ -153,25 +183,37 @@ Rules:
         curated_sources = dict(context.get("curated_sources") or {})
         draft = dict(context.get("draft_synthesis") or {})
         sources = list(curated_sources.get("sources") or [])
+        citations = list(curated_sources.get("citations") or [])
         critique_rounds = int((context.get("rounds_planned") or {}).get("critique_rounds", 1) or 1)
+        quality_requirements = dict(context.get("quality_requirements") or {})
 
         deterministic_findings = self._deterministic_findings(
             draft=draft,
+            citations=citations,
             freshness_summary=curated_sources.get("freshness_summary") or {},
             scenario_requested=bool(context.get("scenario_analysis_requested")),
+            quality_requirements=quality_requirements,
+            classified_mode=str(context.get("classified_mode") or ""),
         )
 
         llm_findings: List[Dict[str, Any]] = []
         for round_number in range(1, critique_rounds + 1):
             prompt = f"""
-Review this draft answer for unsupported claims, missing caveats, stale evidence, or overstatement.
+Review this draft answer for unsupported claims, missing caveats, stale evidence, missing inline citations, benchmark mismatches, unsupported causal language, and overstatement.
 
 Research question: {query_plan.get('research_question')}
+Rewritten research brief: {query_plan.get('rewritten_research_brief')}
 Draft answer:
 {json.dumps(draft, indent=2)}
 
 Freshness summary:
 {json.dumps(curated_sources.get('freshness_summary') or {}, indent=2)}
+
+Claim targets:
+{json.dumps(query_plan.get('claim_targets') or [], indent=2)}
+
+Quality requirements:
+{json.dumps(quality_requirements, indent=2)}
 
 Sources:
 {self._format_sources_for_prompt(sources)}
@@ -218,6 +260,7 @@ Return JSON:
         critic_review = dict(context.get("critic_review") or {})
         sources = list(curated_sources.get("sources") or [])
         citations = list(curated_sources.get("citations") or [])
+        quality_requirements = dict(context.get("quality_requirements") or {})
 
         if not draft:
             self._update_reputation(success=False, quality_score=0.0)
@@ -228,6 +271,7 @@ Revise the answer using the critic findings while staying strictly grounded in t
 
 User query: {query_plan.get('query') or context.get('original_description')}
 Research question: {query_plan.get('research_question')}
+Rewritten research brief: {query_plan.get('rewritten_research_brief')}
 As-of date: {datetime.now(UTC).date().isoformat()}
 
 Draft:
@@ -242,16 +286,29 @@ Source summary:
 Freshness summary:
 {json.dumps(curated_sources.get('freshness_summary') or {}, indent=2)}
 
+Claim targets:
+{json.dumps(query_plan.get('claim_targets') or [], indent=2)}
+
+Success criteria:
+{json.dumps(query_plan.get('success_criteria') or [], indent=2)}
+
+Quality requirements:
+{json.dumps(quality_requirements, indent=2)}
+
+Citation catalog:
+{json.dumps(citations, indent=2)}
+
 Sources:
 {self._format_sources_for_prompt(sources)}
 
 Return JSON:
 {{
-  "answer": "<final revised markdown answer>",
+  "answer_markdown": "<final revised markdown answer with inline citation markers like [S1]>",
   "claims": [
     {{
+      "claim_id": "<claim id>",
       "claim": "<specific claim>",
-      "supporting_citations": ["<source title>"],
+      "supporting_citation_ids": ["S1"],
       "confidence": "<high|medium|low>"
     }}
   ],
@@ -262,7 +319,9 @@ Rules:
 - Use absolute dates for current events.
 - Preserve uncertainty instead of speculating.
 - Do not claim evidence beyond what is in the sources.
-- Return markdown with short sections such as Summary, Evidence, and Limitations when helpful.
+- Keep the final answer in markdown with Summary, Evidence, and Limitations sections.
+- Use inline citation markers like [S1] throughout the answer.
+- Every claim must map to at least one supporting citation ID that exists in the citation catalog.
 """
 
         parsed = await self._run_role_prompt(
@@ -271,12 +330,26 @@ Rules:
             ),
             prompt=prompt,
         )
-        revised = self._normalize_answer_payload(parsed, fallback_query=str(query_plan.get("query") or "research query"))
+        revised = self._normalize_answer_payload(
+            parsed,
+            fallback_query=str(query_plan.get("query") or "research query"),
+            citations=citations,
+        )
         revised["citations"] = citations
         revised["sources"] = sources
         revised["source_summary"] = curated_sources.get("source_summary") or {}
         revised["freshness_summary"] = curated_sources.get("freshness_summary") or {}
         revised["critic_findings"] = critic_review.get("critic_findings") or []
+        revised["quality_summary"] = self._build_quality_summary(
+            answer_markdown=revised.get("answer_markdown", ""),
+            claims=revised.get("claims") or [],
+            citations=citations,
+            source_summary=revised["source_summary"],
+            freshness_summary=revised["freshness_summary"],
+            critic_findings=revised["critic_findings"],
+            quality_requirements=quality_requirements,
+            classified_mode=str(context.get("classified_mode") or ""),
+        )
         revised["rounds_completed"] = {
             "evidence_rounds": int((draft.get("rounds_completed") or {}).get("evidence_rounds", 0) or 0),
             "critique_rounds": int((critic_review.get("rounds_completed") or {}).get("critique_rounds", 0) or 0),
@@ -366,24 +439,41 @@ Rules:
                 "\n".join(
                     [
                         f"Source {index}: {source.get('title')}",
+                        f"Citation ID: {source.get('citation_id') or f'S{index}'}",
                         f"Publisher: {source.get('publisher')}",
                         f"Published: {source.get('published_at')}",
                         f"Type: {source.get('source_type')}",
                         f"URL: {source.get('url')}",
-                        f"Snippet: {source.get('snippet')}",
+                        f"Snippet: {source.get('display_snippet') or source.get('snippet')}",
                     ]
                 )
             )
         return "\n\n".join(formatted)
 
-    def _normalize_answer_payload(self, payload: Dict[str, Any], *, fallback_query: str) -> Dict[str, Any]:
+    def _normalize_answer_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        fallback_query: str,
+        citations: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        citations = list(citations or payload.get("citations") or [])
+        citation_lookup = self._build_citation_lookup(citations)
         claims = []
-        for item in payload.get("claims") or []:
+        for index, item in enumerate(payload.get("claims") or [], start=1):
             if isinstance(item, dict) and item.get("claim"):
+                claim_id = str(item.get("claim_id") or f"C{index}")
+                supporting_citation_ids = self._resolve_supporting_citation_ids(item, citation_lookup)
                 claims.append(
                     {
+                        "claim_id": claim_id,
                         "claim": str(item.get("claim")),
-                        "supporting_citations": list(item.get("supporting_citations") or []),
+                        "supporting_citation_ids": supporting_citation_ids,
+                        "supporting_citations": [
+                            citation_lookup[citation_id]["title"]
+                            for citation_id in supporting_citation_ids
+                            if citation_id in citation_lookup and citation_lookup[citation_id].get("title")
+                        ],
                         "confidence": str(item.get("confidence") or "medium"),
                     }
                 )
@@ -392,10 +482,15 @@ Rules:
             for item in (payload.get("limitations") or [])
             if isinstance(item, (str, int, float))
         ]
-        answer = str(payload.get("answer") or "").strip()
-        if not answer:
-            answer = f"Insufficient model output to complete a final synthesis for: {fallback_query}"
-        answer_markdown = answer
+        answer_markdown = str(payload.get("answer_markdown") or payload.get("answer") or "").strip()
+        if not answer_markdown:
+            answer_markdown = (
+                "## Summary\n\n"
+                f"Insufficient model output to complete a final synthesis for: {fallback_query}\n\n"
+                "## Evidence\n\nThe available evidence could not be synthesized into a reliable answer.\n\n"
+                "## Limitations\n\nThe generated answer was incomplete."
+            )
+        answer = answer_markdown
         return {
             "answer": answer,
             "answer_markdown": answer_markdown,
@@ -407,11 +502,25 @@ Rules:
         self,
         *,
         draft: Dict[str, Any],
+        citations: List[Dict[str, Any]],
         freshness_summary: Dict[str, Any],
         scenario_requested: bool,
+        quality_requirements: Dict[str, Any],
+        classified_mode: str,
     ) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
-        answer = str(draft.get("answer") or "").lower()
+        answer_markdown = str(draft.get("answer_markdown") or draft.get("answer") or "")
+        answer = answer_markdown.lower()
+        quality_summary = self._build_quality_summary(
+            answer_markdown=answer_markdown,
+            claims=list(draft.get("claims") or []),
+            citations=citations,
+            source_summary=draft.get("source_summary") or {},
+            freshness_summary=freshness_summary,
+            critic_findings=[],
+            quality_requirements=quality_requirements,
+            classified_mode=classified_mode,
+        )
         if freshness_summary.get("required") and not freshness_summary.get("requirements_met"):
             findings.append(
                 {
@@ -439,7 +548,218 @@ Rules:
                     "round_number": 0,
                 }
             )
+        for note in quality_summary.get("verification_notes") or []:
+            findings.append(
+                {
+                    "issue": str(note),
+                    "severity": "high" if "missing" in str(note).lower() or "must" in str(note).lower() else "medium",
+                    "recommendation": "Revise the answer so the final report satisfies the research-answer contract.",
+                    "round_number": 0,
+                }
+            )
         return findings
+
+    def _build_citation_lookup(self, citations: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        lookup: Dict[str, Dict[str, Any]] = {}
+        for citation in citations:
+            citation_id = citation.get("citation_id")
+            if isinstance(citation_id, str) and citation_id.strip():
+                lookup[citation_id.strip()] = citation
+        return lookup
+
+    def _resolve_supporting_citation_ids(
+        self,
+        claim: Dict[str, Any],
+        citation_lookup: Dict[str, Dict[str, Any]],
+    ) -> List[str]:
+        direct_ids = [
+            str(value).strip()
+            for value in (claim.get("supporting_citation_ids") or [])
+            if isinstance(value, (str, int, float)) and str(value).strip()
+        ]
+        if direct_ids:
+            return sorted(dict.fromkeys(direct_ids))
+
+        title_lookup = {
+            str(citation.get("title") or "").strip().lower(): citation_id
+            for citation_id, citation in citation_lookup.items()
+            if citation.get("title")
+        }
+        resolved: List[str] = []
+        for title in claim.get("supporting_citations") or []:
+            normalized = str(title).strip().lower()
+            if normalized and normalized in title_lookup:
+                resolved.append(title_lookup[normalized])
+        return sorted(dict.fromkeys(resolved))
+
+    def _extract_inline_citation_ids(self, answer_markdown: str) -> List[str]:
+        return sorted(set(re.findall(r"\[(S\d+)\]", answer_markdown or "")))
+
+    def _has_absolute_date(self, answer_markdown: str) -> bool:
+        return bool(
+            re.search(r"\b20\d{2}-\d{2}-\d{2}\b", answer_markdown)
+            or re.search(
+                r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+                r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+                r"Dec(?:ember)?)\s+\d{1,2},\s+20\d{2}\b",
+                answer_markdown,
+            )
+        )
+
+    def _has_uncertainty_language(self, answer_markdown: str) -> bool:
+        normalized = answer_markdown.lower()
+        uncertainty_markers = (
+            "appears",
+            "likely",
+            "uncertain",
+            "reported",
+            "as of",
+            "so far",
+            "suggests",
+            "indicates",
+            "may",
+            "still evolving",
+        )
+        return any(marker in normalized for marker in uncertainty_markers)
+
+    def _build_quality_summary(
+        self,
+        *,
+        answer_markdown: str,
+        claims: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+        source_summary: Dict[str, Any],
+        freshness_summary: Dict[str, Any],
+        critic_findings: List[Dict[str, Any]],
+        quality_requirements: Dict[str, Any],
+        classified_mode: str,
+    ) -> Dict[str, Any]:
+        citation_lookup = self._build_citation_lookup(citations)
+        inline_citation_ids = self._extract_inline_citation_ids(answer_markdown)
+        claim_count = len(claims)
+        covered_claims = 0
+        uncovered_claims: List[str] = []
+        verification_notes: List[str] = []
+
+        for index, claim in enumerate(claims, start=1):
+            claim_id = str(claim.get("claim_id") or f"C{index}")
+            supporting_ids = [
+                str(item).strip()
+                for item in (claim.get("supporting_citation_ids") or [])
+                if isinstance(item, str) and item.strip()
+            ]
+            unknown_ids = [citation_id for citation_id in supporting_ids if citation_id not in citation_lookup]
+            if supporting_ids and not unknown_ids:
+                covered_claims += 1
+            else:
+                uncovered_claims.append(claim_id)
+                if not supporting_ids:
+                    verification_notes.append(
+                        f"Claim {claim_id} is missing supporting citation IDs."
+                    )
+                if unknown_ids:
+                    verification_notes.append(
+                        f"Claim {claim_id} references unknown citation IDs: {', '.join(unknown_ids)}."
+                    )
+
+        citation_coverage = (covered_claims / claim_count) if claim_count else 0.0
+        min_claim_count = int(quality_requirements.get("min_claim_count", 0) or 0)
+        min_citation_coverage = float(quality_requirements.get("min_citation_coverage", 0.0) or 0.0)
+
+        if min_claim_count and claim_count < min_claim_count:
+            verification_notes.append(
+                f"Need at least {min_claim_count} explicit claims; found {claim_count}."
+            )
+        if claim_count and citation_coverage < min_citation_coverage:
+            verification_notes.append(
+                "Citation coverage is incomplete for the final claims."
+            )
+
+        required_sections = [
+            str(section).strip()
+            for section in (quality_requirements.get("required_sections") or [])
+            if str(section).strip()
+        ]
+        missing_sections = [
+            section
+            for section in required_sections
+            if section.lower() not in (answer_markdown or "").lower()
+        ]
+        if missing_sections:
+            verification_notes.append(
+                f"Answer is missing required sections: {', '.join(missing_sections)}."
+            )
+
+        if quality_requirements.get("require_inline_citations") and citations:
+            if not inline_citation_ids:
+                verification_notes.append("Answer is missing inline citation markers such as [S1].")
+            else:
+                unknown_inline = [
+                    citation_id for citation_id in inline_citation_ids if citation_id not in citation_lookup
+                ]
+                if unknown_inline:
+                    verification_notes.append(
+                        "Answer references unknown inline citation IDs: "
+                        + ", ".join(sorted(unknown_inline))
+                        + "."
+                    )
+
+        if quality_requirements.get("require_absolute_dates") and not self._has_absolute_date(
+            answer_markdown
+        ):
+            verification_notes.append("Live-analysis answer must include an absolute date.")
+        if quality_requirements.get("require_uncertainty_language") and not self._has_uncertainty_language(
+            answer_markdown
+        ):
+            verification_notes.append("Live-analysis answer must include explicit uncertainty language.")
+
+        if freshness_summary.get("required") and not freshness_summary.get("requirements_met"):
+            verification_notes.append("Fresh-source requirements were not fully met.")
+
+        if critic_findings:
+            high_severity = [
+                finding
+                for finding in critic_findings
+                if str(finding.get("severity") or "").lower() == "high"
+            ]
+            if high_severity:
+                verification_notes.append(
+                    f"{len(high_severity)} high-severity critic finding(s) remain unresolved."
+                )
+
+        source_types = {
+            str(citation.get("source_type") or "unknown")
+            for citation in citations
+            if citation.get("source_type")
+        }
+        publishers = {
+            str(citation.get("publisher") or "").strip()
+            for citation in citations
+            if citation.get("publisher")
+        }
+        source_diversity = {
+            "publishers": len(publishers) or len(source_summary.get("publishers") or []),
+            "source_types": len(source_types),
+            "fresh_sources": int(source_summary.get("fresh_sources", 0) or 0),
+            "academic_or_primary_sources": int(
+                source_summary.get("academic_or_primary_sources", 0) or 0
+            ),
+        }
+
+        strict_live_analysis = bool(
+            quality_requirements.get("strict_live_analysis")
+            or classified_mode in {"live_analysis", "hybrid"}
+        )
+
+        return {
+            "citation_coverage": round(citation_coverage, 3),
+            "uncovered_claims": uncovered_claims,
+            "source_diversity": source_diversity,
+            "verification_notes": sorted(dict.fromkeys(verification_notes)),
+            "strict_live_analysis_checks_passed": (
+                not verification_notes if strict_live_analysis else True
+            ),
+        }
 
     def _success_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         return {

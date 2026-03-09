@@ -107,6 +107,7 @@ export interface CreateResearchRunRequest {
 }
 
 export interface ResearchSourceCard {
+  citation_id?: string | null;
   title: string;
   url: string;
   publisher?: string | null;
@@ -120,7 +121,9 @@ export interface ResearchSourceCard {
 }
 
 export interface ResearchClaim {
+  claim_id?: string | null;
   claim: string;
+  supporting_citation_ids?: string[] | null;
   supporting_citations?: string[];
   confidence?: string;
 }
@@ -130,6 +133,14 @@ export interface ResearchCriticFinding {
   severity?: string;
   recommendation?: string;
   round_number?: number;
+}
+
+export interface ResearchQualitySummary {
+  citation_coverage?: number | null;
+  uncovered_claims?: string[] | number | null;
+  source_diversity?: string | number | Record<string, number | string> | null;
+  verification_notes?: string[] | string | null;
+  strict_live_analysis_checks_passed?: boolean | null;
 }
 
 export interface ResearchRunAttemptResponse {

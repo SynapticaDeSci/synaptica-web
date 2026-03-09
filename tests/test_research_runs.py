@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from api.main import app
 from agents.executor.tools import research_api_executor
+from agents.orchestrator.tools.agent_tools import _evaluate_research_quality_contract
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
@@ -78,9 +79,37 @@ def client(monkeypatch):
                 "result": {
                     "query": context.get("original_description", request_text),
                     "research_question": request_text,
+                    "rewritten_research_brief": f"Investigate: {request_text}",
                     "keywords": ["desci", "payments", "literature"],
                     "subquestions": ["What matters?", "Which sources matter most?"],
-                    "search_queries": [{"role": "academic-scout", "query": "query"}],
+                    "search_queries": [{"role": "academic-scout", "lane": "core-literature", "query": "query"}],
+                    "search_lanes": [
+                        {"lane": "core-literature", "objective": "Cover the strongest academic background."}
+                    ],
+                    "success_criteria": [
+                        "Use source-backed claims.",
+                        "Highlight uncertainties.",
+                    ],
+                    "claim_targets": [
+                        {
+                            "claim_id": "C1",
+                            "claim_target": "Direct answer to the research question.",
+                            "lane": "core-answer",
+                            "priority": "high",
+                        },
+                        {
+                            "claim_id": "C2",
+                            "claim_target": "Important limitation or uncertainty.",
+                            "lane": "uncertainty",
+                            "priority": "high",
+                        },
+                        {
+                            "claim_id": "C3",
+                            "claim_target": "Most consistent finding across the strongest literature.",
+                            "lane": "core-literature",
+                            "priority": "high",
+                        },
+                    ],
                     "source_requirements": context.get("source_requirements") or {},
                     "rounds_planned": context.get("rounds_planned") or {},
                 },
@@ -161,6 +190,23 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                     ],
+                    "search_lanes_used": ["breaking-developments", "official-confirmation", "market-data-confirmation"],
+                    "coverage_summary": {
+                        "source_summary": {
+                            "total_sources": 6,
+                            "academic_or_primary_sources": 3,
+                            "fresh_sources": 5,
+                            "requirements_met": True,
+                        },
+                        "source_diversity": {
+                            "publishers": 6,
+                            "source_types": 3,
+                        },
+                        "covered_claim_ids": ["C1", "C2", "C3"],
+                        "uncovered_claim_targets": [],
+                        "ready_for_synthesis": True,
+                    },
+                    "uncovered_claim_targets": [],
                     "rounds_completed": {
                         "evidence_rounds": evidence_rounds,
                         "critique_rounds": 0,
@@ -176,6 +222,7 @@ def client(monkeypatch):
                 "result": {
                     "sources": [
                         {
+                            "citation_id": "S1",
                             "title": "Channel News Asia report",
                             "url": "https://www.channelnewsasia.com/world/example",
                             "publisher": "Channel News Asia",
@@ -187,6 +234,7 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                         {
+                            "citation_id": "S2",
                             "title": "Reuters report",
                             "url": "https://www.reuters.com/world/example",
                             "publisher": "Reuters",
@@ -198,6 +246,7 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                         {
+                            "citation_id": "S3",
                             "title": "Academic context paper",
                             "url": "https://doi.org/10.1234/example",
                             "publisher": "doi.org",
@@ -209,6 +258,7 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                         {
+                            "citation_id": "S4",
                             "title": "FT market analysis",
                             "url": "https://www.ft.com/example",
                             "publisher": "Financial Times",
@@ -220,6 +270,7 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                         {
+                            "citation_id": "S5",
                             "title": "AP report",
                             "url": "https://apnews.com/example",
                             "publisher": "AP",
@@ -231,6 +282,7 @@ def client(monkeypatch):
                             "quality_flags": [],
                         },
                         {
+                            "citation_id": "S6",
                             "title": "OPEC market note",
                             "url": "https://www.opec.org/example",
                             "publisher": "OPEC",
@@ -244,6 +296,7 @@ def client(monkeypatch):
                     ],
                     "citations": [
                         {
+                            "citation_id": "S1",
                             "title": "Channel News Asia report",
                             "url": "https://www.channelnewsasia.com/world/example",
                             "publisher": "Channel News Asia",
@@ -251,6 +304,7 @@ def client(monkeypatch):
                             "source_type": "news",
                         },
                         {
+                            "citation_id": "S2",
                             "title": "Reuters report",
                             "url": "https://www.reuters.com/world/example",
                             "publisher": "Reuters",
@@ -272,6 +326,23 @@ def client(monkeypatch):
                         "requirements_met": True,
                         "issues": [],
                     },
+                    "coverage_summary": {
+                        "source_summary": {
+                            "total_sources": 6,
+                            "academic_or_primary_sources": 3,
+                            "fresh_sources": 5,
+                            "requirements_met": True,
+                        },
+                        "source_diversity": {
+                            "publishers": 6,
+                            "source_types": 3,
+                            "fresh_sources": 5,
+                            "academic_or_primary_sources": 3,
+                        },
+                        "citation_count": 2,
+                        "citation_ready": True,
+                    },
+                    "uncovered_claim_targets": [],
                     "rounds_completed": {
                         "evidence_rounds": int((context.get("rounds_planned") or {}).get("evidence_rounds", 1) or 1),
                         "critique_rounds": 0,
@@ -286,18 +357,40 @@ def client(monkeypatch):
                 "success": True,
                 "agent_id": "knowledge-synthesizer-001",
                 "result": {
-                    "answer": "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates the conflict pushed oil prices higher through immediate risk premia and supply fears.",
-                    "answer_markdown": "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates the conflict pushed oil prices higher through immediate risk premia and supply fears.",
+                    "answer": (
+                        "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates oil prices moved higher as the conflict intensified. [S1][S2]\n\n"
+                        "## Evidence\n\nRecent reporting tied the move to immediate risk premia, supply fears, and market volatility. [S1][S2]\n\n"
+                        "## Limitations\n\nThe situation is evolving quickly, so the reported impact may change as new evidence emerges. [S1]"
+                    ),
+                    "answer_markdown": (
+                        "## Summary\n\nAs of March 9, 2026, the freshest reporting indicates oil prices moved higher as the conflict intensified. [S1][S2]\n\n"
+                        "## Evidence\n\nRecent reporting tied the move to immediate risk premia, supply fears, and market volatility. [S1][S2]\n\n"
+                        "## Limitations\n\nThe situation is evolving quickly, so the reported impact may change as new evidence emerges. [S1]"
+                    ),
                     "claims": [
                         {
+                            "claim_id": "C1",
                             "claim": "Oil prices rose immediately on escalation.",
-                            "supporting_citations": ["Channel News Asia report", "Reuters report"],
+                            "supporting_citation_ids": ["S1", "S2"],
+                            "confidence": "high",
+                        },
+                        {
+                            "claim_id": "C2",
+                            "claim": "The evidence base is still evolving quickly.",
+                            "supporting_citation_ids": ["S1"],
+                            "confidence": "medium",
+                        },
+                        {
+                            "claim_id": "C3",
+                            "claim": "Reported market volatility reflects immediate supply-risk pricing.",
+                            "supporting_citation_ids": ["S1", "S2"],
                             "confidence": "high",
                         }
                     ],
                     "limitations": ["The situation is evolving quickly."],
                     "citations": [
                         {
+                            "citation_id": "S1",
                             "title": "Channel News Asia report",
                             "url": "https://www.channelnewsasia.com/world/example",
                             "publisher": "Channel News Asia",
@@ -318,6 +411,16 @@ def client(monkeypatch):
                         "fresh_sources": 5,
                         "requirements_met": True,
                         "issues": [],
+                    },
+                    "quality_summary": {
+                        "citation_coverage": 1.0,
+                        "uncovered_claims": [],
+                        "source_diversity": {
+                            "publishers": 6,
+                            "source_types": 3,
+                        },
+                        "verification_notes": [],
+                        "strict_live_analysis_checks_passed": True,
                     },
                     "sources": context.get("curated_sources", {}).get("sources", []),
                     "rounds_completed": {
@@ -352,16 +455,37 @@ def client(monkeypatch):
             "success": True,
             "agent_id": "knowledge-synthesizer-001",
                 "result": {
-                "answer": "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain.",
-                "answer_markdown": "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain.",
-                "claims": [
-                    {
-                        "claim": "Markets priced in immediate supply and shipping risk.",
-                        "supporting_citations": ["Channel News Asia report", "Reuters report"],
-                        "confidence": "high",
-                    }
-                ],
-                "limitations": ["The event is still developing and numbers may move quickly."],
+                    "answer": (
+                        "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain. [S1][S2]\n\n"
+                        "## Evidence\n\nRecent reporting described rising crude prices, shipping-risk concerns, and a broader market reaction tied to the conflict. [S1][S2]\n\n"
+                        "## Limitations\n\nThe event is still developing, and benchmark-specific price levels may move quickly as new reporting arrives. [S1]"
+                    ),
+                    "answer_markdown": (
+                        "## Summary\n\nAs of March 9, 2026, the available reporting points to a sharp oil-price response driven by immediate supply-risk pricing, while longer-run effects remain uncertain. [S1][S2]\n\n"
+                        "## Evidence\n\nRecent reporting described rising crude prices, shipping-risk concerns, and a broader market reaction tied to the conflict. [S1][S2]\n\n"
+                        "## Limitations\n\nThe event is still developing, and benchmark-specific price levels may move quickly as new reporting arrives. [S1]"
+                    ),
+                    "claims": [
+                        {
+                            "claim_id": "C1",
+                            "claim": "Markets priced in immediate supply and shipping risk.",
+                            "supporting_citation_ids": ["S1", "S2"],
+                            "confidence": "high",
+                        },
+                        {
+                            "claim_id": "C2",
+                            "claim": "The answer reflects evidence available on March 9, 2026.",
+                            "supporting_citation_ids": ["S1"],
+                            "confidence": "medium",
+                        },
+                        {
+                            "claim_id": "C3",
+                            "claim": "Longer-run effects remain uncertain while the conflict evolves.",
+                            "supporting_citation_ids": ["S1"],
+                            "confidence": "medium",
+                        }
+                    ],
+                    "limitations": ["The event is still developing and numbers may move quickly."],
                 "critic_findings": [
                     {
                         "issue": "Add a stronger uncertainty caveat.",
@@ -370,19 +494,21 @@ def client(monkeypatch):
                     }
                 ],
                 "citations": [
-                    {
-                        "title": "Channel News Asia report",
-                        "url": "https://www.channelnewsasia.com/world/example",
-                        "publisher": "Channel News Asia",
-                        "published_at": "2026-03-09T02:00:00+00:00",
-                        "source_type": "news",
-                    },
-                    {
-                        "title": "Reuters report",
-                        "url": "https://www.reuters.com/world/example",
-                        "publisher": "Reuters",
-                        "published_at": "2026-03-09T01:00:00+00:00",
-                        "source_type": "primary",
+                        {
+                            "citation_id": "S1",
+                            "title": "Channel News Asia report",
+                            "url": "https://www.channelnewsasia.com/world/example",
+                            "publisher": "Channel News Asia",
+                            "published_at": "2026-03-09T02:00:00+00:00",
+                            "source_type": "news",
+                        },
+                        {
+                            "citation_id": "S2",
+                            "title": "Reuters report",
+                            "url": "https://www.reuters.com/world/example",
+                            "publisher": "Reuters",
+                            "published_at": "2026-03-09T01:00:00+00:00",
+                            "source_type": "primary",
                     },
                 ],
                 "source_summary": {
@@ -398,12 +524,24 @@ def client(monkeypatch):
                     "fresh_sources": 5,
                     "requirements_met": True,
                     "issues": [],
-                },
-                "sources": context.get("curated_sources", {}).get("sources", []),
-                "rounds_completed": {
-                    "evidence_rounds": int((context.get("rounds_planned") or {}).get("evidence_rounds", 1) or 1),
-                    "critique_rounds": int((context.get("rounds_planned") or {}).get("critique_rounds", 1) or 1),
-                },
+                    },
+                    "quality_summary": {
+                        "citation_coverage": 1.0,
+                        "uncovered_claims": [],
+                        "source_diversity": {
+                            "publishers": 6,
+                            "source_types": 3,
+                            "fresh_sources": 5,
+                            "academic_or_primary_sources": 3,
+                        },
+                        "verification_notes": [],
+                        "strict_live_analysis_checks_passed": True,
+                    },
+                    "sources": context.get("curated_sources", {}).get("sources", []),
+                    "rounds_completed": {
+                        "evidence_rounds": int((context.get("rounds_planned") or {}).get("evidence_rounds", 1) or 1),
+                        "critique_rounds": int((context.get("rounds_planned") or {}).get("critique_rounds", 1) or 1),
+                    },
             },
             "metadata": {},
         }
@@ -555,7 +693,7 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     )
     assert response.status_code == 202
     payload = response.json()
-    assert payload["workflow_template"] == "phase1c_literature_standard"
+    assert payload["workflow_template"] == "phase1e_literature_standard"
     assert payload["classified_mode"] == "literature"
     assert payload["depth_mode"] == "standard"
     assert payload["rounds_planned"] == {"evidence_rounds": 1, "critique_rounds": 1}
@@ -575,6 +713,9 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     assert "As of March 9, 2026" in completed["result"]["answer"]
     assert completed["result"]["answer_markdown"].startswith("## Summary")
     assert len(completed["result"]["citations"]) >= 2
+    assert completed["result"]["quality_summary"]["citation_coverage"] == 1.0
+    assert completed["result"]["quality_summary"]["strict_live_analysis_checks_passed"] is True
+    assert all(claim["supporting_citation_ids"] for claim in completed["result"]["claims"])
     assert completed["result"]["source_summary"]["total_sources"] == 6
     assert completed["rounds_completed"] == {"evidence_rounds": 1, "critique_rounds": 1}
     assert all(node["status"] == "completed" for node in completed["nodes"])
@@ -780,3 +921,65 @@ def test_live_analysis_fails_when_fresh_evidence_is_missing(client: TestClient, 
     )
     assert failed["classified_mode"] == "live_analysis"
     assert "insufficient_fresh_evidence" in (failed["error"] or "")
+
+
+def test_research_quality_contract_flags_missing_citations_and_live_checks():
+    result = _evaluate_research_quality_contract(
+        {
+            "answer_markdown": (
+                "## Summary\n\nOil prices rose sharply.\n\n"
+                "## Evidence\n\nReports described conflict-linked volatility.\n\n"
+                "## Limitations\n\nNumbers may keep changing."
+            ),
+            "claims": [
+                {
+                    "claim_id": "C1",
+                    "claim": "Oil prices rose sharply.",
+                    "supporting_citation_ids": [],
+                }
+            ],
+            "citations": [
+                {
+                    "citation_id": "S1",
+                    "title": "Reuters report",
+                    "url": "https://www.reuters.com/example",
+                }
+            ],
+            "source_summary": {
+                "fresh_sources": 1,
+                "academic_or_primary_sources": 1,
+            },
+        },
+        {
+            "node_strategy": "revise_final_answer",
+            "classified_mode": "live_analysis",
+            "expected_format": {"required": ["answer_markdown", "claims", "limitations"]},
+            "quality_requirements": {
+                "min_claim_count": 1,
+                "min_citation_coverage": 1.0,
+                "require_inline_citations": True,
+                "required_sections": ["Summary", "Evidence", "Limitations"],
+                "require_absolute_dates": True,
+                "require_uncertainty_language": True,
+                "strict_live_analysis": True,
+            },
+        },
+    )
+
+    assert any("supporting citation" in issue.lower() for issue in result["issues"])
+    assert any("inline citation" in issue.lower() for issue in result["issues"])
+    assert any("absolute date" in issue.lower() for issue in result["issues"])
+    assert result["quality_summary"]["strict_live_analysis_checks_passed"] is False
+
+
+def test_research_quality_contract_is_noop_for_non_final_nodes():
+    result = _evaluate_research_quality_contract(
+        {"research_question": "What matters?", "search_queries": [{"query": "test"}]},
+        {
+            "node_strategy": "plan_query",
+            "expected_format": {"required": ["research_question", "search_queries"]},
+            "quality_requirements": {"require_inline_citations": True},
+        },
+    )
+
+    assert result["issues"] == []

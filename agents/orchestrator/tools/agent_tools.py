@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Any, Dict, Optional
 
@@ -38,6 +39,209 @@ from shared.runtime import (
 from shared.task_progress import update_progress
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _extract_inline_citation_ids(answer_markdown: str) -> set[str]:
+    return set(re.findall(r"\[(S\d+)\]", answer_markdown or ""))
+
+
+def _contains_absolute_date(answer_markdown: str) -> bool:
+    return bool(
+        re.search(r"\b20\d{2}-\d{2}-\d{2}\b", answer_markdown)
+        or re.search(
+            r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+            r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+            r"Dec(?:ember)?)\s+\d{1,2},\s+20\d{2}\b",
+            answer_markdown,
+        )
+    )
+
+
+def _contains_uncertainty_language(answer_markdown: str) -> bool:
+    normalized = (answer_markdown or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "appears",
+            "likely",
+            "uncertain",
+            "reported",
+            "as of",
+            "so far",
+            "suggests",
+            "indicates",
+            "may",
+            "still evolving",
+            "mixed",
+        )
+    )
+
+
+def _validate_expected_format(task_result: Dict[str, Any], expected_format: Dict[str, Any]) -> list[str]:
+    required_fields = _normalize_string_list(expected_format.get("required"))
+    if not required_fields:
+        return []
+
+    issues: list[str] = []
+    for field in required_fields:
+        value = task_result.get(field)
+        if value is None:
+            issues.append(f"Missing required field: {field}.")
+            continue
+        if isinstance(value, str) and not value.strip():
+            issues.append(f"Missing required field: {field}.")
+    return issues
+
+
+def _evaluate_research_quality_contract(
+    task_result: Dict[str, Any],
+    verification_criteria: Dict[str, Any],
+) -> Dict[str, Any]:
+    expected_format = dict(verification_criteria.get("expected_format") or {})
+    quality_requirements = dict(verification_criteria.get("quality_requirements") or {})
+    node_strategy = str(verification_criteria.get("node_strategy") or "")
+    classified_mode = str(verification_criteria.get("classified_mode") or "")
+
+    existing_summary = (
+        dict(task_result.get("quality_summary") or {})
+        if isinstance(task_result.get("quality_summary"), dict)
+        else {}
+    )
+    issues = _validate_expected_format(task_result, expected_format)
+
+    if node_strategy != "revise_final_answer":
+        merged_summary = dict(existing_summary)
+        if issues:
+            merged_summary["verification_notes"] = sorted(
+                dict.fromkeys(
+                    _normalize_string_list(existing_summary.get("verification_notes")) + issues
+                )
+            )
+        return {"issues": issues, "quality_summary": merged_summary or None}
+
+    answer_markdown = str(task_result.get("answer_markdown") or task_result.get("answer") or "")
+    citations = list(task_result.get("citations") or [])
+    claims = list(task_result.get("claims") or [])
+    citation_lookup = {
+        str(citation.get("citation_id")).strip(): citation
+        for citation in citations
+        if isinstance(citation, dict) and str(citation.get("citation_id") or "").strip()
+    }
+    title_lookup = {
+        str(citation.get("title") or "").strip().lower(): citation_id
+        for citation_id, citation in citation_lookup.items()
+        if citation.get("title")
+    }
+    inline_citation_ids = _extract_inline_citation_ids(answer_markdown)
+
+    covered_claims = 0
+    uncovered_claims: list[str] = []
+    claim_count = 0
+    verification_notes = _normalize_string_list(existing_summary.get("verification_notes"))
+
+    for index, claim in enumerate(claims, start=1):
+        if not isinstance(claim, dict) or not claim.get("claim"):
+            continue
+        claim_count += 1
+        claim_id = str(claim.get("claim_id") or f"C{index}")
+        supporting_ids = [
+            str(item).strip()
+            for item in (claim.get("supporting_citation_ids") or [])
+            if isinstance(item, str) and item.strip()
+        ]
+        if not supporting_ids:
+            supporting_ids = [
+                title_lookup[str(title).strip().lower()]
+                for title in (claim.get("supporting_citations") or [])
+                if str(title).strip().lower() in title_lookup
+            ]
+        unknown_ids = [citation_id for citation_id in supporting_ids if citation_id not in citation_lookup]
+        if supporting_ids and not unknown_ids:
+            covered_claims += 1
+        else:
+            uncovered_claims.append(claim_id)
+            if not supporting_ids:
+                issues.append(f"Claim {claim_id} is missing supporting citation IDs.")
+            if unknown_ids:
+                issues.append(
+                    f"Claim {claim_id} references unknown citation IDs: {', '.join(sorted(unknown_ids))}."
+                )
+
+    citation_coverage = (covered_claims / claim_count) if claim_count else 0.0
+    min_claim_count = int(quality_requirements.get("min_claim_count", 0) or 0)
+    min_citation_coverage = float(quality_requirements.get("min_citation_coverage", 0.0) or 0.0)
+    required_sections = _normalize_string_list(quality_requirements.get("required_sections"))
+
+    if min_claim_count and claim_count < min_claim_count:
+        issues.append(f"Need at least {min_claim_count} explicit claims; found {claim_count}.")
+    if claim_count and citation_coverage < min_citation_coverage:
+        issues.append("Citation coverage is incomplete for the final claims.")
+
+    missing_sections = [
+        section
+        for section in required_sections
+        if section.lower() not in answer_markdown.lower()
+    ]
+    if missing_sections:
+        issues.append(f"Answer is missing required sections: {', '.join(missing_sections)}.")
+
+    if quality_requirements.get("require_inline_citations") and citations:
+        if not inline_citation_ids:
+            issues.append("Answer is missing inline citation markers such as [S1].")
+        else:
+            unknown_inline = sorted(citation_id for citation_id in inline_citation_ids if citation_id not in citation_lookup)
+            if unknown_inline:
+                issues.append(
+                    "Answer references unknown inline citation IDs: " + ", ".join(unknown_inline) + "."
+                )
+
+    if quality_requirements.get("require_absolute_dates") and not _contains_absolute_date(answer_markdown):
+        issues.append("Live-analysis answer must include an absolute date.")
+    if quality_requirements.get("require_uncertainty_language") and not _contains_uncertainty_language(answer_markdown):
+        issues.append("Live-analysis answer must include uncertainty language.")
+
+    source_types = {
+        str(citation.get("source_type") or "unknown")
+        for citation in citations
+        if isinstance(citation, dict) and citation.get("source_type")
+    }
+    publishers = {
+        str(citation.get("publisher") or "").strip()
+        for citation in citations
+        if isinstance(citation, dict) and citation.get("publisher")
+    }
+    source_summary = dict(task_result.get("source_summary") or {})
+    merged_summary = {
+        **existing_summary,
+        "citation_coverage": round(citation_coverage, 3),
+        "uncovered_claims": uncovered_claims,
+        "source_diversity": existing_summary.get("source_diversity")
+        or {
+            "publishers": len(publishers) or len(source_summary.get("publishers") or []),
+            "source_types": len(source_types),
+            "fresh_sources": int(source_summary.get("fresh_sources", 0) or 0),
+            "academic_or_primary_sources": int(
+                source_summary.get("academic_or_primary_sources", 0) or 0
+            ),
+        },
+        "verification_notes": sorted(dict.fromkeys(verification_notes + issues)),
+        "strict_live_analysis_checks_passed": False,
+    }
+
+    if classified_mode not in {"live_analysis", "hybrid"} and not quality_requirements.get("strict_live_analysis"):
+        merged_summary["strict_live_analysis_checks_passed"] = len(issues) == 0
+    elif len(issues) == 0:
+        merged_summary["strict_live_analysis_checks_passed"] = True
+
+    return {"issues": issues, "quality_summary": merged_summary}
 
 
 def _to_handoff_context(
@@ -433,7 +637,7 @@ async def verifier_agent(
             output=request.task_result,
             phase=verification_criteria.get("phase", "knowledge_retrieval"),
             agent_role=verification_criteria.get("agent_role", context.agent_id or "unknown"),
-            phase_validation={},
+            phase_validation=verification_criteria,
         )
         overall_score = float(quality_score_result.get("overall_score", 0))
         dimension_scores = {
@@ -453,7 +657,26 @@ async def verifier_agent(
         }
         feedback = f"Verification fallback triggered: {exc}"
 
-    verification_passed = overall_score >= 50 and dimension_scores.get("ethics", 0) >= 50
+    research_contract = _evaluate_research_quality_contract(
+        request.task_result,
+        verification_criteria,
+    )
+    quality_summary = research_contract.get("quality_summary")
+    if quality_summary:
+        request.task_result["quality_summary"] = quality_summary
+
+    if research_contract["issues"]:
+        overall_score = min(overall_score, 49.0)
+        feedback = (
+            f"{feedback} Research contract checks: "
+            + "; ".join(research_contract["issues"])
+        ).strip()
+
+    verification_passed = (
+        overall_score >= 50
+        and dimension_scores.get("ethics", 0) >= 50
+        and not research_contract["issues"]
+    )
     result = VerificationResult(
         success=True,
         verification_passed=verification_passed,
@@ -474,6 +697,7 @@ async def verifier_agent(
             "quality_score": overall_score,
             "dimension_scores": dimension_scores,
             "feedback": feedback,
+            "quality_summary": quality_summary,
         },
     )
     return result.model_dump(mode="json")
@@ -576,6 +800,12 @@ async def execute_microtask(
             "expected_format": (execution_parameters or {}).get("expected_format"),
             "quality_requirements": (execution_parameters or {}).get("quality_requirements"),
             "agent_role": selection["agent_id"],
+            "phase": (execution_parameters or {}).get("phase"),
+            "node_strategy": (execution_parameters or {}).get("node_strategy"),
+            "classified_mode": (execution_parameters or {}).get("classified_mode"),
+            "freshness_required": (execution_parameters or {}).get("freshness_required"),
+            "source_requirements": (execution_parameters or {}).get("source_requirements"),
+            "claim_targets": (execution_parameters or {}).get("claim_targets"),
         },
         verification_mode=selected_context.verification_mode,
         handoff_context=selected_context.model_dump(mode="json"),

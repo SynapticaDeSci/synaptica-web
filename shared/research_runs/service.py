@@ -470,6 +470,15 @@ class ResearchRunExecutor:
                     if isinstance(curated_sources, dict)
                     else None
                 ),
+                "quality_summary": (
+                    final_answer.get("quality_summary")
+                    if isinstance(final_answer, dict)
+                    else None
+                ) or (
+                    draft.get("quality_summary")
+                    if isinstance(draft, dict)
+                    else None
+                ),
                 "limitations": final_answer.get("limitations", []) if isinstance(final_answer, dict) else [],
                 "claims": final_answer.get("claims", []) if isinstance(final_answer, dict) else [],
                 "critic_findings": (

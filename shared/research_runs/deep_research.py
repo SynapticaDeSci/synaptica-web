@@ -605,6 +605,37 @@ def build_citation_cards(sources: Iterable[Dict[str, Any]], *, limit: Optional[i
     return cards
 
 
+def assign_citation_ids(
+    sources: Iterable[Dict[str, Any]],
+    *,
+    limit: Optional[int] = None,
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    selected_sources = [dict(source) for source in sources]
+    if limit is not None:
+        selected_sources = selected_sources[:limit]
+
+    citations: List[Dict[str, Any]] = []
+    updated_sources: List[Dict[str, Any]] = []
+    for index, source in enumerate(selected_sources, start=1):
+        citation_id = f"S{index}"
+        updated = dict(source)
+        updated["citation_id"] = citation_id
+        citations.append(
+            {
+                "citation_id": citation_id,
+                "title": updated.get("title"),
+                "url": updated.get("url"),
+                "publisher": updated.get("publisher"),
+                "published_at": updated.get("published_at"),
+                "source_type": updated.get("source_type"),
+                "display_snippet": updated.get("display_snippet"),
+                "quality_flags": updated.get("quality_flags") or [],
+            }
+        )
+        updated_sources.append(updated)
+    return updated_sources, citations
+
+
 async def enrich_source_cards(
     sources: Iterable[Dict[str, Any]],
     *,
