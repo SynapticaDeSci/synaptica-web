@@ -2,7 +2,6 @@
  * API client for ProvidAI backend
  */
 
-const API_BASE_URL = '/api';
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
 export interface CreateTaskRequest {
@@ -173,10 +172,12 @@ export async function pollTaskStatus(
 }
 
 /**
- * Approve a payment
+ * Approve a verification review for a task.
  */
-export async function approvePayment(paymentId: string): Promise<{ success: boolean; message?: string; error?: string }> {
-  const response = await fetch(`${API_BASE_URL}/payments/${paymentId}/approve`, {
+export async function approveVerification(
+  taskId: string
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/tasks/${taskId}/approve_verification`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -184,28 +185,31 @@ export async function approvePayment(paymentId: string): Promise<{ success: bool
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to approve payment' }));
-    throw new Error(error.error || 'Failed to approve payment');
+    const error = await response.json().catch(() => ({ error: 'Failed to approve verification' }));
+    throw new Error(error.error || 'Failed to approve verification');
   }
 
   return response.json();
 }
 
 /**
- * Reject a payment
+ * Reject a verification review for a task.
  */
-export async function rejectPayment(paymentId: string, reason?: string): Promise<{ success: boolean; message?: string; error?: string }> {
-  const response = await fetch(`${API_BASE_URL}/payments/${paymentId}/reject`, {
+export async function rejectVerification(
+  taskId: string,
+  reason?: string
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const query = reason ? `?reason=${encodeURIComponent(reason)}` : '';
+  const response = await fetch(`${BACKEND_BASE_URL}/api/tasks/${taskId}/reject_verification${query}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ reason }),
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Failed to reject payment' }));
-    throw new Error(error.error || 'Failed to reject payment');
+    const error = await response.json().catch(() => ({ error: 'Failed to reject verification' }));
+    throw new Error(error.error || 'Failed to reject verification');
   }
 
   return response.json();
@@ -238,6 +242,7 @@ export interface AgentRecord {
   metadata_gateway_url?: string;
   hedera_account_id?: string;
   created_at?: string;
+  support_tier?: 'supported' | 'experimental' | 'legacy';
 }
 
 export interface AgentsListResponse {

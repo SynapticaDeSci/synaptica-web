@@ -80,6 +80,8 @@ type ActionFeedback = {
   message: string
 }
 
+const EMPTY_DATASETS: DataAssetRecord[] = []
+
 type DatasetPreview =
   | {
       mode: 'table'
@@ -426,7 +428,7 @@ export function DataVault() {
     },
   })
 
-  const datasets = query.data?.datasets ?? []
+  const datasets = query.data?.datasets ?? EMPTY_DATASETS
   const sortedTagSuggestions = useMemo(() => {
     const tags = new Set<string>()
     datasets.forEach((dataset) => {

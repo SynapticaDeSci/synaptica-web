@@ -45,6 +45,8 @@ function resolveAgentTags(agent: AgentRecord): string[] {
   return []
 }
 
+const EMPTY_AGENTS: AgentRecord[] = []
+
 export function Marketplace() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedCategory, setSelectedCategory] = useState('All')
@@ -62,7 +64,7 @@ export function Marketplace() {
     setSelectedCategory('All')
   }, [refetch])
 
-  const agents = data ?? []
+  const agents = data ?? EMPTY_AGENTS
   const errorMessage = isError ? error?.message ?? 'Failed to load agents' : null
 
   const categories = useMemo(() => {

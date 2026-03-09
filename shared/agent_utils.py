@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, Optional
 
 from shared.database.models import Agent
+from shared.research.catalog import infer_support_tier
 
 
 def _coerce_rate(value: Any) -> float:
@@ -95,4 +96,6 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
         "registry_tx_hash": registry_meta.get("tx_hash"),
         "registry_last_error": registry_meta.get("last_error"),
         "registry_updated_at": registry_meta.get("updated_at"),
+        "support_tier": meta.get("support_tier")
+        or infer_support_tier(agent.agent_id, agent.agent_type).value,
     }

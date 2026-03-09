@@ -167,11 +167,10 @@ class X402Payment:
             verifier_fee_bps,
         )
 
-        funding_key = self._resolve_funding_private_key(payment_request)
         tx_hash, receipt = await self._send_transaction(
             fn,
             value=amount_wei,
-            private_key=funding_key,
+            private_key=self.config.signer_private_key,
         )
 
         status = PaymentStatus.AUTHORIZED if receipt.get("status") == 1 else PaymentStatus.FAILED
@@ -215,9 +214,12 @@ class X402Payment:
 
         _ = authorization_id  # retained for backward compatibility
         task_id = self._task_id_bytes(payment_request)
-        private_key = self._resolve_verifier_private_key(payment_request)
         fn = self.contract.functions.approveRelease(task_id)
-        tx_hash, receipt = await self._send_transaction(fn, value=0, private_key=private_key)
+        tx_hash, receipt = await self._send_transaction(
+            fn,
+            value=0,
+            private_key=self.config.signer_private_key,
+        )
 
         escrow_status = await self._get_escrow_status(task_id)
         status = self._map_escrow_status_to_payment_status(escrow_status)
@@ -247,9 +249,12 @@ class X402Payment:
         """Approve refund of funds back to the client."""
 
         task_id = self._task_id_bytes(payment_request)
-        private_key = self._resolve_verifier_private_key(payment_request)
         fn = self.contract.functions.approveRefund(task_id)
-        tx_hash, receipt = await self._send_transaction(fn, value=0, private_key=private_key)
+        tx_hash, receipt = await self._send_transaction(
+            fn,
+            value=0,
+            private_key=self.config.signer_private_key,
+        )
 
         escrow_status = await self._get_escrow_status(task_id)
         status = self._map_escrow_status_to_payment_status(escrow_status)
@@ -285,14 +290,6 @@ class X402Payment:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _resolve_funding_private_key(self, payment_request: PaymentRequest) -> str:
-        metadata = payment_request.metadata or {}
-        return metadata.get("funding_private_key", self.config.signer_private_key)
-
-    def _resolve_verifier_private_key(self, payment_request: PaymentRequest) -> str:
-        metadata = payment_request.metadata or {}
-        return metadata.get("verifier_private_key", self.config.signer_private_key)
-
     def _resolve_worker_address(self, payment_request: PaymentRequest) -> str:
         metadata = payment_request.metadata or {}
         worker = metadata.get("worker_address") or payment_request.to_account

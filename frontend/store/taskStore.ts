@@ -1,11 +1,10 @@
 import { create } from 'zustand';
+import { approveVerification, rejectVerification } from '@/lib/api';
 
 export type TaskStatus =
   | 'IDLE'
   | 'PLANNING'
   | 'NEGOTIATING'
-  | 'APPROVING_PLAN'
-  | 'PAYING'
   | 'EXECUTING'
   | 'VERIFYING'
   | 'COMPLETE'
@@ -165,15 +164,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   approveVerification: async (taskId: string) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/tasks/${taskId}/approve_verification`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to approve verification');
-      }
-
+      await approveVerification(taskId);
       set({ verificationPending: false, verificationData: null });
     } catch (error) {
       console.error('Error approving verification:', error);
@@ -183,15 +174,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   rejectVerification: async (taskId: string, reason: string = 'Rejected by reviewer') => {
     try {
-      const response = await fetch(`http://localhost:8000/api/tasks/${taskId}/reject_verification?reason=${encodeURIComponent(reason)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to reject verification');
-      }
-
+      await rejectVerification(taskId, reason);
       // Set status to CANCELLED (not FAILED) to show cancellation in UI
       set({ verificationPending: false, verificationData: null, status: 'CANCELLED' });
     } catch (error) {

@@ -1,4 +1,7 @@
-"""Task management routes."""
+"""Legacy task-management routes kept for reference only.
+
+These routes are not mounted by ``api.main`` in the active phase 0 runtime.
+"""
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException

@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from shared.openai_agent import Agent
 from shared.database import SessionLocal, Agent as AgentModel, AgentReputation
 from datetime import datetime
+from shared.research.catalog import default_research_endpoint, infer_support_tier
 
 
 class BaseResearchAgent(ABC):
@@ -73,8 +74,9 @@ class BaseResearchAgent(ABC):
                 print(f"Skipping registration for {self.agent_id} - database not initialized yet")
                 return
 
-            default_endpoint = f"{os.getenv('RESEARCH_API_URL', 'http://localhost:5001').rstrip('/')}/agents/{self.agent_id}"
+            default_endpoint = default_research_endpoint(self.agent_id)
             normalized_pricing = self._normalize_pricing()
+            support_tier = infer_support_tier(self.agent_id, "research").value
             # Check if agent exists
             existing = db.query(AgentModel).filter(AgentModel.agent_id == self.agent_id).first()
 
@@ -92,6 +94,7 @@ class BaseResearchAgent(ABC):
                         "model": self.model,
                         "created_at": datetime.utcnow().isoformat(),
                         "endpoint_url": default_endpoint,
+                        "support_tier": support_tier,
                     }
                 )
                 db.add(agent_record)
@@ -114,6 +117,9 @@ class BaseResearchAgent(ABC):
                     updated = True
 
                 current_pricing = meta.get("pricing")
+                if meta.get("support_tier") != support_tier:
+                    meta["support_tier"] = support_tier
+                    updated = True
                 if not isinstance(current_pricing, dict):
                     meta["pricing"] = normalized_pricing
                     updated = True

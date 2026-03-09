@@ -2,8 +2,6 @@
 
 import React, { useMemo, useRef, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Progress } from '@/components/ui/progress'
-import { Spinner } from '@/components/ui/spinner'
 import { useTaskStore, TaskStatus } from '@/store/taskStore'
 import { CheckCircle2, Circle, XCircle, Loader2, Pause } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -12,9 +10,7 @@ import { VerificationCard } from '@/components/VerificationCard'
 const statusConfig: Record<TaskStatus, { label: string; progress: number; icon: React.ReactNode }> = {
   IDLE: { label: 'Ready', progress: 0, icon: <Circle className="h-4 w-4" /> },
   PLANNING: { label: 'Planning...', progress: 10, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
-  APPROVING_PLAN: { label: 'Approving Plan...', progress: 30, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
   NEGOTIATING: { label: 'Negotiating...', progress: 40, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
-  PAYING: { label: 'Processing Payment...', progress: 50, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
   EXECUTING: { label: 'Executing...', progress: 70, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
   VERIFYING: { label: 'Verifying...', progress: 90, icon: <Loader2 className="h-4 w-4 animate-spin" /> },
   COMPLETE: { label: 'Complete', progress: 100, icon: <CheckCircle2 className="h-4 w-4 text-green-500" /> },
@@ -461,4 +457,3 @@ export function TaskStatusCard() {
     </Card>
   )
 }
-

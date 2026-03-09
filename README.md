@@ -1,6 +1,17 @@
 # Synaptica - Multi-Agent Research Platform
 
-A multi-agent marketplace built on Hedera for orchestrating research tasks across specialized AI agents with autonomous negotiation, execution, and payment.
+A multi-agent marketplace on Hedera for decentralized-science research workflows with agent-to-agent payment settlement.
+
+## Phase 0 Runtime
+
+The active runtime in phase 0 is intentionally narrow and deterministic:
+
+- Primary backend entrypoint: `POST /execute`
+- Supported workflow: `problem-framer-001 -> literature-miner-001 -> knowledge-synthesizer-001`
+- Supported human decision loop: `POST /api/tasks/{task_id}/approve_verification` and `POST /api/tasks/{task_id}/reject_verification`
+- Supported infrastructure agents: the built-in Data Agent remains available outside the literature-review flow
+
+Legacy/demo code such as `api/pipeline.py`, `agents/research/research_pipeline.py`, and the unmounted `api/routes/tasks.py` / `api/routes/payments.py` modules is retained for reference only and is not part of the active runtime.
 
 ## Architecture
 
@@ -40,7 +51,7 @@ x402 Payment Tasks        Checks
 
 ```bash
 # Install Python dependencies
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 
 # Install frontend dependencies
 cd frontend
@@ -67,10 +78,16 @@ OPENAI_API_KEY=sk-...
 DATABASE_URL=sqlite:///./synaptica.db
 # Or: DATABASE_URL=postgresql://user:pass@localhost/synaptica
 
-# Hedera (optional - defaults to mock payments)
+# Payment mode
+PAYMENT_MODE=offline  # or dev_env / managed
+
+# Hedera / TaskEscrow (required for dev_env + managed)
 HEDERA_NETWORK=testnet
 HEDERA_ACCOUNT_ID=0.0.12345
 HEDERA_PRIVATE_KEY=302e...
+TASK_ESCROW_ADDRESS=0x...
+TASK_ESCROW_MARKETPLACE_TREASURY=0x...
+TASK_ESCROW_OPERATOR_PRIVATE_KEY=0x...
 
 # ERC-8004 (optional)
 ERC8004_REGISTRY_ADDRESS=0x...
@@ -145,8 +162,9 @@ This command fetches domains from the on-chain registry, resolves metadata, merg
 
 1. Open http://localhost:3000
 2. Enter a research query (e.g., "Research protein formation and summarize findings")
-3. Monitor progress in real-time
-4. View results and transaction history
+3. Monitor the three-step literature workflow in real time
+4. Approve/reject human verification only when the verifier requests review
+5. View results and transaction history
 
 ## Project Structure
 
@@ -195,10 +213,10 @@ The smart contracts are deployed on Hedera testnet and integrated with this plat
 
 ### Key Features
 
-- **Simplified Workflow**: `execute_microtask` tool abstracts negotiation→authorization→execution
-- **Real-time Progress**: WebSocket updates show task progress
+- **Deterministic Phase 0 Workflow**: Fixed literature-review pipeline with typed handoff and payment contracts
+- **Real-time Progress**: Task progress and verification state persist in `Task.meta`
 - **Transaction History**: View all research queries with costs and agent details
-- **Mock Payments**: Works without Hedera credentials (auto-mocks payments)
+- **Explicit Payment Modes**: `offline`, `dev_env`, and `managed` replace implicit mock settlement
 - **Dynamic Agent Discovery**: Finds agents based on capability requirements
 - **Self-Serve Agent Onboarding**: Builders can publish HTTP agents through the marketplace UI with automated Pinata hosting.
 
@@ -222,10 +240,11 @@ Decentralized agent registry supporting:
 ### x402: Payment Protocol
 
 Agent-to-agent payment flow:
-- Payment request creation
+- Payment proposal creation
 - Authorization (escrow pattern)
 - Release on verification
 - Refunds for failures
+- Idempotent transition tracking for `proposal`, `authorize`, `release`, and `refund`
 
 ## API Documentation
 

@@ -15,14 +15,27 @@ from pydantic import BaseModel
 
 from shared.agents_cache import rebuild_agents_cache
 from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
-from shared.database.models import A2AEvent
+from shared.database.models import A2AEvent, Task
+from shared.research.catalog import (
+    SUPPORTED_AGENT_DETAILS,
+    build_phase0_todo_items,
+    default_research_endpoint,
+)
 from shared.registry_sync import (
     RegistrySyncError,
     ensure_registry_cache,
     get_registry_cache_ttl_seconds,
 )
+from shared.runtime import (
+    TelemetryEnvelope,
+    append_progress_event,
+    initialize_runtime_state,
+    load_task_snapshot,
+    persist_verification_state,
+    redact_sensitive_payload,
+)
 import shared.task_progress as task_progress
-from agents.orchestrator.agent import create_orchestrator_agent
+from agents.orchestrator.tools import create_todo_list, execute_microtask
 
 from .middleware import logging_middleware
 from .routes import agents as agents_routes
@@ -64,6 +77,7 @@ def _upsert_builtin_data_agent() -> None:
                 "built_in": True,
                 "public_access": True,
             },
+            "support_tier": "supported",
         }
 
         capabilities = [
@@ -115,6 +129,8 @@ def _upsert_builtin_data_agent() -> None:
                     payment_multiplier=1.0,
                 )
             )
+        else:
+            reputation.reputation_score = max(float(reputation.reputation_score or 0.0), 0.8)
 
         session.commit()
         rebuild_agents_cache(session=session)
@@ -125,35 +141,116 @@ def _upsert_builtin_data_agent() -> None:
         session.close()
 
 
+def _upsert_supported_research_agents() -> None:
+    """Ensure the supported phase 0 research agents exist in the marketplace cache."""
+
+    session = SessionLocal()
+    try:
+        for agent_id, details in SUPPORTED_AGENT_DETAILS.items():
+            if agent_id == BUILT_IN_DATA_AGENT_ID:
+                continue
+
+            agent = (
+                session.query(Agent)
+                .filter(Agent.agent_id == agent_id)
+                .one_or_none()
+            )
+            meta = {
+                "endpoint_url": default_research_endpoint(agent_id),
+                "pricing": details["pricing"],
+                "categories": ["Research", "DeSci"],
+                "support_tier": "supported",
+                "always_listed": True,
+            }
+
+            if agent is None:
+                session.add(
+                    Agent(  # type: ignore[call-arg]
+                        agent_id=agent_id,
+                        name=details["name"],
+                        agent_type="research",
+                        description=details["description"],
+                        capabilities=details["capabilities"],
+                        hedera_account_id=details["hedera_account_id"],
+                        status="active",
+                        meta=meta,
+                    )
+                )
+            else:
+                merged_meta = dict(agent.meta or {})
+                merged_meta.update(meta)
+                agent.name = details["name"]
+                agent.agent_type = "research"
+                agent.description = details["description"]
+                agent.capabilities = details["capabilities"]
+                agent.hedera_account_id = details["hedera_account_id"]
+                agent.status = "active"
+                agent.meta = merged_meta
+
+            reputation = (
+                session.query(AgentReputation)
+                .filter(AgentReputation.agent_id == agent_id)
+                .one_or_none()
+            )
+            if reputation is None:
+                session.add(
+                    AgentReputation(  # type: ignore[call-arg]
+                        agent_id=agent_id,
+                        reputation_score=0.8,
+                        total_tasks=0,
+                        successful_tasks=0,
+                        failed_tasks=0,
+                        payment_multiplier=1.0,
+                    )
+                )
+            else:
+                reputation.reputation_score = max(float(reputation.reputation_score or 0.0), 0.8)
+
+        session.commit()
+        rebuild_agents_cache(session=session)
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to upsert supported research agents")
+    finally:
+        session.close()
+
+
+def _sync_task_cache(task_id: str, snapshot: Optional[Dict[str, Any]]) -> None:
+    if snapshot is not None:
+        tasks_storage[task_id] = snapshot
+
+
 def update_task_progress(task_id: str, step: str, status: str, data: Optional[Dict] = None):
     """Update task progress for frontend polling."""
-    if task_id not in tasks_storage:
-        tasks_storage[task_id] = {
+    overall_status = None
+    if step == "orchestrator" and status in {"completed", "failed"}:
+        overall_status = status
+    elif status == "cancelled":
+        overall_status = "CANCELLED"
+
+    envelope = TelemetryEnvelope(
+        task_id=task_id,
+        step=step,
+        status=status,
+        data=redact_sensitive_payload(data or {}),
+    )
+    snapshot = append_progress_event(task_id, envelope, overall_status=overall_status)
+    if snapshot is not None:
+        _sync_task_cache(task_id, snapshot)
+        return
+
+    # Fallback for events emitted before the DB task row exists.
+    existing = tasks_storage.setdefault(
+        task_id,
+        {
             "task_id": task_id,
             "status": "processing",
             "progress": [],
-            "current_step": step
-        }
-
-    if "progress" not in tasks_storage[task_id]:
-        tasks_storage[task_id]["progress"] = []
-
-    tasks_storage[task_id]["progress"].append({
-        "step": step,
-        "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
-        "data": data or {}
-    })
-
-    tasks_storage[task_id]["current_step"] = step
-
-    # Only update overall task status when orchestrator completes/fails
-    # Intermediate steps (planning, negotiator, executor) shouldn't affect overall status
-    if step == "orchestrator" and status in ["completed", "failed"]:
-        tasks_storage[task_id]["status"] = status
-    elif tasks_storage[task_id]["status"] not in ["completed", "failed"]:
-        # Keep as "processing" for all intermediate steps
-        tasks_storage[task_id]["status"] = "processing"
+            "current_step": step,
+        },
+    )
+    existing.setdefault("progress", []).append(envelope.model_dump(mode="json"))
+    existing["current_step"] = step
 
 
 # Pydantic models for API requests/responses
@@ -198,6 +295,7 @@ async def lifespan(app: FastAPI):
     # Startup: Create database tables
     Base.metadata.create_all(bind=engine)
     _upsert_builtin_data_agent()
+    _upsert_supported_research_agents()
     # Register progress callback for task updates
     task_progress.set_progress_callback(update_task_progress)
     print("Database initialized")
@@ -285,10 +383,10 @@ async def root():
         "version": "0.1.0",
         "description": "Orchestrator agent for discovering and coordinating marketplace agents",
         "workflow": [
-            "1. Analyze request and decompose into specialized microtasks",
-            "2. For each microtask: discover agents (negotiator) → authorize payment → execute task",
-            "3. Aggregate results from all microtasks",
-            "4. Return complete output",
+            "1. Frame the research question",
+            "2. Mine supporting literature with a supported research agent",
+            "3. Synthesize findings and verify before releasing payment",
+            "4. Return the literature-review report and payment trail",
         ],
         "endpoints": {
             "/execute": "POST - Execute a task using marketplace agents",
@@ -392,15 +490,24 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
 
                 total_cost += payment.amount
 
+            runtime_meta = {}
+            if task.meta and isinstance(task.meta, dict):
+                runtime_meta = dict(task.meta.get("runtime") or {})
+            persisted_runtime_status = str(runtime_meta.get("status") or "").lower()
+
             # Map task status to frontend format
             status_mapping = {
                 "pending": "in_progress",
                 "assigned": "in_progress",
                 "in_progress": "in_progress",
                 "completed": "completed",
-                "failed": "failed"
+                "failed": "failed",
+                "cancelled": "cancelled",
             }
-            frontend_status = status_mapping.get(task.status.value, "in_progress")
+            frontend_status = status_mapping.get(
+                persisted_runtime_status or task.status.value,
+                "in_progress",
+            )
 
             responses.append(TaskHistoryResponse(
                 id=task.id,
@@ -420,11 +527,15 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
 async def get_task_status(task_id: str):
     """Get task status and progress for frontend polling."""
     if task_id not in tasks_storage:
-        return {
-            "task_id": task_id,
-            "status": "not_found",
-            "error": "Task not found"
-        }
+        snapshot = load_task_snapshot(task_id)
+        if snapshot:
+            _sync_task_cache(task_id, snapshot)
+        else:
+            return {
+                "task_id": task_id,
+                "status": "not_found",
+                "error": "Task not found"
+            }
 
     return tasks_storage[task_id]
 
@@ -432,27 +543,34 @@ async def get_task_status(task_id: str):
 @app.post("/api/tasks/{task_id}/approve_verification")
 async def approve_verification(task_id: str):
     """Approve verification for a task requiring human review."""
-    if task_id not in tasks_storage:
+    snapshot = tasks_storage.get(task_id) or load_task_snapshot(task_id)
+    if snapshot is None:
         return {
             "success": False,
             "error": "Task not found"
         }
+    _sync_task_cache(task_id, snapshot)
 
-    if not tasks_storage[task_id].get("verification_pending"):
+    if not snapshot.get("verification_pending"):
         return {
             "success": False,
             "error": "No verification pending for this task"
         }
 
-    # Store approval decision
-    tasks_storage[task_id]["verification_decision"] = {
+    decision = {
         "approved": True,
         "timestamp": datetime.now().isoformat()
     }
-    tasks_storage[task_id]["verification_pending"] = False
+    persist_verification_state(
+        task_id,
+        pending=False,
+        verification_data=None,
+        verification_decision=decision,
+    )
+    _sync_task_cache(task_id, load_task_snapshot(task_id))
 
     # Update progress
-    verification_data = tasks_storage[task_id].get("verification_data", {})
+    verification_data = snapshot.get("verification_data", {})
     todo_id = verification_data.get("todo_id", "unknown")
 
     update_task_progress(task_id, f"verification_{todo_id}", "completed", {
@@ -474,32 +592,37 @@ async def reject_verification(task_id: str, reason: str = "Rejected by reviewer"
     import logging
     logger = logging.getLogger(__name__)
 
-    if task_id not in tasks_storage:
+    snapshot = tasks_storage.get(task_id) or load_task_snapshot(task_id)
+    if snapshot is None:
         return {
             "success": False,
             "error": "Task not found"
         }
+    _sync_task_cache(task_id, snapshot)
 
-    if not tasks_storage[task_id].get("verification_pending"):
+    if not snapshot.get("verification_pending"):
         return {
             "success": False,
             "error": "No verification pending for this task"
         }
 
-    # Store rejection decision
-    tasks_storage[task_id]["verification_decision"] = {
+    decision = {
         "approved": False,
         "reason": reason,
         "timestamp": datetime.now().isoformat()
     }
-    tasks_storage[task_id]["verification_pending"] = False
-
-    # CRITICAL: Set cancellation flag to stop all ongoing execution
-    tasks_storage[task_id]["cancelled"] = True
-    tasks_storage[task_id]["status"] = "CANCELLED"
+    persist_verification_state(
+        task_id,
+        pending=False,
+        verification_data=None,
+        verification_decision=decision,
+    )
+    refreshed_snapshot = load_task_snapshot(task_id) or snapshot
+    refreshed_snapshot["status"] = "CANCELLED"
+    tasks_storage[task_id] = refreshed_snapshot
 
     # Update progress
-    verification_data = tasks_storage[task_id].get("verification_data", {})
+    verification_data = snapshot.get("verification_data", {})
     todo_id = verification_data.get("todo_id", "unknown")
 
     update_task_progress(task_id, f"verification_{todo_id}", "failed", {
@@ -564,14 +687,8 @@ def list_a2a_events(limit: int = 50) -> List[A2AEventResponse]:
 
 
 async def run_orchestrator_task(task_id: str, request: TaskRequest):
-    """Background task to run the orchestrator agent."""
+    """Background task to run the deterministic phase 0 literature workflow."""
     try:
-        # Create Task record in database for transaction history
-        from datetime import datetime
-
-        from shared.database import SessionLocal
-        from shared.database.models import Task
-
         db = SessionLocal()
         try:
             task = Task(
@@ -585,6 +702,7 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
                     "min_reputation_score": request.min_reputation_score,
                     "verification_mode": request.verification_mode,
                     "capability_requirements": request.capability_requirements,
+                    "workflow_type": "phase0_literature_review",
                 }
             )
             db.add(task)
@@ -592,59 +710,106 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             logger.info(f"Created Task record in database: {task_id}")
         finally:
             db.close()
+        initialize_runtime_state(
+            task_id,
+            request_meta={
+                "budget_limit": request.budget_limit,
+                "min_reputation_score": request.min_reputation_score,
+                "verification_mode": request.verification_mode,
+                "capability_requirements": request.capability_requirements,
+            },
+        )
+        _sync_task_cache(task_id, load_task_snapshot(task_id))
 
         # Update progress - initialization
         update_task_progress(task_id, "initialization", "started", {
             "message": "Starting task execution",
             "description": request.description
         })
-
-        # Create orchestrator agent
-        orchestrator = create_orchestrator_agent()
-
-        # Build the orchestrator query
-        query = f"""
-        Task ID: {task_id}
-
-        User Request:
-        {request.description}
-
-        Configuration:
-        - Budget Limit: {request.budget_limit or "No specific limit"}
-        - Minimum Reputation Score: {request.min_reputation_score}
-        - Verification Mode: {request.verification_mode}
-        - Initial Capability Hint: {request.capability_requirements or "Analyze the task to determine"}
-
-        Execute your standard workflow to completion. Remember to:
-        - Break complex requests into specialized microtasks when beneficial
-        - Define specific, detailed capability requirements for each agent
-        - Actually call all agent tools (negotiator, authorize_payment, executor)
-        - Aggregate results and return a complete summary
-        """
-
-        # Run the orchestrator agent
         update_task_progress(task_id, "orchestrator_analysis", "running", {
-            "message": "Orchestrator analyzing task and coordinating agents"
+            "message": "Preparing the phase 0 literature-review workflow"
         })
+        todo_items = build_phase0_todo_items(request.description)
+        todo_result = await create_todo_list(
+            task_id,
+            [
+                {
+                    "title": item["title"],
+                    "description": item["description"],
+                    "assigned_to": item["assigned_to"],
+                }
+                for item in todo_items
+            ],
+        )
+        todo_list = todo_result["todo_list"]
 
-        result = await orchestrator.run(query)
+        result_0 = await execute_microtask(
+            task_id=task_id,
+            todo_id="todo_0",
+            task_name=todo_items[0]["title"],
+            task_description=todo_items[0]["description"],
+            capability_requirements="problem framing, research question design, scope definition",
+            budget_limit=request.budget_limit,
+            min_reputation_score=request.min_reputation_score,
+            execution_parameters={"phase": "ideation"},
+            todo_list=todo_list,
+        )
+        if not result_0.get("success"):
+            raise RuntimeError(result_0.get("error", "Problem framing failed"))
 
-        # Log the full orchestrator response
-        logger.info("========== ORCHESTRATOR RESPONSE START ==========")
-        logger.info(f"{result}")
-        logger.info("========== ORCHESTRATOR RESPONSE END ==========")
+        result_1 = await execute_microtask(
+            task_id=task_id,
+            todo_id="todo_1",
+            task_name=todo_items[1]["title"],
+            task_description=todo_items[1]["description"],
+            capability_requirements="literature mining, source collection, evidence gathering",
+            budget_limit=request.budget_limit,
+            min_reputation_score=request.min_reputation_score,
+            execution_parameters={
+                "phase": "knowledge_retrieval",
+                "framed_question": result_0.get("result"),
+            },
+            todo_list=todo_list,
+        )
+        if not result_1.get("success"):
+            raise RuntimeError(result_1.get("error", "Literature mining failed"))
+
+        result_2 = await execute_microtask(
+            task_id=task_id,
+            todo_id="todo_2",
+            task_name=todo_items[2]["title"],
+            task_description=todo_items[2]["description"],
+            capability_requirements="knowledge synthesis, research summarization, report composition",
+            budget_limit=request.budget_limit,
+            min_reputation_score=request.min_reputation_score,
+            execution_parameters={
+                "phase": "knowledge_retrieval",
+                "framed_question": result_0.get("result"),
+                "literature_findings": result_1.get("result"),
+            },
+            todo_list=todo_list,
+        )
+        if not result_2.get("success"):
+            raise RuntimeError(result_2.get("error", "Knowledge synthesis failed"))
+
+        result = {
+            "workflow": "problem-framer-001 -> literature-miner-001 -> knowledge-synthesizer-001",
+            "steps": [result_0, result_1, result_2],
+            "report": result_2.get("result"),
+            "framing": result_0.get("result"),
+            "evidence": result_1.get("result"),
+        }
 
         # Update final status
         update_task_progress(task_id, "orchestrator", "completed", {
             "message": "Generated research output successfully",
-            "result": str(result)
+            "result": redact_sensitive_payload(result),
         })
 
-        tasks_storage[task_id]["status"] = "completed"
-        tasks_storage[task_id]["result"] = {
-            "orchestrator_response": str(result),
-            "workflow": "Task decomposition → Per microtask: (negotiator → authorize → executor) → Aggregation",
-        }
+        snapshot = load_task_snapshot(task_id) or {"task_id": task_id, "status": "completed"}
+        snapshot["status"] = "completed"
+        snapshot["result"] = result
+        tasks_storage[task_id] = snapshot
 
         # Update Task status in database
         db = SessionLocal()
@@ -652,6 +817,7 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             task = db.query(Task).filter(Task.id == task_id).first()
             if task:
                 task.status = "completed"
+                task.result = result
                 db.commit()
                 logger.info(f"Updated Task status to completed: {task_id}")
         finally:
@@ -663,9 +829,10 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
         update_task_progress(task_id, "orchestrator", "failed", {
             "error": str(e)
         })
-
-        tasks_storage[task_id]["status"] = "failed"
-        tasks_storage[task_id]["error"] = str(e)
+        snapshot = load_task_snapshot(task_id) or {"task_id": task_id}
+        snapshot["status"] = "failed"
+        snapshot["error"] = str(e)
+        tasks_storage[task_id] = snapshot
 
         # Update Task status in database
         db = SessionLocal()
@@ -673,6 +840,7 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             task = db.query(Task).filter(Task.id == task_id).first()
             if task:
                 task.status = "failed"
+                task.result = {"error": str(e)}
                 db.commit()
                 logger.info(f"Updated Task status to failed: {task_id}")
         finally:
