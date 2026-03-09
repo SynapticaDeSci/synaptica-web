@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -122,3 +123,48 @@ async def test_base_research_agent_execute_preserves_response_shape(monkeypatch)
     assert result["agent_id"] == "problem-framer-001"
     assert result["result"]
     assert result["metadata"]["model"] == "gpt-5.4"
+
+
+@pytest.mark.asyncio
+async def test_base_research_agent_execute_uses_fresh_agent_per_request(monkeypatch):
+    class ConcurrentSensitiveAgent:
+        def __init__(self, label: str):
+            self.model = "gpt-5.4"
+            self.label = label
+            self._running = False
+
+        async def run(self, request: str) -> str:
+            if self._running:
+                raise RuntimeError("Agent is already processing a request")
+            self._running = True
+            try:
+                await asyncio.sleep(0.01)
+                return f"{self.label}:{request}"
+            finally:
+                self._running = False
+
+    created_agents: list[ConcurrentSensitiveAgent] = []
+
+    def _build_agent(**kwargs):
+        del kwargs
+        agent = ConcurrentSensitiveAgent(label=f"agent-{len(created_agents) + 1}")
+        created_agents.append(agent)
+        return agent
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "agents.research.base_research_agent.create_strands_openai_agent",
+        _build_agent,
+    )
+
+    agent = ProblemFramerAgent()
+    first, second = await asyncio.gather(
+        agent.execute("first request"),
+        agent.execute("second request"),
+    )
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert len(created_agents) == 2
+    assert first["result"] == "agent-1:first request"
+    assert second["result"] == "agent-2:second request"

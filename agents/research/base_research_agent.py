@@ -56,7 +56,9 @@ class BaseResearchAgent(ABC):
 
         # No need to create client here, will be created in create_agent()
 
-        # Initialize agent (will be created in create_agent)
+        # Keep a reference to the most recently created agent for introspection,
+        # but execution should create a fresh Strands agent per request because
+        # Strands agents do not support concurrent invocations.
         self.agent: Optional[AsyncStrandsAgent] = None
 
         # Register agent in database
@@ -234,9 +236,7 @@ class BaseResearchAgent(ABC):
         Returns:
             Agent response as dictionary
         """
-        agent = self.agent
-        if self.agent is None:
-            agent = self.create_agent()
+        agent = self.create_agent()
 
         try:
             result = await agent.run(request)
