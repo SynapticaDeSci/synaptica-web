@@ -1,7 +1,6 @@
 """Negotiator Agent implementation using OpenAI API."""
 
-import os
-from shared.openai_agent import Agent, create_openai_agent
+from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 
 from .system_prompt import NEGOTIATOR_SYSTEM_PROMPT
 from .tools import (
@@ -13,19 +12,13 @@ from .tools import (
 )
 
 
-def create_negotiator_agent() -> Agent:
+def create_negotiator_agent() -> AsyncStrandsAgent:
     """
     Create and configure the Negotiator agent.
 
     Returns:
         Configured OpenAI Agent instance
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("NEGOTIATOR_MODEL", "gpt-4-turbo-preview")
-
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
     tools = [
         find_agents,
         resolve_agent_by_domain,
@@ -34,11 +27,13 @@ def create_negotiator_agent() -> Agent:
         get_payment_status,
     ]
 
-    agent = create_openai_agent(
-        api_key=api_key,
-        model=model,
+    agent = create_strands_openai_agent(
         system_prompt=NEGOTIATOR_SYSTEM_PROMPT,
         tools=tools,
+        model_env_var="NEGOTIATOR_MODEL",
+        agent_id="negotiator-agent",
+        name="Negotiator",
+        description="Finds supported agents and prepares payment proposals.",
     )
 
     return agent

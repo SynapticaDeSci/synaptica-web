@@ -119,13 +119,47 @@ def select_supported_agent_for_todo(todo_id: str, capability_requirements: str, 
     """Select one of the supported research agents for the current microtask."""
 
     normalized = " ".join([todo_id, capability_requirements, task_name]).lower()
-    if "todo_0" in normalized or any(
-        token in normalized for token in ("frame", "question", "scope", "hypothesis")
+    if any(
+        token in normalized
+        for token in (
+            "todo_0",
+            "plan_query",
+            "frame",
+            "question",
+            "scope",
+            "hypothesis",
+            "investigation planning",
+        )
     ):
         return "problem-framer-001"
-    if "todo_1" in normalized or any(
-        token in normalized for token in ("literature", "paper", "citation", "source", "evidence")
+    if any(
+        token in normalized
+        for token in (
+            "draft_synthesis",
+            "critique_and_fact_check",
+            "revise_final_answer",
+            "synthesis",
+            "draft",
+            "critique",
+            "revise",
+            "final answer",
+            "fact-check",
+        )
+    ):
+        return "knowledge-synthesizer-001"
+    if any(
+        token in normalized
+        for token in (
+            "todo_1",
+            "gather_evidence",
+            "curate_sources",
+            "literature",
+            "paper",
+            "citation",
+            "source",
+            "evidence",
+            "curation",
+        )
     ):
         return "literature-miner-001"
     return "knowledge-synthesizer-001"
-

@@ -7,12 +7,12 @@ from agents.executor.tools.research_api_executor import (
     get_agent_metadata,
     list_research_agents,
 )
-from shared.openai_agent import Agent, create_openai_agent
+from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 
 from .system_prompt import EXECUTOR_SYSTEM_PROMPT
 
 
-def create_executor_agent() -> Agent:
+def create_executor_agent() -> AsyncStrandsAgent:
     """
     Create and configure the Executor agent.
 
@@ -25,12 +25,6 @@ def create_executor_agent() -> Agent:
     Returns:
         Configured OpenAI Agent instance
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("EXECUTOR_MODEL", "gpt-4-turbo-preview")
-
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
     # Tools for executing research agents via API
     tools = [
         list_research_agents,      # List all available research agents
@@ -38,11 +32,13 @@ def create_executor_agent() -> Agent:
         get_agent_metadata,        # Get detailed agent metadata
     ]
 
-    agent = create_openai_agent(
-        api_key=api_key,
-        model=model, 
+    agent = create_strands_openai_agent(
         system_prompt=EXECUTOR_SYSTEM_PROMPT,
         tools=tools,
+        model_env_var="EXECUTOR_MODEL",
+        agent_id="executor-agent",
+        name="Executor",
+        description="Selects and invokes research agents over HTTP.",
     )
 
     return agent

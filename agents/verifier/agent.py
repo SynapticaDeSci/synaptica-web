@@ -1,7 +1,6 @@
 """Verifier Agent implementation using OpenAI API."""
 
-import os
-from shared.openai_agent import Agent, create_openai_agent
+from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 
 from .system_prompt import VERIFIER_SYSTEM_PROMPT
 from .research_system_prompt import RESEARCH_VERIFIER_SYSTEM_PROMPT
@@ -26,7 +25,7 @@ from .tools import (
 )
 
 
-def create_verifier_agent(use_research_mode: bool = False) -> Agent:
+def create_verifier_agent(use_research_mode: bool = False) -> AsyncStrandsAgent:
     """
     Create and configure the Verifier agent with advanced verification capabilities.
 
@@ -42,12 +41,6 @@ def create_verifier_agent(use_research_mode: bool = False) -> Agent:
     Returns:
         Configured OpenAI Agent instance
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("VERIFIER_MODEL", "gpt-4-turbo-preview")
-
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
     # Base tools (always included)
     tools = [
         # Core verification
@@ -81,17 +74,19 @@ def create_verifier_agent(use_research_mode: bool = False) -> Agent:
     else:
         system_prompt = VERIFIER_SYSTEM_PROMPT
 
-    agent = create_openai_agent(
-        api_key=api_key,
-        model=model,
+    agent = create_strands_openai_agent(
         system_prompt=system_prompt,
         tools=tools,
+        model_env_var="VERIFIER_MODEL",
+        agent_id="verifier-agent",
+        name="Verifier",
+        description="Verifies outputs and manages release or refund decisions.",
     )
 
     return agent
 
 
-def create_research_verifier_agent() -> Agent:
+def create_research_verifier_agent() -> AsyncStrandsAgent:
     """
     Create a Research Verifier agent specialized for academic research pipeline.
 

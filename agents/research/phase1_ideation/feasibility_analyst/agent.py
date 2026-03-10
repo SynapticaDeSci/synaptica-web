@@ -34,7 +34,7 @@ class FeasibilityAnalystAgent(BaseResearchAgent):
                 "rate": "0.08 HBAR",
                 "unit": "per_analysis"
             },
-            model="gpt-4-turbo-preview"
+            model="gpt-5.4"
         )
 
     def get_system_prompt(self) -> str:

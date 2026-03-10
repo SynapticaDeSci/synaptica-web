@@ -11,7 +11,7 @@ Build a production research pipeline that runs end-to-end from user query to ver
 ## 2. Scope
 
 In scope:
-- Campaign-based execution (`query -> DAG -> verified outputs`).
+- Research-run-based execution (`query -> DAG -> verified outputs`).
 - Dynamic agent discovery and assignment from registry/marketplace.
 - Swarm collaboration (parallel branches, debate, merge, quorum).
 - x402 + TaskEscrow payment lifecycle with A2A payment events.
@@ -25,9 +25,9 @@ Out of scope (v1):
 
 ## 3. Core Architecture
 
-### 3.1 Campaign primitive
+### 3.1 Research run primitive
 
-Each campaign stores:
+Each research run stores:
 - Intent: query, constraints, budget, verification mode.
 - Execution graph: nodes, edges, retries, fallback policy.
 - Agent assignments: selected providers per node attempt.
@@ -75,7 +75,7 @@ Required behavior:
 - Enable repetitive handoff detection/timeouts to prevent ping-pong loops between swarm agents.
 
 Required swarm handoff context:
-- `campaign_id`
+- `research_run_id`
 - `node_id`
 - `attempt_id`
 - `payment_id`
@@ -84,7 +84,7 @@ Required swarm handoff context:
 - `idempotency_key`
 
 Session persistence requirement:
-- Use Strands session manager for campaign resumability, including orchestrator state, node transition history, and shared multi-agent context.
+- Use Strands session manager for research-run resumability, including orchestrator state, node transition history, and shared multi-agent context.
 
 ### 3.5 Payment architecture (x402 + TaskEscrow + A2A)
 
@@ -127,18 +127,14 @@ Development policy:
 
 ## 4. API Surface
 
-Campaign APIs:
-- `POST /api/campaigns`
-- `GET /api/campaigns/{id}`
-- `POST /api/campaigns/{id}/pause|resume|cancel`
-- `GET /api/campaigns/{id}/evidence`
-- `GET /api/campaigns/{id}/report`
+Research run APIs:
+- `POST /api/research-runs`
+- `GET /api/research-runs/{id}`
+- `POST /api/research-runs/{id}/pause|resume|cancel`
+- `GET /api/research-runs/{id}/evidence`
+- `GET /api/research-runs/{id}/report`
 
 Payment APIs:
-- `POST /api/payments/proposals`
-- `POST /api/payments/{payment_id}/authorize`
-- `POST /api/payments/{payment_id}/release`
-- `POST /api/payments/{payment_id}/refund`
 - `GET /api/payments/{payment_id}`
 - `GET /api/payments/{payment_id}/events`
 - `POST /api/payments/reconcile`
@@ -146,12 +142,15 @@ Payment APIs:
 Payment identity APIs:
 - `POST /api/agents/{agent_id}/payment-profile/verify`
 
+Internal runtime-only payment actions:
+- proposal / authorize / release / refund remain tool-driven inside the deterministic orchestrator-verifier flow and are not mounted as public REST routes in Phase 1.
+
 ## 5. Data Model
 
 Core entities:
-- `campaigns`
-- `campaign_nodes`
-- `campaign_edges`
+- `research_runs`
+- `research_run_nodes`
+- `research_run_edges`
 - `execution_attempts`
 - `evidence_artifacts`
 - `claims`
@@ -166,12 +165,12 @@ Core entities:
 
 Compatibility:
 - Keep existing `tasks` and `payments` during migration.
-- Migrate traffic to campaign-backed execution.
+- Migrate traffic to research-run-backed execution.
 
 ## 6. Functional Requirements
 
 Planning and execution:
-- Create campaign from natural language query.
+- Create research run from natural language query.
 - Generate typed DAG with explicit dependencies.
 - Discover/select agents by capability, quality, cost, latency.
 - Execute node inputs/outputs with deterministic schemas.
@@ -191,7 +190,7 @@ Swarm collaboration:
 
 Payments and settlement:
 - Payment actions available as first-class tools.
-- Idempotent payment mutations (`campaign_id + node_id + attempt_id + action`).
+- Idempotent payment mutations (`research_run_id + node_id + attempt_id + action`).
 - Block execution unless payment is `authorized` (except explicit simulation mode).
 - Persist transition metadata and transaction receipts.
 - Emit terminal payment events to both payer and payee.
@@ -214,11 +213,11 @@ Migration:
 - Full provenance/audit trail for outputs and payments.
 - Idempotent APIs and exactly-once settlement semantics.
 - Replayable policy decisions from persisted events.
-- P95 campaign status transition latency < 3s.
+- P95 research-run status transition latency < 3s.
 - P95 merge-node decision latency < 5s.
 - P95 chain reconciliation lag < 60s.
 - Secret material never logged or returned by APIs.
-- Key rotation support with no campaign downtime.
+- Key rotation support with no research-run downtime.
 - No duplicate terminal payout for same idempotency key.
 
 ## 8. Implementation Plan
@@ -231,13 +230,13 @@ Phase 0 (2 weeks): foundation
 - Introduce signer abstraction (`dev_env_signer`, `managed_signer`).
 - Add private-key payload/log guardrails.
 
-Phase 1 (4 weeks): campaign MVP
-- Implement campaign entities + DAG planner.
-- Move orchestrator loop to campaign node execution.
+Phase 1 (4 weeks): research-run MVP
+- Implement research-run entities + DAG planner.
+- Move orchestrator loop to research-run node execution.
 - Add verification gates + settlement integration.
 - Implement dual-recipient terminal A2A payment notifications.
 - Add payment-profile verification + reconciliation worker baseline.
-- Ship minimal campaign graph UI.
+- Ship minimal research-run graph UI.
 
 Phase 2 (4 weeks): evidence + report
 - Build evidence ingestion and claim linking.
@@ -252,11 +251,11 @@ Phase 3 (4 weeks): adaptive orchestration
 - Disable legacy non-Strands path by default after parity checks.
 
 Phase 4 (ongoing): domain templates
-- Publish reusable campaign templates for research domains.
+- Publish reusable research-run templates for research domains.
 
 ## 9. Success Metrics
 
-- End-to-end verified campaign completion rate.
+- End-to-end verified research-run completion rate.
 - Median time to verified report.
 - Claims with full source lineage.
 - First-pass verification rate.
@@ -274,7 +273,7 @@ Phase 4 (ongoing): domain templates
 - Every paid microtask has persisted verification and settlement records.
 - Failed verification triggers configured retry/refund behavior.
 - Production orchestration runs on Strands runtime with legacy disabled by default.
-- Strict-mode campaigns persist quorum decision traces.
+- Strict-mode research runs persist quorum decision traces.
 - Contested-claim test scenario triggers deterministic debate resolution or escalation.
 - Payer and payee both receive terminal payment events.
 - No private-key material appears in DB snapshots, logs, or API payload captures.
@@ -291,7 +290,7 @@ Phase 4 (ongoing): domain templates
 ## 12. Open Decisions
 
 - Hard-fail vs soft-fail verification dimensions per domain.
-- Quorum policy defaults by campaign risk class.
+- Quorum policy defaults by research-run risk class.
 - Minimum evidence threshold by claim type.
 - Rules for allowing `mock` settlement outside local development.
 - Whether payee acknowledgement is required before closing payment thread.

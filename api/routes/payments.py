@@ -1,21 +1,24 @@
-"""Legacy payment-management routes kept for reference only.
+"""Active deterministic payment routes for the research-run runtime."""
 
-These routes are not mounted by ``api.main`` in the active phase 0 runtime.
-"""
+from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, cast
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
+from typing import Any, Dict, List, Optional
 
-from shared.database import get_db, Payment
-from shared.database.models import PaymentStatus
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field
+
+from shared.payments.runtime import (
+    get_payment_detail,
+    get_payment_events,
+    reconcile_payment,
+    reconcile_recent_payments,
+)
 
 router = APIRouter()
 
 
-class PaymentResponse(BaseModel):
-    """Payment response."""
+class PaymentDetailResponse(BaseModel):
+    """Serialized payment detail."""
 
     id: str
     task_id: str
@@ -24,128 +27,73 @@ class PaymentResponse(BaseModel):
     amount: float
     currency: str
     status: str
-    transaction_id: Optional[str]
+    transaction_id: Optional[str] = None
+    authorization_id: Optional[str] = None
+    created_at: Optional[str] = None
+    completed_at: Optional[str] = None
     a2a_thread_id: Optional[str] = None
-    a2a_messages: Optional[Dict[str, Any]] = None
-
-    class Config:
-        from_attributes = True
-
-
-class CreatePaymentRequest(BaseModel):
-    """Create payment request."""
-
-    task_id: str
-    from_agent_id: str
-    to_agent_id: str
-    to_hedera_account: str
-    amount: float
-    description: str = ""
+    payment_mode: Optional[str] = None
+    worker_account_id: Optional[str] = None
+    verification_notes: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    payment_profile: Optional[Dict[str, Any]] = None
+    notification_summary: Dict[str, int] = Field(default_factory=dict)
 
 
-class ReleasePaymentRequest(BaseModel):
-    """Release payment request."""
+class PaymentEventResponse(BaseModel):
+    """Serialized payment activity timeline."""
 
-    verification_notes: str = ""
+    payment: PaymentDetailResponse
+    state_transitions: List[Dict[str, Any]] = Field(default_factory=list)
+    notifications: List[Dict[str, Any]] = Field(default_factory=list)
+    a2a_events: List[Dict[str, Any]] = Field(default_factory=list)
+    reconciliations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
-@router.get("/{payment_id}", response_model=PaymentResponse)
-async def get_payment(payment_id: str, db: Session = Depends(get_db)):
-    """Get payment by ID."""
-    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+class PaymentReconcileRequest(BaseModel):
+    """Request payload for payment reconciliation."""
 
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
+    payment_id: Optional[str] = None
+    repair: bool = True
+    limit: int = Field(default=25, ge=1, le=100)
 
-    payment_row: Any = payment  # Allow SQLAlchemy instrumented attributes
-    metadata = cast(Dict[str, Any], (payment_row.meta or {}))
 
-    return PaymentResponse(
-        id=str(payment_row.id),
-        task_id=str(payment_row.task_id),
-        from_agent_id=str(payment_row.from_agent_id),
-        to_agent_id=str(payment_row.to_agent_id),
-        amount=float(payment_row.amount),
-        currency=str(payment_row.currency),
-        status=payment_row.status.value,
-        transaction_id=payment_row.transaction_id,
-        a2a_thread_id=metadata.get("a2a_thread_id"),
-        a2a_messages=metadata.get("a2a_messages"),
+class PaymentReconcileResponse(BaseModel):
+    """Response payload for payment reconciliation."""
+
+    reconciliations: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+@router.post("/reconcile", response_model=PaymentReconcileResponse)
+async def reconcile_payments_route(request: PaymentReconcileRequest) -> PaymentReconcileResponse:
+    """Reconcile one payment or a bounded set of recent payments."""
+
+    if request.payment_id:
+        payload = reconcile_payment(request.payment_id, repair=request.repair)
+        if payload is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+        return PaymentReconcileResponse(reconciliations=[payload])
+
+    return PaymentReconcileResponse(
+        reconciliations=reconcile_recent_payments(limit=request.limit, repair=request.repair)
     )
 
 
-@router.get("/", response_model=List[PaymentResponse])
-async def list_payments(
-    task_id: Optional[str] = None, status: Optional[str] = None, db: Session = Depends(get_db)
-):
-    """List payments with optional filtering."""
-    query = db.query(Payment)
+@router.get("/{payment_id}", response_model=PaymentDetailResponse)
+async def get_payment_route(payment_id: str) -> PaymentDetailResponse:
+    """Return payment detail plus notification/profile summary."""
 
-    if task_id:
-        query = query.filter(Payment.task_id == task_id)
-
-    if status:
-        query = query.filter(Payment.status == PaymentStatus(status))
-
-    payments = query.order_by(Payment.created_at.desc()).all()
-
-    responses: List[PaymentResponse] = []
-    for payment in payments:
-        payment_row = cast(Any, payment)
-        metadata = cast(Dict[str, Any], (payment_row.meta or {}))
-        responses.append(
-            PaymentResponse(
-                id=str(payment_row.id),
-                task_id=str(payment_row.task_id),
-                from_agent_id=str(payment_row.from_agent_id),
-                to_agent_id=str(payment_row.to_agent_id),
-                amount=float(payment_row.amount),
-                currency=str(payment_row.currency),
-                status=payment_row.status.value,
-                transaction_id=payment_row.transaction_id,
-                a2a_thread_id=metadata.get("a2a_thread_id"),
-                a2a_messages=metadata.get("a2a_messages"),
-            )
-        )
-
-    return responses
+    payload = get_payment_detail(payment_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+    return PaymentDetailResponse.model_validate(payload)
 
 
-@router.post("/", response_model=PaymentResponse)
-async def create_payment(request: CreatePaymentRequest):
-    """Create a new payment."""
-    from agents.negotiator import create_negotiator_agent
+@router.get("/{payment_id}/events", response_model=PaymentEventResponse)
+async def get_payment_events_route(payment_id: str) -> PaymentEventResponse:
+    """Return transitions, terminal notifications, and A2A events for a payment."""
 
-    agent = create_negotiator_agent()
-    agent_runner = cast(Any, agent)
-
-    prompt = f"""
-    Create a payment request:
-    Task ID: {request.task_id}
-    From: {request.from_agent_id}
-    To: {request.to_agent_id} (Hedera account: {request.to_hedera_account})
-    Amount: {request.amount} HBAR
-    Description: {request.description}
-    """
-
-    result = await agent_runner.run(prompt)
-
-    return {"message": "Payment request created", "result": result}
-
-
-@router.post("/{payment_id}/release")
-async def release_payment(payment_id: str, request: ReleasePaymentRequest):
-    """Release an authorized payment."""
-    from agents.verifier import create_verifier_agent
-
-    agent = create_verifier_agent()
-    agent_runner = cast(Any, agent)
-
-    prompt = f"""
-    Release payment: {payment_id}
-    Verification notes: {request.verification_notes}
-    """
-
-    result = await agent_runner.run(prompt)
-
-    return {"message": "Payment release initiated", "result": result}
+    payload = get_payment_events(payment_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
+    return PaymentEventResponse.model_validate(payload)

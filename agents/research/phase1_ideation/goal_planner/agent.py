@@ -34,7 +34,7 @@ class GoalPlannerAgent(BaseResearchAgent):
                 "rate": "0.10 HBAR",
                 "unit": "per_plan"
             },
-            model="gpt-4-turbo-preview"
+            model="gpt-5.4"
         )
 
     def get_system_prompt(self) -> str:

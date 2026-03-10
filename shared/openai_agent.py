@@ -1,4 +1,4 @@
-"""OpenAI Agent wrapper for compatibility with the system."""
+"""Legacy OpenAI wrapper kept only for older demos and migration fallback."""
 
 import os
 import json
@@ -19,7 +19,7 @@ class OpenAIAgent:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4-turbo-preview",
+        model: str = "gpt-5.4",
         system_prompt: str = "",
         tools: Optional[List[Callable]] = None,
         temperature: float = 0.7,
@@ -29,7 +29,7 @@ class OpenAIAgent:
 
         Args:
             api_key: OpenAI API key (or uses env var OPENAI_API_KEY)
-            model: Model to use (gpt-4-turbo-preview, gpt-4, gpt-3.5-turbo)
+            model: Model to use (for example gpt-5.4)
             system_prompt: System prompt for the agent
             tools: List of tool functions (for function calling)
             temperature: Temperature for generation
@@ -345,7 +345,7 @@ class Agent:
         self,
         client: Any = None,  # Ignored, we create our own
         api_key: Optional[str] = None,
-        model: str = "gpt-4-turbo-preview",
+        model: str = "gpt-5.4",
         system_prompt: str = "",
         tools: Optional[List] = None
     ):
@@ -381,7 +381,7 @@ def create_openai_agent(
     Returns:
         Configured Agent instance
     """
-    model = model or os.getenv("ORCHESTRATOR_MODEL", "gpt-4-turbo-preview")
+    model = model or os.getenv("ORCHESTRATOR_MODEL", "gpt-5.4")
     return Agent(
         api_key=api_key,
         model=model,

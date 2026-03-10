@@ -28,6 +28,7 @@ class TaskStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class PaymentStatus(str, enum.Enum):
@@ -58,6 +59,30 @@ class ResearchPhaseType(str, enum.Enum):
     EXPERIMENTATION = "experimentation"
     INTERPRETATION = "interpretation"
     PUBLICATION = "publication"
+
+
+class ResearchRunStatus(str, enum.Enum):
+    """Research run status enum."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    WAITING_FOR_REVIEW = "waiting_for_review"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ResearchRunNodeStatus(str, enum.Enum):
+    """Research run node and attempt status enum."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    WAITING_FOR_REVIEW = "waiting_for_review"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
 
 
 class Task(Base):
@@ -138,6 +163,16 @@ class Payment(Base):
         back_populates="payment",
         cascade="all, delete-orphan",
     )
+    notifications = relationship(
+        "PaymentNotification",
+        back_populates="payment",
+        cascade="all, delete-orphan",
+    )
+    reconciliations = relationship(
+        "PaymentReconciliation",
+        back_populates="payment",
+        cascade="all, delete-orphan",
+    )
 
 
 class PaymentStateTransition(Base):
@@ -171,6 +206,72 @@ class PaymentStateTransition(Base):
 
     payment = relationship("Payment", back_populates="state_transitions")
     task = relationship("Task")
+
+
+class AgentPaymentProfile(Base):
+    """Verified payment profile for a marketplace agent."""
+
+    __tablename__ = "agent_payment_profiles"
+    __table_args__ = (UniqueConstraint("agent_id", name="uq_agent_payment_profiles_agent_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    hedera_account_id = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    verification_method = Column(String, nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    agent = relationship("Agent", foreign_keys=[agent_id])
+
+
+class PaymentNotification(Base):
+    """Persisted terminal payment notifications for payer/payee delivery."""
+
+    __tablename__ = "payment_notifications"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_payment_notifications_message_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    message_id = Column(String, nullable=False)
+    notification_type = Column(String, nullable=False)
+    recipient_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    recipient_role = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="delivered")
+    thread_id = Column(String, nullable=False)
+    delivered_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    payment = relationship("Payment", back_populates="notifications")
+    task = relationship("Task", foreign_keys=[task_id])
+    recipient_agent = relationship("Agent", foreign_keys=[recipient_agent_id])
+
+
+class PaymentReconciliation(Base):
+    """Persisted reconciliation result between payment state and emitted notifications."""
+
+    __tablename__ = "payment_reconciliations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=False)
+    status = Column(String, nullable=False)
+    mismatch_count = Column(Integer, default=0)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    meta = Column(JSON, nullable=True)
+
+    payment = relationship("Payment", back_populates="reconciliations")
+    task = relationship("Task", foreign_keys=[task_id])
 
 
 class DynamicTool(Base):
@@ -277,6 +378,114 @@ class DataAsset(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     meta = Column(JSON, nullable=True)
 
+
+class ResearchRun(Base):
+    """Persisted research run for the Phase 1A graph-backed workflow."""
+
+    __tablename__ = "research_runs"
+
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    status = Column(Enum(ResearchRunStatus), default=ResearchRunStatus.PENDING)
+    workflow_template = Column(String, nullable=False)
+    budget_limit = Column(Float, nullable=True)
+    verification_mode = Column(String, default="standard")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    meta = Column(JSON, nullable=True)
+
+    nodes = relationship("ResearchRunNode", back_populates="research_run", cascade="all, delete-orphan")
+    edges = relationship("ResearchRunEdge", back_populates="research_run", cascade="all, delete-orphan")
+    attempts = relationship("ExecutionAttempt", back_populates="research_run", cascade="all, delete-orphan")
+
+
+class ResearchRunNode(Base):
+    """Node within a research run graph."""
+
+    __tablename__ = "research_run_nodes"
+    __table_args__ = (
+        UniqueConstraint("research_run_id", "node_id", name="uq_research_run_nodes_node_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    node_id = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    capability_requirements = Column(Text, nullable=False)
+    assigned_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=False)
+    execution_order = Column(Integer, nullable=False)
+    status = Column(Enum(ResearchRunNodeStatus), default=ResearchRunNodeStatus.PENDING)
+    latest_task_id = Column(String, ForeignKey("tasks.id"), nullable=True)
+    latest_payment_id = Column(String, ForeignKey("payments.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="nodes")
+    latest_task = relationship("Task", foreign_keys=[latest_task_id])
+    latest_payment = relationship("Payment", foreign_keys=[latest_payment_id])
+
+
+class ResearchRunEdge(Base):
+    """Dependency edge between research run nodes."""
+
+    __tablename__ = "research_run_edges"
+    __table_args__ = (
+        UniqueConstraint("research_run_id", "from_node_id", "to_node_id", name="uq_research_run_edges"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    from_node_id = Column(String, nullable=False)
+    to_node_id = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="edges")
+
+
+class ExecutionAttempt(Base):
+    """Execution attempt for a specific research run node."""
+
+    __tablename__ = "execution_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id",
+            "node_id",
+            "attempt_number",
+            name="uq_execution_attempts_attempt_number",
+        ),
+    )
+
+    id = Column(String, primary_key=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    node_id = Column(String, nullable=False)
+    attempt_number = Column(Integer, nullable=False, default=1)
+    status = Column(Enum(ResearchRunNodeStatus), default=ResearchRunNodeStatus.PENDING)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    verification_score = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="attempts")
+    task = relationship("Task", foreign_keys=[task_id])
+    payment = relationship("Payment", foreign_keys=[payment_id])
+    agent = relationship("Agent", foreign_keys=[agent_id])
 
 class AgentReputation(Base):
     """Agent reputation tracking model."""

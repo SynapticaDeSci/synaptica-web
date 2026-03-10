@@ -11,7 +11,29 @@ The active runtime in phase 0 is intentionally narrow and deterministic:
 - Supported human decision loop: `POST /api/tasks/{task_id}/approve_verification` and `POST /api/tasks/{task_id}/reject_verification`
 - Supported infrastructure agents: the built-in Data Agent remains available outside the literature-review flow
 
-Legacy/demo code such as `api/pipeline.py`, `agents/research/research_pipeline.py`, and the unmounted `api/routes/tasks.py` / `api/routes/payments.py` modules is retained for reference only and is not part of the active runtime.
+Legacy/demo code such as `api/pipeline.py`, `agents/research/research_pipeline.py`, and the unmounted legacy task/payment route patterns is retained for reference only and is not part of the active runtime. The supported OpenAI runtime path is `shared/strands_openai_agent.py`; `shared/openai_agent.py` is legacy/demo-only.
+
+## Research Runs
+
+The repo now also includes an opt-in Phase 1 research-run system:
+
+- `POST /api/research-runs` creates and auto-starts a graph-backed research run
+- `GET /api/research-runs/{id}` returns graph state, node attempts, linked task/payment IDs, and terminal results
+- `POST /api/research-runs/{id}/pause`, `/resume`, and `/cancel` provide cooperative lifecycle control
+- `GET /api/research-runs/{id}/evidence` returns the shaped planning/evidence/curation view
+- `GET /api/research-runs/{id}/report` returns the shaped final report view
+- The persisted workflow is the bounded six-node deep-research backbone used by the frontend beta
+
+## Payment Integrity Baseline
+
+The active Phase 1 payment surface is deterministic and queryable:
+
+- `GET /api/payments/{payment_id}` returns payment detail, verification profile, and notification counts
+- `GET /api/payments/{payment_id}/events` returns transitions, payer/payee notifications, A2A events, and reconciliations
+- `POST /api/payments/reconcile` reconciles one payment or a bounded recent set
+- `POST /api/agents/{agent_id}/payment-profile/verify` verifies and persists the payee Hedera account baseline
+
+Internal payment mutation flows such as proposal, authorize, release, and refund remain runtime-managed through the orchestrator/verifier tools and are not mounted as public API routes.
 
 ## Architecture
 
@@ -65,8 +87,8 @@ cd ..
 cp .env.example .env
 # Edit .env with your credentials
 
-# Initialize database
-uv run python -c "from shared.database import Base, engine; Base.metadata.create_all(engine)"
+# Initialize or upgrade database schema
+uv run alembic upgrade head
 # Or use the shortcut
 make db-init
 ```
@@ -172,6 +194,8 @@ This command fetches domains from the on-chain registry, resolves metadata, merg
 4. Approve/reject human verification only when the verifier requests review
 5. View results and transaction history
 
+For the graph-backed backend API, create a research run with `POST /api/research-runs`, poll `GET /api/research-runs/{id}`, and use the evidence/report endpoints for shaped inspection. The frontend beta route at `http://localhost:3000/research-runs` now exposes create, pause, resume, cancel, evidence, report, and payment activity views.
+
 ## Project Structure
 
 This repository is a monorepo with one shared Python application environment plus one separate Next.js frontend app. The Python runtime spans `api/`, `agents/`, and `shared/` under the root `pyproject.toml`.
@@ -223,8 +247,11 @@ The smart contracts are deployed on Hedera testnet and integrated with this plat
 ### Key Features
 
 - **Deterministic Phase 0 Workflow**: Fixed literature-review pipeline with typed handoff and payment contracts
+- **Research Run Controls**: Pause, resume, and cancel bounded deep-research runs while preserving node state
+- **Research Run Evidence/Report Views**: Shaped evidence and report APIs power the frontend beta
 - **Real-time Progress**: Task progress and verification state persist in `Task.meta`
 - **Transaction History**: View all research queries with costs and agent details
+- **Payment Integrity Baseline**: Dual-recipient terminal notifications, profile verification, and reconciliation APIs
 - **Explicit Payment Modes**: `offline`, `dev_env`, and `managed` replace implicit mock settlement
 - **Dynamic Agent Discovery**: Finds agents based on capability requirements
 - **Self-Serve Agent Onboarding**: Builders can publish HTTP agents through the marketplace UI with automated Pinata hosting.

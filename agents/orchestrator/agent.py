@@ -1,7 +1,6 @@
 """Orchestrator Agent implementation using OpenAI API."""
 
-import os
-from shared.openai_agent import Agent, create_openai_agent
+from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 
 from .system_prompt import ORCHESTRATOR_SYSTEM_PROMPT
 from .tools import (
@@ -14,20 +13,13 @@ from .tools import (
 )
 
 
-def create_orchestrator_agent() -> Agent:
+def create_orchestrator_agent() -> AsyncStrandsAgent:
     """
     Create and configure the Orchestrator agent.
 
     Returns:
         Configured OpenAI Agent instance
     """
-    # Get API key and model from environment
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("ORCHESTRATOR_MODEL", "gpt-4-turbo-preview")
-
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
     # Define tools for the orchestrator
     tools = [
         create_task,
@@ -38,12 +30,13 @@ def create_orchestrator_agent() -> Agent:
         execute_microtask,
     ]
 
-    # Create agent with OpenAI
-    agent = create_openai_agent(
-        api_key=api_key,
-        model=model,
+    agent = create_strands_openai_agent(
         system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
         tools=tools,
+        model_env_var="ORCHESTRATOR_MODEL",
+        agent_id="orchestrator-agent",
+        name="Orchestrator",
+        description="Coordinates research tasks and microtask execution.",
     )
 
     return agent

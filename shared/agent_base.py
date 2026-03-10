@@ -1,6 +1,5 @@
 """
-Base Agent implementation for ProvidAI
-Compatible with Anthropic SDK
+Legacy Anthropic-compatible base agent kept for older demos.
 """
 
 import os

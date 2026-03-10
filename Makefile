@@ -15,7 +15,7 @@ MOCK_AGENT_PORT ?= 6123
 help:
 	@printf "Available targets:\n"
 	@printf "  make sync             Create/update the Python environment with uv\n"
-	@printf "  make db-init          Initialize the local database tables\n"
+	@printf "  make db-init          Apply Alembic migrations to the local database\n"
 	@printf "  make test             Run the backend test suite\n"
 	@printf "  make lint             Run ruff and frontend lint\n"
 	@printf "  make lint-python      Run ruff against the Python codebase\n"
@@ -37,7 +37,7 @@ sync:
 	$(UV) sync
 
 db-init:
-	$(UV) run python -c "from shared.database import Base, engine; Base.metadata.create_all(engine)"
+	$(UV) run alembic upgrade head
 
 test:
 	$(UV) run pytest tests

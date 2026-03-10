@@ -16,14 +16,12 @@ from shared.payments.service import (
     get_payment_mode,
     run_idempotent_payment_action,
 )
+from shared.payments.runtime import emit_terminal_payment_notifications
 from shared.protocols import (
     PaymentRequest,
     PaymentStatus,
     X402Payment,
-    build_payment_refund_message,
-    build_payment_release_message,
     new_thread_id,
-    publish_message,
 )
 from shared.database import SessionLocal, Payment
 from shared.database.models import PaymentStatus as DBPaymentStatus
@@ -43,7 +41,7 @@ def _build_action_context(
         payload["payment_id"] = payment_id
         payload["task_id"] = task_id
         payload["action"] = action.value
-        payload["idempotency_key"] = build_idempotency_key(
+        payload["idempotency_key"] = payload.get("idempotency_key") or build_idempotency_key(
             task_id,
             payload.get("todo_id", "todo_0"),
             payload.get("attempt_id", "attempt_0"),
@@ -156,26 +154,22 @@ async def release_payment(
         }
         updated_metadata["payment_mode"] = mode.value
 
-        release_message = build_payment_release_message(
-            payment_id=payment_id,
-            task_id=str(payment_row.task_id),
-            amount=Decimal(str(payment_row.amount)),
-            currency=str(payment_row.currency),
-            from_agent=str(verifier_agent_id),
-            to_agent=str(payment_row.from_agent_id),
-            transaction_id=receipt.transaction_id,
-            status=payment_row.status.value,
-            verification_notes=verification_notes,
-            thread_id=thread_id,
-        )
         messages = dict(cast(Dict[str, Any], updated_metadata.get("a2a_messages") or {}))
-        messages[release_message.type] = release_message.to_dict()
+        terminal_notifications = emit_terminal_payment_notifications(
+            db,
+            payment=payment_row,
+            verifier_agent_id=str(verifier_agent_id),
+            thread_id=thread_id,
+            terminal_action="release",
+            transaction_id=receipt.transaction_id,
+            verification_notes=verification_notes,
+        )
+        messages["payment/released:payer"] = terminal_notifications["payer"]
+        messages["payment/released:payee"] = terminal_notifications["payee"]
         updated_metadata["a2a_thread_id"] = thread_id
         updated_metadata["a2a_messages"] = messages
         updated_metadata.setdefault("verifier_agent_id", verifier_agent_id)
         payment_row.meta = updated_metadata
-
-        publish_message(release_message, tags=("payment", "released"), session=db)
 
         return {
             "success": True,
@@ -188,7 +182,7 @@ async def release_payment(
             "message": "Payment released successfully",
             "a2a": {
                 "thread_id": thread_id,
-                "release_message": release_message.to_dict(),
+                "release_messages": terminal_notifications,
             },
         }
 
@@ -258,26 +252,22 @@ async def reject_and_refund(
         }
         updated_metadata["payment_mode"] = mode.value
 
-        refund_message = build_payment_refund_message(
-            payment_id=payment_id,
-            task_id=str(payment_row.task_id),
-            amount=Decimal(str(payment_row.amount)),
-            currency=str(payment_row.currency),
-            from_agent=str(verifier_agent_id),
-            to_agent=str(payment_row.from_agent_id),
-            transaction_id=receipt.transaction_id,
-            status=payment_row.status.value,
-            rejection_reason=rejection_reason,
-            thread_id=thread_id,
-        )
         messages = dict(cast(Dict[str, Any], updated_metadata.get("a2a_messages") or {}))
-        messages[refund_message.type] = refund_message.to_dict()
+        terminal_notifications = emit_terminal_payment_notifications(
+            db,
+            payment=payment_row,
+            verifier_agent_id=str(verifier_agent_id),
+            thread_id=thread_id,
+            terminal_action="refund",
+            transaction_id=receipt.transaction_id,
+            rejection_reason=rejection_reason,
+        )
+        messages["payment/refunded:payer"] = terminal_notifications["payer"]
+        messages["payment/refunded:payee"] = terminal_notifications["payee"]
         updated_metadata["a2a_thread_id"] = thread_id
         updated_metadata["a2a_messages"] = messages
         updated_metadata.setdefault("verifier_agent_id", verifier_agent_id)
         payment_row.meta = updated_metadata
-
-        publish_message(refund_message, tags=("payment", "refunded"), session=db)
 
         return {
             "success": receipt.status == PaymentStatus.REFUNDED,
@@ -288,7 +278,7 @@ async def reject_and_refund(
             "message": "Refund approved on-chain" if receipt.status == PaymentStatus.REFUNDED else "Refund approval recorded",
             "a2a": {
                 "thread_id": thread_id,
-                "refund_message": refund_message.to_dict(),
+                "refund_messages": terminal_notifications,
             },
         }
 

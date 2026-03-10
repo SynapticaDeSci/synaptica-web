@@ -1,8 +1,11 @@
 """Literature Miner Agent implementation."""
 
+import asyncio
 import json
-from typing import Dict, Any, List, Optional
+from collections import Counter
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from agents.research.base_research_agent import BaseResearchAgent
 from .system_prompt import LITERATURE_MINER_SYSTEM_PROMPT
 from .tools import (
@@ -17,6 +20,19 @@ from .tools import (
 )
 from agents.research.tools.tavily_search import tavily_search, tavily_research_search
 from shared.research.validators import validate_literature_corpus
+from shared.research_runs.deep_research import (
+    assign_citation_ids,
+    build_citation_cards,
+    build_source_summary,
+    dedupe_sources,
+    enrich_source_cards,
+    filter_sources_for_curation,
+    normalize_source_card,
+    search_web,
+    sort_sources,
+    validate_source_requirements,
+)
+from shared.research_runs.planner import SourceRequirements
 
 
 class LiteratureMinerAgent(BaseResearchAgent):
@@ -69,6 +85,201 @@ class LiteratureMinerAgent(BaseResearchAgent):
             create_paper_url,
             extract_paper_metadata,
         ]
+
+    async def execute(self, request: str, **kwargs) -> Dict[str, Any]:
+        context = kwargs.get("context") or {}
+        node_strategy = context.get("node_strategy")
+        if node_strategy == "gather_evidence":
+            return await self._execute_gather_evidence(request, context)
+        if node_strategy == "curate_sources":
+            return await self._execute_curate_sources(request, context)
+        return await super().execute(request, **kwargs)
+
+    async def _execute_gather_evidence(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        query_plan = dict(context.get("query_plan") or {})
+        original_query = str(query_plan.get("query") or context.get("original_description") or request)
+        search_queries = list(query_plan.get("search_queries") or [])
+        claim_targets = list(query_plan.get("claim_targets") or context.get("claim_targets") or [])
+        keywords = list(query_plan.get("keywords") or context.get("query_keywords") or [])
+        classified_mode = str(context.get("classified_mode") or "literature")
+        rounds_planned = dict(context.get("rounds_planned") or {})
+        evidence_rounds = int(rounds_planned.get("evidence_rounds", 1) or 1)
+        max_results = 6 if str(context.get("depth_mode") or "standard") == "deep" else 4
+
+        gathered_sources: List[Dict[str, Any]] = []
+        scout_notes: List[Dict[str, Any]] = []
+
+        for round_number in range(1, evidence_rounds + 1):
+            current_sources = sort_sources(dedupe_sources(gathered_sources))
+            coverage_summary = self._assess_coverage(
+                current_sources,
+                claim_targets=claim_targets,
+                source_requirements=context.get("source_requirements") or {},
+            )
+            if round_number > 1 and coverage_summary["ready_for_synthesis"]:
+                break
+
+            round_queries = self._build_round_queries(
+                original_query,
+                keywords=keywords,
+                search_queries=search_queries,
+                classified_mode=classified_mode,
+                round_number=round_number,
+                claim_targets=claim_targets,
+                coverage_summary=coverage_summary,
+            )
+            round_results = await asyncio.gather(
+                *[
+                    search_web(
+                        query=query_spec["query"],
+                        max_results=max_results,
+                        time_range=query_spec.get("time_range"),
+                    )
+                    for query_spec in round_queries
+                ]
+            )
+            round_count = 0
+            for query_spec, results in zip(round_queries, round_results):
+                normalized = [
+                    normalize_source_card(item, scout_role=query_spec["role"], round_number=round_number)
+                    for item in results
+                    if item.get("url") and item.get("title")
+                ]
+                round_count += len(normalized)
+                gathered_sources.extend(normalized)
+            scout_notes.append(
+                {
+                    "round_number": round_number,
+                    "queries": round_queries,
+                    "source_count": round_count,
+                }
+            )
+
+        sources = sort_sources(
+            dedupe_sources(
+                await enrich_source_cards(
+                    gathered_sources,
+                    max_fetches=10 if classified_mode == "live_analysis" else 6,
+                )
+            )
+        )
+        if not sources:
+            self._update_reputation(success=False, quality_score=0.0)
+            return {
+                "success": False,
+                "agent_id": self.agent_id,
+                "error": "No evidence sources were discovered for this research run.",
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "model": self.model,
+                },
+            }
+
+        coverage_summary = self._assess_coverage(
+            sources,
+            claim_targets=claim_targets,
+            source_requirements=context.get("source_requirements") or {},
+        )
+        self._update_reputation(success=True, quality_score=0.84)
+        return {
+            "success": True,
+            "agent_id": self.agent_id,
+            "result": {
+                "query": original_query,
+                "classified_mode": classified_mode,
+                "sources": sources,
+                "source_count": len(sources),
+                "scout_notes": scout_notes,
+                "search_lanes_used": sorted({str(note_query.get("lane") or note_query.get("role")) for note in scout_notes for note_query in note.get("queries", [])}),
+                "coverage_summary": coverage_summary,
+                "uncovered_claim_targets": coverage_summary["uncovered_claim_targets"],
+                "rounds_completed": {
+                    "evidence_rounds": max(1, len(scout_notes)),
+                    "critique_rounds": 0,
+                },
+            },
+            "metadata": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "model": self.model,
+            },
+        }
+
+    async def _execute_curate_sources(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        del request
+        gathered = dict(context.get("gathered_evidence") or {})
+        requirements = SourceRequirements.model_validate(context.get("source_requirements") or {})
+        classified_mode = str(context.get("classified_mode") or "literature")
+        scenario_requested = bool(context.get("scenario_analysis_requested"))
+
+        filtered_payload = filter_sources_for_curation(
+            dedupe_sources(gathered.get("sources") or []),
+            requirements=requirements,
+            classified_mode=classified_mode,
+        )
+        curated_sources = sort_sources(filtered_payload["selected_sources"])
+        curated_sources, citations = assign_citation_ids(curated_sources, limit=requirements.total_sources)
+        validation = validate_source_requirements(curated_sources, requirements=requirements)
+        source_summary = build_source_summary(curated_sources, requirements=requirements)
+        coverage_summary = dict(gathered.get("coverage_summary") or {})
+        coverage_summary["source_diversity"] = {
+            "unique_publishers": len({str(source.get("publisher")) for source in curated_sources if source.get("publisher")}),
+            "source_type_mix": dict(Counter(str(source.get("source_type") or "unknown") for source in curated_sources)),
+        }
+        coverage_summary["citation_count"] = len(citations)
+        coverage_summary["citation_ready"] = len(citations) > 0
+        freshness_summary = {
+            "required": requirements.min_fresh_sources > 0,
+            "window_days": requirements.freshness_window_days,
+            "minimum_fresh_sources": requirements.min_fresh_sources,
+            "fresh_sources": source_summary["fresh_sources"],
+            "requirements_met": validation["passed"],
+            "issues": validation["issues"],
+        }
+
+        if classified_mode in {"live_analysis", "hybrid"} and not scenario_requested and not validation["passed"]:
+            self._update_reputation(success=False, quality_score=0.0)
+            return {
+                "success": False,
+                "agent_id": self.agent_id,
+                "error": (
+                    "insufficient_fresh_evidence"
+                    if classified_mode == "live_analysis"
+                    else "insufficient_curated_evidence"
+                ),
+                "details": {
+                    "issues": validation["issues"],
+                    "source_summary": source_summary,
+                    "freshness_summary": freshness_summary,
+                },
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "model": self.model,
+                },
+            }
+
+        self._update_reputation(success=True, quality_score=0.88)
+        return {
+            "success": True,
+            "agent_id": self.agent_id,
+            "result": {
+                "sources": curated_sources,
+                "citations": citations or build_citation_cards(curated_sources, limit=requirements.total_sources),
+                "source_summary": source_summary,
+                "freshness_summary": freshness_summary,
+                "coverage_summary": coverage_summary,
+                "uncovered_claim_targets": list(gathered.get("uncovered_claim_targets") or []),
+                "issues": validation["issues"],
+                "filtered_sources": filtered_payload["filtered_sources"],
+                "rounds_completed": dict(
+                    gathered.get("rounds_completed")
+                    or {"evidence_rounds": 0, "critique_rounds": 0}
+                ),
+            },
+            "metadata": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "model": self.model,
+            },
+        }
 
     async def search_literature(
         self,
@@ -257,6 +468,130 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 "max_results": 10
             }
         }
+
+    def _build_round_queries(
+        self,
+        original_query: str,
+        *,
+        keywords: List[str],
+        search_queries: List[Dict[str, Any]],
+        classified_mode: str,
+        round_number: int,
+        claim_targets: List[Dict[str, Any]],
+        coverage_summary: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        if round_number == 1 and search_queries:
+            return search_queries
+
+        keyword_text = " ".join(keywords[:6])
+        follow_up_queries: List[Dict[str, Any]] = []
+        uncovered = list(coverage_summary.get("uncovered_claim_targets") or [])
+        if classified_mode in {"live_analysis", "hybrid"}:
+            follow_up_queries.extend(
+                [
+                    {
+                        "role": "latest-confirmation-scout",
+                        "lane": "breaking-developments",
+                        "query": f"{original_query} updated latest confirmed developments {keyword_text}",
+                        "time_range": "w",
+                    },
+                    {
+                        "role": "counterpoint-scout",
+                        "lane": "counterpoints",
+                        "query": f"{original_query} uncertainty disputed conflicting reports {keyword_text}",
+                        "time_range": "w",
+                    },
+                ]
+            )
+        if classified_mode in {"literature", "hybrid"}:
+            follow_up_queries.append(
+                {
+                    "role": "methods-scout",
+                    "lane": "methods-and-gaps",
+                    "query": f"{original_query} methodology evidence review {keyword_text}",
+                    "time_range": None,
+                }
+            )
+        for target in uncovered[:2]:
+            claim_text = str(target.get("claim_target") or "")
+            if not claim_text:
+                continue
+            follow_up_queries.append(
+                {
+                    "role": "claim-gap-scout",
+                    "lane": target.get("lane") or "claim-gap",
+                    "query": f"{original_query} {claim_text} evidence confirmation {keyword_text}",
+                    "time_range": "w" if classified_mode != "literature" else None,
+                }
+            )
+        return follow_up_queries or search_queries
+
+    def _assess_coverage(
+        self,
+        sources: List[Dict[str, Any]],
+        *,
+        claim_targets: List[Dict[str, Any]],
+        source_requirements: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        requirements = SourceRequirements.model_validate(
+            source_requirements
+            or SourceRequirements(total_sources=6, min_academic_or_primary=0).model_dump()
+        )
+        source_summary = build_source_summary(
+            sources,
+            requirements=requirements,
+        )
+        publishers = {str(source.get("publisher")) for source in sources if source.get("publisher")}
+        source_type_mix = Counter(str(source.get("source_type") or "unknown") for source in sources)
+        covered_claims: List[str] = []
+        uncovered_claim_targets: List[Dict[str, Any]] = []
+        for claim_target in claim_targets:
+            if self._claim_target_matches_sources(claim_target, sources):
+                covered_claims.append(str(claim_target.get("claim_id")))
+            else:
+                uncovered_claim_targets.append(claim_target)
+
+        ready_for_synthesis = (
+            source_summary["requirements_met"]
+            and len(publishers) >= 3
+            and len(uncovered_claim_targets) == 0
+        )
+        return {
+            "source_summary": source_summary,
+            "source_diversity": {
+                "unique_publishers": len(publishers),
+                "source_type_mix": dict(source_type_mix),
+            },
+            "covered_claim_ids": covered_claims,
+            "uncovered_claim_targets": uncovered_claim_targets,
+            "ready_for_synthesis": ready_for_synthesis,
+        }
+
+    def _claim_target_matches_sources(
+        self,
+        claim_target: Dict[str, Any],
+        sources: List[Dict[str, Any]],
+    ) -> bool:
+        claim_text = str(claim_target.get("claim_target") or "").lower()
+        lane = str(claim_target.get("lane") or "").lower()
+        claim_tokens = {token for token in claim_text.split() if len(token) > 4}
+        if not claim_tokens and lane:
+            claim_tokens = {token for token in lane.replace("-", " ").split() if len(token) > 3}
+
+        for source in sources:
+            haystack = " ".join(
+                [
+                    str(source.get("title") or ""),
+                    str(source.get("snippet") or ""),
+                    str(source.get("publisher") or ""),
+                    str(source.get("scout_role") or ""),
+                ]
+            ).lower()
+            if lane and lane.replace("-", " ") in haystack:
+                return True
+            if claim_tokens and sum(1 for token in claim_tokens if token in haystack) >= 2:
+                return True
+        return False
 
 
 # Create singleton instance

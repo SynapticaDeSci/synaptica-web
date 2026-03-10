@@ -46,7 +46,7 @@ async def create_todo_list(task_id: str, items: List[Dict[str, str]]) -> Dict[st
 
             task.meta["todo_list"] = [
                 {
-                    "id": f"todo_{i}",
+                    "id": item.get("id", f"todo_{i}"),
                     "status": "pending",
                     **item,
                 }
@@ -59,7 +59,7 @@ async def create_todo_list(task_id: str, items: List[Dict[str, str]]) -> Dict[st
         # Send progress update to frontend with TODO list
         todo_list = [
             {
-                "id": f"todo_{i}",
+                "id": item.get("id", f"todo_{i}"),
                 "status": "pending",
                 **item,
             }

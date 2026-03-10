@@ -19,6 +19,17 @@ export interface TaskResponse {
   error?: string;
 }
 
+export interface TaskVerificationData {
+  todo_id: string;
+  payment_id: string;
+  quality_score: number;
+  dimension_scores: Record<string, number>;
+  feedback: string;
+  task_result: any;
+  agent_name: string;
+  ethics_passed: boolean;
+}
+
 export interface TaskStatusResponse {
   task_id: string;
   status: string;
@@ -66,16 +77,214 @@ export interface TaskStatusResponse {
   };
   error?: string;
   verification_pending?: boolean;
-  verification_data?: {
-    todo_id: string;
-    payment_id: string;
-    quality_score: number;
-    dimension_scores: Record<string, number>;
-    feedback: string;
-    task_result: any;
-    agent_name: string;
-    ethics_passed: boolean;
+  verification_data?: TaskVerificationData;
+}
+
+export type ResearchRunStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_for_review'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type ResearchRunNodeStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_for_review'
+  | 'completed'
+  | 'failed'
+  | 'blocked'
+  | 'cancelled';
+
+export type ResearchMode = 'auto' | 'literature' | 'live_analysis' | 'hybrid';
+export type DepthMode = 'standard' | 'deep';
+
+export interface CreateResearchRunRequest {
+  description: string;
+  budget_limit?: number;
+  verification_mode?: string;
+  research_mode?: ResearchMode;
+  depth_mode?: DepthMode;
+}
+
+export interface ResearchSourceCard {
+  citation_id?: string | null;
+  title: string;
+  url: string;
+  publisher?: string | null;
+  published_at?: string | null;
+  source_type?: string | null;
+  snippet?: string | null;
+  display_snippet?: string | null;
+  relevance_score?: number | null;
+  quality_flags?: string[] | null;
+  filtered_reason?: string | null;
+}
+
+export interface ResearchClaim {
+  claim_id?: string | null;
+  claim: string;
+  supporting_citation_ids?: string[] | null;
+  supporting_citations?: string[];
+  confidence?: string;
+}
+
+export interface ResearchCriticFinding {
+  issue: string;
+  severity?: string;
+  recommendation?: string;
+  round_number?: number;
+}
+
+export interface ResearchQualitySummary {
+  citation_coverage?: number | null;
+  uncovered_claims?: string[] | number | null;
+  source_diversity?: string | number | Record<string, number | string> | null;
+  verification_notes?: string[] | string | null;
+  strict_live_analysis_checks_passed?: boolean | null;
+}
+
+export interface ResearchRunAttemptResponse {
+  attempt_id: string;
+  attempt_number: number;
+  status: ResearchRunNodeStatus;
+  task_id?: string | null;
+  payment_id?: string | null;
+  agent_id?: string | null;
+  verification_score?: number | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+}
+
+export interface ResearchRunNodeResponse {
+  node_id: string;
+  title: string;
+  description: string;
+  capability_requirements: string;
+  assigned_agent_id: string;
+  execution_order: number;
+  status: ResearchRunNodeStatus;
+  task_id?: string | null;
+  payment_id?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+  attempts: ResearchRunAttemptResponse[];
+}
+
+export interface ResearchRunEdgeResponse {
+  from_node_id: string;
+  to_node_id: string;
+}
+
+export interface ResearchRunResponse {
+  id: string;
+  title: string;
+  description: string;
+  status: ResearchRunStatus;
+  workflow_template: string;
+  workflow: string;
+  budget_limit?: number | null;
+  verification_mode: string;
+  research_mode: ResearchMode;
+  classified_mode: Exclude<ResearchMode, 'auto'>;
+  depth_mode: DepthMode;
+  freshness_required: boolean;
+  source_requirements: {
+    total_sources?: number;
+    min_academic_or_primary?: number;
+    min_fresh_sources?: number;
+    freshness_window_days?: number | null;
   };
+  rounds_planned: {
+    evidence_rounds?: number;
+    critique_rounds?: number;
+  };
+  rounds_completed: {
+    evidence_rounds?: number;
+    critique_rounds?: number;
+  };
+  created_at?: string | null;
+  updated_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  result?: any;
+  error?: string | null;
+  nodes: ResearchRunNodeResponse[];
+  edges: ResearchRunEdgeResponse[];
+}
+
+export interface ResearchRunEvidenceResponse {
+  research_run_id: string;
+  status: ResearchRunStatus;
+  claim_targets: Array<Record<string, any>>;
+  rewritten_research_brief?: string | null;
+  sources: ResearchSourceCard[];
+  filtered_sources: ResearchSourceCard[];
+  citations: ResearchSourceCard[];
+  coverage_summary: Record<string, any>;
+  source_summary: Record<string, any>;
+  freshness_summary: Record<string, any>;
+  search_lanes_used: string[];
+}
+
+export interface ResearchRunReportResponse {
+  research_run_id: string;
+  status: ResearchRunStatus;
+  answer_markdown?: string | null;
+  answer?: string | null;
+  claims: ResearchClaim[];
+  citations: ResearchSourceCard[];
+  limitations: string[];
+  critic_findings: ResearchCriticFinding[];
+  quality_summary: ResearchQualitySummary;
+}
+
+export interface PaymentProfileVerificationResponse {
+  success: boolean;
+  agent_id: string;
+  hedera_account_id: string;
+  status: string;
+  verification_method?: string | null;
+  verified_at?: string | null;
+  last_error?: string | null;
+  meta?: Record<string, any>;
+}
+
+export interface PaymentDetailResponse {
+  id: string;
+  task_id: string;
+  from_agent_id: string;
+  to_agent_id: string;
+  amount: number;
+  currency: string;
+  status: string;
+  transaction_id?: string | null;
+  authorization_id?: string | null;
+  created_at?: string | null;
+  completed_at?: string | null;
+  a2a_thread_id?: string | null;
+  payment_mode?: string | null;
+  worker_account_id?: string | null;
+  verification_notes?: string | null;
+  rejection_reason?: string | null;
+  payment_profile?: PaymentProfileVerificationResponse | null;
+  notification_summary: Record<string, number>;
+}
+
+export interface PaymentEventsResponse {
+  payment: PaymentDetailResponse;
+  state_transitions: Array<Record<string, any>>;
+  notifications: Array<Record<string, any>>;
+  a2a_events: Array<Record<string, any>>;
+  reconciliations: Array<Record<string, any>>;
 }
 
 /**
@@ -93,6 +302,30 @@ export async function createTask(request: CreateTaskRequest): Promise<TaskRespon
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create task' }));
     throw new Error(error.error || 'Failed to create task');
+  }
+
+  return response.json();
+}
+
+/**
+ * Create and immediately start a research run.
+ */
+export async function createResearchRun(
+  request: CreateResearchRunRequest
+): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to create research run' }));
+    throw new Error(error.detail || error.error || 'Failed to create research run');
   }
 
   return response.json();
@@ -120,6 +353,158 @@ export async function getTask(taskId: string): Promise<TaskStatusResponse> {
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Task not found' }));
     throw new Error(error.error || 'Task not found');
+  }
+
+  return response.json();
+}
+
+/**
+ * Get research run status and node graph.
+ */
+export async function getResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run not found' }));
+    throw new Error(error.detail || error.error || 'Research run not found');
+  }
+
+  return response.json();
+}
+
+export async function pauseResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/pause`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to pause research run' }));
+    throw new Error(error.detail || error.error || 'Failed to pause research run');
+  }
+
+  return response.json();
+}
+
+export async function resumeResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/resume`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to resume research run' }));
+    throw new Error(error.detail || error.error || 'Failed to resume research run');
+  }
+
+  return response.json();
+}
+
+export async function cancelResearchRun(researchRunId: string): Promise<ResearchRunResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Failed to cancel research run' }));
+    throw new Error(error.detail || error.error || 'Failed to cancel research run');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunEvidence(
+  researchRunId: string
+): Promise<ResearchRunEvidenceResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/evidence`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run evidence not found' }));
+    throw new Error(error.detail || error.error || 'Research run evidence not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunReport(
+  researchRunId: string
+): Promise<ResearchRunReportResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/report`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run report not found' }));
+    throw new Error(error.detail || error.error || 'Research run report not found');
+  }
+
+  return response.json();
+}
+
+export async function getPayment(paymentId: string): Promise<PaymentDetailResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/payments/${paymentId}`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Payment not found' }));
+    throw new Error(error.detail || error.error || 'Payment not found');
+  }
+
+  return response.json();
+}
+
+export async function getPaymentEvents(paymentId: string): Promise<PaymentEventsResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/payments/${paymentId}/events`, {
+    method: 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Payment events not found' }));
+    throw new Error(error.detail || error.error || 'Payment events not found');
   }
 
   return response.json();

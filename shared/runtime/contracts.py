@@ -42,6 +42,8 @@ class HandoffContext(BaseModel):
     task_id: str
     todo_id: str
     attempt_id: str
+    research_run_id: Optional[str] = None
+    node_id: Optional[str] = None
     payment_id: Optional[str] = None
     agent_id: Optional[str] = None
     budget_remaining: Optional[float] = None
@@ -75,6 +77,7 @@ class AgentSelectionResult(BaseModel):
     hedera_account_id: Optional[str] = None
     pricing: Dict[str, Any] = Field(default_factory=dict)
     support_tier: SupportTier = SupportTier.EXPERIMENTAL
+    payment_profile_status: Optional[str] = None
     payment_id: Optional[str] = None
     payment_thread_id: Optional[str] = None
     summary: Optional[str] = None
