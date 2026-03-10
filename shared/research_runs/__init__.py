@@ -14,9 +14,12 @@ from .planner import (
 )
 from .service import (
     ResearchRunExecutor,
+    ResearchRunPhase2UnavailableError,
     create_research_run,
+    get_research_run_evidence_graph_payload,
     get_research_run_evidence_payload,
     get_research_run_payload,
+    get_research_run_report_pack_payload,
     get_research_run_report_payload,
     request_cancel_research_run,
     request_pause_research_run,
@@ -34,12 +37,15 @@ __all__ = [
     "classify_research_mode",
     "build_research_run_profile",
     "ResearchRunExecutor",
+    "ResearchRunPhase2UnavailableError",
     "build_research_run_plan",
     "create_research_run",
     "request_pause_research_run",
     "request_resume_research_run",
     "request_cancel_research_run",
     "get_research_run_payload",
+    "get_research_run_evidence_graph_payload",
     "get_research_run_evidence_payload",
+    "get_research_run_report_pack_payload",
     "get_research_run_report_payload",
 ]
