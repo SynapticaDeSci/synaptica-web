@@ -16,7 +16,9 @@ export function HolRegisterBadge({ holUaid, holStatus }: HolRegisterBadgeProps) 
       ? 'HOL: Registered'
       : status === 'pending'
         ? 'HOL: Pending'
-        : 'HOL: Error'
+        : null
+
+  if (!label) return null
 
   return (
     <Badge variant="outline" className="border-sky-400/60 bg-sky-500/10 text-[10px] text-sky-100">
@@ -24,4 +26,3 @@ export function HolRegisterBadge({ holUaid, holStatus }: HolRegisterBadgeProps) 
     </Badge>
   )
 }
-

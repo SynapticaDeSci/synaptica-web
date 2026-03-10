@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart3,
@@ -49,6 +49,37 @@ function resolveAgentTags(agent: AgentRecord): string[] {
 
 const EMPTY_AGENTS: AgentRecord[] = []
 
+function normalizeHolErrorMessage(value?: string | null): string | null {
+  if (!value || !value.trim()) {
+    return null
+  }
+
+  const message = value.trim()
+
+  if (/insufficient_credits/i.test(message)) {
+    const required = message.match(/requiredCredits=(\d+(?:\.\d+)?)/i)?.[1]
+    const available = message.match(/availableCredits=(\d+(?:\.\d+)?)/i)?.[1]
+    if (required && available) {
+      return `HOL credits are insufficient (required ${required}, available ${available}).`
+    }
+    return 'HOL credits are insufficient for registration.'
+  }
+
+  if (/timed out|timeout/i.test(message)) {
+    return 'HOL request timed out. Please retry.'
+  }
+
+  if (/502|bad gateway|upstream HOL registry error page/i.test(message)) {
+    return 'HOL registry is temporarily unavailable (502). Please retry.'
+  }
+
+  if (message.length > 180) {
+    return `${message.slice(0, 177)}...`
+  }
+
+  return message
+}
+
 export function Marketplace() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedCategory, setSelectedCategory] = useState('All')
@@ -67,6 +98,7 @@ export function Marketplace() {
     void refetch()
     setSearchQuery('')
     setSelectedCategory('All')
+    setHolRegistrationErrors({})
   }, [refetch])
 
   const handleRegisterOnHol = useCallback(
@@ -82,14 +114,29 @@ export function Marketplace() {
         await registerAgentOnHol({ agent_id: agentId, mode: 'register' })
         await refetch()
       } catch (err: any) {
-        const message = err?.message || 'Failed to register agent on HOL'
-        setHolRegistrationErrors((current) => ({ ...current, [agentId]: message }))
+        const message = normalizeHolErrorMessage(err?.message || 'Failed to register agent on HOL')
+        if (message) {
+          setHolRegistrationErrors((current) => ({ ...current, [agentId]: message }))
+          window.setTimeout(() => {
+            setHolRegistrationErrors((current) => {
+              const next = { ...current }
+              delete next[agentId]
+              return next
+            })
+          }, 8000)
+        }
       } finally {
         setRegisteringAgentId(null)
       }
     },
     [refetch]
   )
+
+  useEffect(() => {
+    if (activeSource !== 'local') {
+      setHolRegistrationErrors({})
+    }
+  }, [activeSource])
 
   const agents = data ?? EMPTY_AGENTS
   const errorMessage = isError ? error?.message ?? 'Failed to load agents' : null
@@ -350,9 +397,6 @@ export function Marketplace() {
                                 ? 'HOL Registration Pending'
                                 : 'Register on HOL'}
                         </button>
-                        {agent.hol_last_error && (
-                          <span className="text-right text-[11px] text-rose-300">{agent.hol_last_error}</span>
-                        )}
                       </div>
                       {holRegistrationErrors[agent.agent_id] && (
                         <p className="mt-2 text-xs text-rose-300">{holRegistrationErrors[agent.agent_id]}</p>

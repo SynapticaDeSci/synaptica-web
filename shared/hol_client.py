@@ -92,6 +92,58 @@ def _get_register_paths() -> List[str]:
     return deduped
 
 
+def _extract_error_detail(response: httpx.Response) -> Optional[str]:
+    def _compact(value: str, *, limit: int = 260) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return f"{cleaned[: limit - 3]}..."
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("error", "detail", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                detail = value.strip()
+                credit_keys = ("requiredCredits", "availableCredits", "shortfallCredits")
+                credit_parts = [f"{item}={payload[item]}" for item in credit_keys if item in payload]
+                if credit_parts:
+                    return f"{detail} ({', '.join(credit_parts)})"
+                return detail
+        return _compact(str(payload))
+
+    if isinstance(payload, list):
+        return _compact(str(payload))
+
+    text = response.text.strip()
+    if not text:
+        return None
+
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "text/html" in content_type or "<html" in text.lower():
+        return "upstream HOL registry error page"
+
+    return _compact(text)
+
+
+def _format_http_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "request timed out while waiting for HOL registry response"
+    if isinstance(exc, httpx.ConnectError):
+        return "failed to connect to HOL registry"
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        status = f"{response.status_code} {response.reason_phrase}".strip()
+        detail = _extract_error_detail(response)
+        return f"{status}: {detail}" if detail else status
+    return str(exc)
+
+
 @dataclass
 class HolAgentSummary:
     """Lightweight representation of an agent returned from search."""
@@ -293,6 +345,7 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
 
     attempted_paths: List[str] = []
     last_error: Optional[Exception] = None
+    last_error_message: Optional[str] = None
 
     with _build_client() as client:
         for path in _get_register_paths():
@@ -301,7 +354,8 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
                 response = client.post(path, json=payload)
             except httpx.HTTPError as exc:  # noqa: BLE001
                 last_error = exc
-                logger.warning("HOL register_agent request failed for %s: %s", path, exc)
+                last_error_message = _format_http_error(exc)
+                logger.warning("HOL register_agent request failed for %s: %s", path, last_error_message)
                 break
 
             if response.status_code == 404:
@@ -311,13 +365,15 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
                     request=response.request,
                     response=response,
                 )
+                last_error_message = _format_http_error(last_error)
                 continue
 
             try:
                 response.raise_for_status()
             except httpx.HTTPError as exc:  # noqa: BLE001
                 last_error = exc
-                logger.warning("HOL register_agent failed for %s: %s", path, exc)
+                last_error_message = _format_http_error(exc)
+                logger.warning("HOL register_agent failed for %s: %s", path, last_error_message)
                 break
 
             data = response.json()
@@ -334,7 +390,8 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
         ) from last_error
 
     raise HolClientError(
-        f"HOL register_agent failed after trying paths ({attempted}): {last_error}"
+        f"HOL register_agent failed after trying paths ({attempted}): "
+        f"{last_error_message or last_error}"
     ) from last_error
 
 

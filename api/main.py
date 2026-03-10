@@ -290,11 +290,37 @@ def _set_hol_meta(
     agent.meta = meta
 
 
+def _is_transient_hol_error(message: str) -> bool:
+    text = (message or "").lower()
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "failed to connect to hol registry",
+        "connect error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "upstream hol registry error page",
+        "temporary",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _resolve_hol_error_status(previous_status: str, message: str) -> str:
+    normalized_prev = (previous_status or "unregistered").strip().lower()
+    if _is_transient_hol_error(message):
+        # Keep previously successful registrations as-is; otherwise reset to unregistered.
+        if normalized_prev in {"registered", "ok"}:
+            return "registered"
+        return "unregistered"
+    return "error"
+
+
 def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
     meta = dict(agent.meta or {})
     pricing = dict(meta.get("pricing") or {})
     categories = meta.get("categories") or []
-    endpoint_url = meta.get("endpoint_url")
+    endpoint_url = str(meta.get("endpoint_url") or "").strip()
     metadata_uri = agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
 
     if not endpoint_url:
@@ -305,14 +331,56 @@ def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
             detail="Agent metadata URI is required for HOL registration",
         )
 
+    category_tags: List[str] = []
+    if isinstance(categories, list):
+        for category in categories:
+            if isinstance(category, str):
+                cleaned = category.strip()
+                if cleaned:
+                    category_tags.append(cleaned)
+
+    capabilities: List[str] = []
+    if isinstance(agent.capabilities, list):
+        for capability in agent.capabilities:
+            if isinstance(capability, str):
+                cleaned = capability.strip()
+                if cleaned:
+                    capabilities.append(cleaned)
+
+    description = str(agent.description or "").strip()
+    short_description = " ".join(description.split())[:160] if description else agent.name
+    profile: Dict[str, Any] = {
+        "version": "1.0",
+        "type": 1,  # AI_AGENT (required by HOL HCS-11 validator)
+        "display_name": agent.name,
+        "description": description,
+        "short_description": short_description,
+        "url": endpoint_url,
+        "tags": category_tags,
+        "aiAgent": {
+            "capabilities": capabilities,
+            "metadata_uri": metadata_uri,
+            "pricing": pricing if isinstance(pricing, dict) else {},
+        },
+    }
+
+    health_check_url = meta.get("health_check_url")
+    if isinstance(health_check_url, str) and health_check_url.strip():
+        profile["aiAgent"]["health_check_url"] = health_check_url.strip()
+    if agent.hedera_account_id:
+        profile["owner"] = {"account_id": agent.hedera_account_id}
+
     return {
+        # HOL /register expects this HCS-11 profile envelope.
+        "profile": profile,
+        # Keep the legacy flat shape for compatibility with any alternate broker paths.
         "agent_id": agent.agent_id,
         "name": agent.name,
-        "description": agent.description or "",
-        "capabilities": agent.capabilities or [],
-        "categories": categories if isinstance(categories, list) else [],
+        "description": description,
+        "capabilities": capabilities,
+        "categories": category_tags,
         "endpoint_url": endpoint_url,
-        "health_check_url": meta.get("health_check_url"),
+        "health_check_url": health_check_url,
         "pricing": pricing if isinstance(pricing, dict) else {},
         "metadata_uri": metadata_uri,
         "hedera_account_id": agent.hedera_account_id,
@@ -728,6 +796,7 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
 
         payload = _build_hol_registration_payload(agent)
         current = _extract_hol_meta(agent)
+        previous_status = str(current.get("registration_status") or "unregistered")
 
         if request.mode == "register":
             _set_hol_meta(agent, status="pending", uaid=current.get("uaid"), last_error=None)
@@ -738,7 +807,13 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
             broker_response = hol_register_agent(payload, mode=request.mode)
         except HolClientError as exc:
             if request.mode == "register":
-                _set_hol_meta(agent, status="error", uaid=current.get("uaid"), last_error=str(exc))
+                next_status = _resolve_hol_error_status(previous_status, str(exc))
+                _set_hol_meta(
+                    agent,
+                    status=next_status,
+                    uaid=current.get("uaid"),
+                    last_error=str(exc),
+                )
                 db.commit()
                 db.refresh(agent)
                 try:
