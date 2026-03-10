@@ -27,6 +27,7 @@ from agents.orchestrator.agent import create_orchestrator_agent
 from .middleware import logging_middleware
 from .routes import agents as agents_routes
 from .routes import data_agent as data_agent_routes
+from .routes import credits as credits_routes
 
 # Load environment variables
 load_dotenv()
@@ -275,6 +276,7 @@ app.middleware("http")(logging_middleware)
 # Include routers
 app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 app.include_router(data_agent_routes.router, prefix="/api/data-agent", tags=["data-agent"])
+app.include_router(credits_routes.router, prefix="/api/credits", tags=["credits"])
 
 
 @app.get("/")

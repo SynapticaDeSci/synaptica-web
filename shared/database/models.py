@@ -300,3 +300,30 @@ class AgentsCacheEntry(Base):
     synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserCredits(Base):
+    """Fiat-purchased credits balance per user."""
+
+    __tablename__ = "user_credits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, unique=True, index=True)
+    credits = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StripeTransaction(Base):
+    """Record of each Stripe checkout session for credits."""
+
+    __tablename__ = "stripe_transactions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
+    stripe_session_id = Column(String, nullable=False, unique=True)
+    credits_purchased = Column(Integer, nullable=False)
+    amount_usd_cents = Column(Integer, nullable=False)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)

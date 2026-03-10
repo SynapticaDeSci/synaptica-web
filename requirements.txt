@@ -39,6 +39,9 @@ ipfshttpclient  # IPFS integration (optional)
 python-docx>=1.0.0  # Document generation
 reportlab>=4.0.0  # PDF generation (optional)
 
+# Stripe
+stripe>=8.0.0
+
 # Development
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
