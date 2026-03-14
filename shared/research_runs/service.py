@@ -806,8 +806,20 @@ def _persist_phase2_claims_and_links(
     }
 
     claims = [item for item in (final_answer.get("claims") or []) if isinstance(item, dict)]
+    used_claim_ids: set[str] = set()
     for claim_index, item in enumerate(claims, start=1):
-        claim_id = str(item.get("claim_id") or f"C{claim_index}").strip()
+        raw_claim_id = item.get("claim_id")
+        candidate_id = str(raw_claim_id).strip() if raw_claim_id is not None else ""
+        if not candidate_id:
+            candidate_id = f"C{claim_index}"
+
+        claim_id = candidate_id
+        suffix = 2
+        while claim_id in used_claim_ids:
+            claim_id = f"{candidate_id}-{suffix}"
+            suffix += 1
+        used_claim_ids.add(claim_id)
+
         claim_text = str(item.get("claim") or "").strip() or f"Claim {claim_index}"
         supporting_citation_ids: List[str] = []
         seen_citation_ids = set()
@@ -991,9 +1003,10 @@ def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[
         return None
 
     record, artifacts, _claims, _links = loaded
-    evidence_payload = get_research_run_evidence_payload(research_run_id) or {}
-    report_payload = get_research_run_report_payload(research_run_id) or {}
-    graph_payload = get_research_run_evidence_graph_payload(research_run_id) or {}
+    run_payload = get_research_run_payload(research_run_id) or {}
+    evidence_payload = run_payload.get("evidence") or {}
+    report_payload = run_payload.get("report") or {}
+    graph_payload = run_payload.get("evidence_graph") or {}
 
     artifact_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
     artifact_by_citation = {
