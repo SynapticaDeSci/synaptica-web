@@ -25,7 +25,59 @@ from .tools import (
 )
 
 
-def create_verifier_agent(use_research_mode: bool = False) -> AsyncStrandsAgent:
+def _build_verifier_tools(
+    *,
+    use_research_mode: bool,
+    include_payment_tools: bool,
+) -> tuple[list, str, str]:
+    """Assemble verifier tools and prompt for a specific runtime mode."""
+
+    tools = [
+        verify_task_result,
+        validate_output_schema,
+        check_quality_metrics,
+    ]
+    if include_payment_tools:
+        tools.extend([release_payment, reject_and_refund])
+    tools.extend(
+        [
+            run_verification_code,
+            run_unit_tests,
+            validate_code_output,
+            search_web,
+            verify_fact,
+            check_data_source_credibility,
+            research_best_practices,
+        ]
+    )
+
+    if use_research_mode:
+        tools.extend(
+            [
+                verify_research_output,
+                calculate_quality_score,
+                check_citation_quality,
+                validate_statistical_significance,
+                generate_feedback_report,
+            ]
+        )
+        system_prompt = RESEARCH_VERIFIER_SYSTEM_PROMPT
+    else:
+        system_prompt = VERIFIER_SYSTEM_PROMPT
+
+    description = (
+        "Verifies outputs and manages release or refund decisions."
+        if include_payment_tools
+        else "Verifies research outputs with analysis-only tools."
+    )
+    return tools, system_prompt, description
+
+
+def create_verifier_agent(
+    use_research_mode: bool = False,
+    *,
+    include_payment_tools: bool = True,
+) -> AsyncStrandsAgent:
     """
     Create and configure the Verifier agent with advanced verification capabilities.
 
@@ -41,38 +93,10 @@ def create_verifier_agent(use_research_mode: bool = False) -> AsyncStrandsAgent:
     Returns:
         Configured OpenAI Agent instance
     """
-    # Base tools (always included)
-    tools = [
-        # Core verification
-        verify_task_result,
-        validate_output_schema,
-        check_quality_metrics,
-        # Payment management
-        release_payment,
-        reject_and_refund,
-        # Code execution
-        run_verification_code,
-        run_unit_tests,
-        validate_code_output,
-        # Web search & fact-checking
-        search_web,
-        verify_fact,
-        check_data_source_credibility,
-        research_best_practices,
-    ]
-
-    # Add research-specific tools if in research mode
-    if use_research_mode:
-        tools.extend([
-            verify_research_output,
-            calculate_quality_score,
-            check_citation_quality,
-            validate_statistical_significance,
-            generate_feedback_report,
-        ])
-        system_prompt = RESEARCH_VERIFIER_SYSTEM_PROMPT
-    else:
-        system_prompt = VERIFIER_SYSTEM_PROMPT
+    tools, system_prompt, description = _build_verifier_tools(
+        use_research_mode=use_research_mode,
+        include_payment_tools=include_payment_tools,
+    )
 
     agent = create_strands_openai_agent(
         system_prompt=system_prompt,
@@ -80,7 +104,7 @@ def create_verifier_agent(use_research_mode: bool = False) -> AsyncStrandsAgent:
         model_env_var="VERIFIER_MODEL",
         agent_id="verifier-agent",
         name="Verifier",
-        description="Verifies outputs and manages release or refund decisions.",
+        description=description,
     )
 
     return agent
@@ -95,7 +119,7 @@ def create_research_verifier_agent() -> AsyncStrandsAgent:
     Returns:
         Configured OpenAI Agent instance for research verification
     """
-    return create_verifier_agent(use_research_mode=True)
+    return create_verifier_agent(use_research_mode=True, include_payment_tools=False)
 
 
 # Example usage
