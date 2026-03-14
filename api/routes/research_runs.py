@@ -159,6 +159,9 @@ class ResearchRunPersistedClaimResponse(BaseModel):
     claim_order: int
     claim: str
     confidence: Optional[str] = None
+    confidence_score: Optional[float] = None
+    contradiction_status: Optional[str] = None
+    contradiction_reasons: List[str] = Field(default_factory=list)
     supporting_artifact_keys: List[str] = Field(default_factory=list)
     supporting_citation_ids: List[str] = Field(default_factory=list)
 
@@ -181,6 +184,9 @@ class ResearchRunEvidenceGraphSummaryResponse(BaseModel):
     filtered_artifact_count: int
     claim_count: int
     link_count: int
+    high_confidence_claim_count: int = 0
+    mixed_evidence_claim_count: int = 0
+    insufficient_evidence_claim_count: int = 0
 
 
 class ResearchRunEvidenceGraphResponse(BaseModel):

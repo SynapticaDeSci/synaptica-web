@@ -14,5 +14,8 @@ class EvidenceGraphClaimPayload(BaseModel):
     claim_order: int
     claim: str
     confidence: str | None = None
+    confidence_score: float | None = None
+    contradiction_status: str | None = None
+    contradiction_reasons: list[str] = Field(default_factory=list)
     supporting_artifact_keys: list[str] = Field(default_factory=list)
     supporting_citation_ids: list[str] = Field(default_factory=list)

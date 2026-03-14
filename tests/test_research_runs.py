@@ -1,7 +1,9 @@
 import asyncio
+import json
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
@@ -11,7 +13,14 @@ from sqlalchemy import create_engine, inspect, text
 
 from api.main import app
 from agents.executor.tools import research_api_executor
-from agents.orchestrator.tools.agent_tools import _evaluate_research_quality_contract
+from agents.orchestrator.tools.agent_tools import (
+    _evaluate_research_quality_contract,
+    _extract_json_object,
+    _execute_selected_agent,
+)
+from agents.verifier.agent import create_research_verifier_agent
+from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
+from agents.verifier.tools.research_verification_tools import calculate_quality_score
 from agents.research.phase2_knowledge.literature_miner.agent import LiteratureMinerAgent
 from shared.database import (
     A2AEvent,
@@ -38,6 +47,10 @@ from shared.research_runs.planner import (
     ResearchMode,
     build_research_run_profile,
     classify_research_mode,
+)
+from shared.research_runs.service import (
+    _build_phase2_claim_scoring_summary,
+    _compute_phase2_claim_scoring,
 )
 from shared.runtime import load_task_snapshot
 
@@ -75,6 +88,7 @@ def _reset_runtime_state():
 def client(monkeypatch):
     _reset_runtime_state()
     monkeypatch.setenv("PAYMENT_MODE", "offline")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "0")
     monkeypatch.delenv("X402_OFFLINE", raising=False)
     monkeypatch.setattr("api.main.ensure_registry_cache", lambda: None)
     monkeypatch.setattr("api.routes.agents.ensure_registry_cache", lambda force=False: None)
@@ -595,6 +609,60 @@ def _poll_research_run(client: TestClient, research_run_id: str, predicate, time
     pytest.fail(f"Timed out waiting for research run {research_run_id}: {last_payload}")
 
 
+def _phase2_test_claim(
+    *,
+    claim_id: str = "C1",
+    confidence: str | None = "high",
+    supporting_citation_ids: list[str] | None = None,
+):
+    return SimpleNamespace(
+        claim_id=claim_id,
+        confidence=confidence,
+        meta={"supporting_citation_ids": supporting_citation_ids or ["S1"]},
+    )
+
+
+def _phase2_test_artifact(
+    *,
+    artifact_key: str = "S1",
+    publisher: str | None = "Reuters",
+    source_type: str | None = "news",
+    snippet: str | None = "Baseline supporting evidence.",
+    display_snippet: str | None = None,
+    filtered_reason: str | None = None,
+    quality_flags: list[str] | None = None,
+    freshness_metadata: dict | None = None,
+    meta: dict | None = None,
+):
+    return SimpleNamespace(
+        artifact_key=artifact_key,
+        publisher=publisher,
+        source_type=source_type,
+        title=f"Artifact {artifact_key}",
+        snippet=snippet,
+        display_snippet=display_snippet,
+        filtered_reason=filtered_reason,
+        quality_flags=quality_flags or [],
+        freshness_metadata=freshness_metadata or {},
+        meta=meta or {},
+    )
+
+
+def _extract_strands_request(prompt: str) -> dict:
+    marker = "REQUEST_JSON:\n"
+    return json.loads(prompt.split(marker, 1)[1])
+
+
+async def _supported_agent_metadata(agent_id: str) -> dict:
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "support_tier": "supported",
+        "name": agent_id,
+        "endpoint_url": f"https://unit.test/{agent_id}",
+    }
+
+
 def test_alembic_upgrade_preserves_phase0_data(tmp_path, monkeypatch):
     db_path = tmp_path / "migration-test.db"
     database_url = f"sqlite:///{db_path}"
@@ -879,11 +947,17 @@ def test_research_run_evidence_graph_and_report_pack_routes(client: TestClient):
         "filtered_artifact_count": 0,
         "claim_count": 3,
         "link_count": 4,
+        "high_confidence_claim_count": 1,
+        "mixed_evidence_claim_count": 3,
+        "insufficient_evidence_claim_count": 0,
     }
     assert [artifact["artifact_key"] for artifact in graph_payload["artifacts"]] == [
         f"S{index}" for index in range(1, 7)
     ]
     assert [claim["claim_id"] for claim in graph_payload["claims"]] == ["C1", "C2", "C3"]
+    assert graph_payload["claims"][0]["confidence_score"] == 0.95
+    assert graph_payload["claims"][0]["contradiction_status"] == "mixed"
+    assert graph_payload["claims"][0]["contradiction_reasons"]
     assert graph_payload["claims"][0]["supporting_citation_ids"] == ["S1", "S2"]
     assert graph_payload["claims"][2]["supporting_citation_ids"] == ["S1"]
     assert graph_payload["links"][0] == {
@@ -902,10 +976,653 @@ def test_research_run_evidence_graph_and_report_pack_routes(client: TestClient):
     assert report_pack_payload["rewritten_research_brief"].startswith("Investigate:")
     assert report_pack_payload["answer_markdown"].startswith("## Summary")
     assert [claim["claim_id"] for claim in report_pack_payload["claims"]] == ["C1", "C2", "C3"]
+    assert report_pack_payload["claims"][0]["confidence_score"] == 0.95
     assert [citation["artifact_key"] for citation in report_pack_payload["citations"]] == ["S1", "S2"]
     assert [item["artifact_key"] for item in report_pack_payload["supporting_evidence"]] == ["S1", "S2"]
     assert len(report_pack_payload["claim_lineage"]) == 4
     assert report_pack_payload["quality_summary"]["citation_coverage"] == 1.0
+    assert report_pack_payload["quality_summary"]["claim_scoring"] == {
+        "claim_count": 3,
+        "high_confidence_claim_count": 1,
+        "mixed_evidence_claim_count": 3,
+        "insufficient_evidence_claim_count": 0,
+        "average_confidence_score": 0.65,
+    }
+
+
+def test_phase2_claim_scoring_rewards_multi_source_supported_claims():
+    scoring = _compute_phase2_claim_scoring(
+        run_record=SimpleNamespace(meta={"freshness_required": False}, result={}),
+        claim=_phase2_test_claim(confidence="high", supporting_citation_ids=["S1", "S2"]),
+        supporting_artifacts=[
+            _phase2_test_artifact(artifact_key="S1", publisher="Reuters", source_type="news"),
+            _phase2_test_artifact(artifact_key="S2", publisher="WHO", source_type="primary"),
+        ],
+        uncovered_claim_ids=set(),
+        critic_findings=[],
+    )
+
+    assert scoring["confidence_score"] == 0.95
+    assert scoring["contradiction_status"] == "none"
+    assert scoring["contradiction_reasons"] == []
+
+
+def test_phase2_claim_scoring_flags_insufficient_evidence():
+    scoring = _compute_phase2_claim_scoring(
+        run_record=SimpleNamespace(meta={"freshness_required": False}, result={}),
+        claim=_phase2_test_claim(confidence="medium", supporting_citation_ids=[]),
+        supporting_artifacts=[],
+        uncovered_claim_ids={"C1"},
+        critic_findings=[],
+    )
+
+    assert scoring["confidence_score"] == 0.5
+    assert scoring["contradiction_status"] == "insufficient_evidence"
+    assert any("citation" in reason.lower() or "evidence" in reason.lower() for reason in scoring["contradiction_reasons"])
+
+
+def test_phase2_claim_scoring_flags_mixed_evidence_from_markers():
+    scoring = _compute_phase2_claim_scoring(
+        run_record=SimpleNamespace(meta={"freshness_required": False}, result={}),
+        claim=_phase2_test_claim(confidence="high", supporting_citation_ids=["S1", "S2"]),
+        supporting_artifacts=[
+            _phase2_test_artifact(
+                artifact_key="S1",
+                snippet="Reuters described conflicting reports across exchanges.",
+            ),
+            _phase2_test_artifact(
+                artifact_key="S2",
+                publisher="AP",
+                source_type="primary",
+                snippet="Primary note with stable sourcing.",
+            ),
+        ],
+        uncovered_claim_ids=set(),
+        critic_findings=[],
+    )
+
+    assert scoring["confidence_score"] == 0.95
+    assert scoring["contradiction_status"] == "mixed"
+    assert any("conflict" in reason.lower() for reason in scoring["contradiction_reasons"])
+
+
+def test_phase2_claim_scoring_penalizes_stale_support():
+    fresh_scoring = _compute_phase2_claim_scoring(
+        run_record=SimpleNamespace(meta={"freshness_required": True}, result={}),
+        claim=_phase2_test_claim(confidence="high", supporting_citation_ids=["S1", "S2"]),
+        supporting_artifacts=[
+            _phase2_test_artifact(
+                artifact_key="S1",
+                freshness_metadata={"is_fresh": True},
+            ),
+            _phase2_test_artifact(
+                artifact_key="S2",
+                publisher="AP",
+                source_type="primary",
+                freshness_metadata={"is_fresh": True},
+            ),
+        ],
+        uncovered_claim_ids=set(),
+        critic_findings=[],
+    )
+    stale_scoring = _compute_phase2_claim_scoring(
+        run_record=SimpleNamespace(meta={"freshness_required": True}, result={}),
+        claim=_phase2_test_claim(confidence="high", supporting_citation_ids=["S1", "S2"]),
+        supporting_artifacts=[
+            _phase2_test_artifact(
+                artifact_key="S1",
+                freshness_metadata={"is_fresh": False},
+            ),
+            _phase2_test_artifact(
+                artifact_key="S2",
+                publisher="AP",
+                source_type="primary",
+                freshness_metadata={"is_fresh": True},
+            ),
+        ],
+        uncovered_claim_ids=set(),
+        critic_findings=[],
+    )
+
+    assert fresh_scoring["confidence_score"] == 0.95
+    assert stale_scoring["confidence_score"] == 0.8
+
+
+def test_phase2_claim_scoring_summary_counts():
+    claims = [
+        SimpleNamespace(meta={"phase2_scoring": {"confidence_score": 0.95, "contradiction_status": "mixed"}}),
+        SimpleNamespace(meta={"phase2_scoring": {"confidence_score": 0.5, "contradiction_status": "insufficient_evidence"}}),
+        SimpleNamespace(meta={"phase2_scoring": {"confidence_score": 0.5, "contradiction_status": "mixed"}}),
+    ]
+
+    assert _build_phase2_claim_scoring_summary(claims) == {
+        "claim_count": 3,
+        "high_confidence_claim_count": 1,
+        "mixed_evidence_claim_count": 2,
+        "insufficient_evidence_claim_count": 1,
+        "average_confidence_score": 0.65,
+    }
+
+
+def test_research_run_uses_strands_executor_and_verifier_when_available(client: TestClient, monkeypatch):
+    call_counts = {"executor": 0, "verifier": 0}
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            call_counts["executor"] += 1
+            request = _extract_strands_request(prompt)
+            response = await research_api_executor._post_agent_request(
+                request.get("endpoint_url") or f"https://unit.test/{request['agent_domain']}",
+                {
+                    "request": request["task_description"],
+                    "context": request["context"],
+                    "metadata": request["metadata"],
+                },
+            )
+            return json.dumps(
+                {
+                    "success": bool(response.get("success")),
+                    "agent_id": request["agent_domain"],
+                    "result": response.get("result"),
+                    "metadata": response.get("metadata") or {},
+                    "error": response.get("error"),
+                }
+            )
+
+    class FakeStrandsVerifier:
+        model = "fake-verifier"
+
+        async def run(self, prompt: str) -> str:
+            call_counts["verifier"] += 1
+            request = _extract_strands_request(prompt)
+            return json.dumps(
+                {
+                    "success": True,
+                    "verification_passed": True,
+                    "overall_score": 91,
+                    "dimension_scores": {
+                        "completeness": 91,
+                        "correctness": 92,
+                        "academic_rigor": 90,
+                        "clarity": 93,
+                        "innovation": 80,
+                        "ethics": 94,
+                    },
+                    "feedback": f"Verified for {request['verification_criteria'].get('agent_role')}",
+                    "decision": "auto_approve",
+                }
+            )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_research_verifier_agent",
+        lambda: FakeStrandsVerifier(),
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+
+    completed = _poll_research_run(
+        client,
+        response.json()["id"],
+        lambda item: item["status"] == "completed",
+    )
+
+    assert call_counts["executor"] > 0
+    assert call_counts["verifier"] > 0
+    assert completed["status"] == "completed"
+    assert completed["nodes"][-1]["attempts"][0]["verification_score"] == 91
+
+
+def test_research_run_normalizes_double_wrapped_plan_query_result(client: TestClient, monkeypatch):
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            request = _extract_strands_request(prompt)
+            response = await research_api_executor._post_agent_request(
+                request.get("endpoint_url") or f"https://unit.test/{request['agent_domain']}",
+                {
+                    "request": request["task_description"],
+                    "context": request["context"],
+                    "metadata": request["metadata"],
+                },
+            )
+
+            result_payload = response.get("result")
+            if request["context"].get("node_strategy") == "plan_query":
+                result_payload = {
+                    "success": True,
+                    "agent_id": request["agent_domain"],
+                    "result": result_payload,
+                    "metadata": response.get("metadata") or {},
+                }
+
+            return json.dumps(
+                {
+                    "success": bool(response.get("success")),
+                    "agent_id": request["agent_domain"],
+                    "result": result_payload,
+                    "metadata": response.get("metadata") or {},
+                    "error": response.get("error"),
+                }
+            )
+
+    class FakeStrandsVerifier:
+        model = "fake-verifier"
+
+        async def run(self, prompt: str) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "success": True,
+                    "verification_passed": True,
+                    "overall_score": 91,
+                    "dimension_scores": {
+                        "completeness": 91,
+                        "correctness": 92,
+                        "academic_rigor": 90,
+                        "clarity": 93,
+                        "innovation": 80,
+                        "ethics": 94,
+                    },
+                    "feedback": "Verified",
+                    "decision": "auto_approve",
+                }
+            )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_research_verifier_agent",
+        lambda: FakeStrandsVerifier(),
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+
+    completed = _poll_research_run(
+        client,
+        response.json()["id"],
+        lambda item: item["status"] == "completed",
+    )
+
+    plan_node = next(node for node in completed["nodes"] if node["node_id"] == "plan_query")
+    assert plan_node["status"] == "completed"
+    assert plan_node["result"]["research_question"]
+    assert plan_node["result"]["search_queries"]
+
+
+def test_research_run_normalizes_stringified_plan_query_result(client: TestClient, monkeypatch):
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            request = _extract_strands_request(prompt)
+            response = await research_api_executor._post_agent_request(
+                request.get("endpoint_url") or f"https://unit.test/{request['agent_domain']}",
+                {
+                    "request": request["task_description"],
+                    "context": request["context"],
+                    "metadata": request["metadata"],
+                },
+            )
+
+            result_payload = response.get("result")
+            if request["context"].get("node_strategy") == "plan_query":
+                result_payload = json.dumps(result_payload)
+
+            return json.dumps(
+                {
+                    "success": bool(response.get("success")),
+                    "agent_id": request["agent_domain"],
+                    "result": result_payload,
+                    "metadata": response.get("metadata") or {},
+                    "error": response.get("error"),
+                }
+            )
+
+    class FakeStrandsVerifier:
+        model = "fake-verifier"
+
+        async def run(self, prompt: str) -> str:
+            del prompt
+            return json.dumps(
+                {
+                    "success": True,
+                    "verification_passed": True,
+                    "overall_score": 91,
+                    "dimension_scores": {
+                        "completeness": 91,
+                        "correctness": 92,
+                        "academic_rigor": 90,
+                        "clarity": 93,
+                        "innovation": 80,
+                        "ethics": 94,
+                    },
+                    "feedback": "Verified",
+                    "decision": "auto_approve",
+                }
+            )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_research_verifier_agent",
+        lambda: FakeStrandsVerifier(),
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+
+    completed = _poll_research_run(
+        client,
+        response.json()["id"],
+        lambda item: item["status"] == "completed",
+    )
+
+    plan_node = next(node for node in completed["nodes"] if node["node_id"] == "plan_query")
+    assert plan_node["status"] == "completed"
+    assert plan_node["result"]["rewritten_research_brief"].startswith("Investigate:")
+
+
+def test_strands_executor_missing_success_is_treated_as_failure(monkeypatch):
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.get_agent_metadata",
+        _supported_agent_metadata,
+    )
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            request = _extract_strands_request(prompt)
+            return json.dumps(
+                {
+                    "agent_id": request["agent_domain"],
+                    "error": "missing success flag",
+                }
+            )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+
+    result = asyncio.run(
+        _execute_selected_agent(
+            task_id="task-1",
+            agent_domain="literature-miner-001",
+            task_description="Gather evidence",
+            execution_parameters={"node_strategy": "gather_evidence"},
+            prefer_strands_backend=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "missing success flag"
+
+
+def test_strands_executor_parse_error_does_not_fallback_or_rerun(monkeypatch):
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.get_agent_metadata",
+        _supported_agent_metadata,
+    )
+    call_counts = {"submitted": 0, "fallback": 0}
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            del prompt
+            call_counts["submitted"] += 1
+            return "not json"
+
+    async def _unexpected_fallback(**kwargs):
+        del kwargs
+        call_counts["fallback"] += 1
+        return {"success": True, "result": {"unexpected": True}}
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.executor_agent",
+        _unexpected_fallback,
+    )
+
+    result = asyncio.run(
+        _execute_selected_agent(
+            task_id="task-2",
+            agent_domain="literature-miner-001",
+            task_description="Gather evidence",
+            execution_parameters={"node_strategy": "gather_evidence"},
+            prefer_strands_backend=True,
+        )
+    )
+
+    assert result["success"] is False
+    assert "Strands executor step failed" in result["error"]
+    assert call_counts == {"submitted": 1, "fallback": 0}
+
+
+def test_extract_json_object_prefers_last_matching_executor_envelope():
+    raw_response = """
+    Thinking about the request.
+    {"agent_domain":"problem-framer-001","task_description":"Plan the investigation","context":{"node_strategy":"plan_query"}}
+    Tool returned the final payload.
+    {"success": true, "agent_id": "problem-framer-001", "result": {"research_question": "What is the impact of autonomous agent payments?"}, "metadata": {}}
+    """
+
+    parsed = _extract_json_object(raw_response, expected_kind="executor")
+
+    assert parsed["success"] is True
+    assert parsed["agent_id"] == "problem-framer-001"
+    assert parsed["result"]["research_question"].startswith("What is the impact")
+
+
+def test_research_verifier_agent_excludes_payment_mutation_tools(monkeypatch):
+    captured = {}
+
+    def _fake_create_strands_openai_agent(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(model="fake-verifier")
+
+    monkeypatch.setattr(
+        "agents.verifier.agent.create_strands_openai_agent",
+        _fake_create_strands_openai_agent,
+    )
+
+    agent = create_research_verifier_agent()
+
+    assert agent.model == "fake-verifier"
+    assert release_payment not in captured["tools"]
+    assert reject_and_refund not in captured["tools"]
+    assert calculate_quality_score in captured["tools"]
+
+
+def test_research_run_falls_back_when_strands_backend_is_unavailable(client: TestClient, monkeypatch):
+    call_counts = {"executor": 0, "verifier": 0}
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+
+    def _raise_executor():
+        call_counts["executor"] += 1
+        raise RuntimeError("executor unavailable")
+
+    def _raise_verifier():
+        call_counts["verifier"] += 1
+        raise RuntimeError("verifier unavailable")
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        _raise_executor,
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_research_verifier_agent",
+        _raise_verifier,
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+
+    completed = _poll_research_run(
+        client,
+        response.json()["id"],
+        lambda item: item["status"] == "completed",
+    )
+
+    assert call_counts["executor"] > 0
+    assert call_counts["verifier"] > 0
+    assert completed["status"] == "completed"
+    assert completed["nodes"][-1]["attempts"][0]["verification_score"] == 88
+
+
+def test_research_run_rejects_legacy_literature_miner_payload_before_review(
+    client: TestClient, monkeypatch
+):
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    verifier_calls = []
+
+    class FakeStrandsExecutor:
+        model = "fake-executor"
+
+        async def run(self, prompt: str) -> str:
+            request = _extract_strands_request(prompt)
+            context = request["context"]
+            if context.get("node_strategy") == "gather_evidence":
+                return json.dumps(
+                    {
+                        "success": True,
+                        "agent_id": request["agent_domain"],
+                        "result": {
+                            "query": request["task_description"],
+                            "total_found": 0,
+                            "papers": [],
+                            "sources": ["ArXiv", "Semantic Scholar", "Web"],
+                            "search_date": "2026-03-14T00:00:00Z",
+                            "filtering_criteria": {
+                                "date_range": "1990-2026",
+                                "min_relevance": 0.3,
+                                "max_results": 10,
+                            },
+                            "coverage_summary": {
+                                "Summary": "No retriever was available.",
+                                "Evidence": [],
+                                "Limitations": ["No source cards were collected."],
+                            },
+                            "uncovered_claim_targets": [
+                                {
+                                    "claim_id": "C1",
+                                    "claim_target": "Direct answer",
+                                    "reason_uncovered": "No live search execution available.",
+                                }
+                            ],
+                            "rounds_completed": {
+                                "evidence_rounds": 0,
+                                "critique_rounds": 0,
+                            },
+                        },
+                        "metadata": {},
+                    }
+                )
+
+            response = await research_api_executor._post_agent_request(
+                request.get("endpoint_url") or f"https://unit.test/{request['agent_domain']}",
+                {
+                    "request": request["task_description"],
+                    "context": request["context"],
+                    "metadata": request["metadata"],
+                },
+            )
+            return json.dumps(
+                {
+                    "success": bool(response.get("success")),
+                    "agent_id": request["agent_domain"],
+                    "result": response.get("result"),
+                    "metadata": response.get("metadata") or {},
+                    "error": response.get("error"),
+                }
+            )
+
+    class FakeStrandsVerifier:
+        model = "fake-verifier"
+
+        async def run(self, prompt: str) -> str:
+            request = _extract_strands_request(prompt)
+            verifier_calls.append(request["verification_criteria"].get("node_strategy"))
+            return json.dumps(
+                {
+                    "success": True,
+                    "verification_passed": True,
+                    "overall_score": 91,
+                    "dimension_scores": {
+                        "completeness": 91,
+                        "correctness": 92,
+                        "academic_rigor": 90,
+                        "clarity": 93,
+                        "innovation": 80,
+                        "ethics": 94,
+                    },
+                    "feedback": "Verified",
+                    "decision": "auto_approve",
+                }
+            )
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_executor_agent",
+        lambda: FakeStrandsExecutor(),
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.create_research_verifier_agent",
+        lambda: FakeStrandsVerifier(),
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review impact of Iran war on oil prices."},
+    )
+    assert response.status_code == 202
+
+    failed = _poll_research_run(
+        client,
+        response.json()["id"],
+        lambda item: item["status"] == "failed",
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["nodes"][1]["node_id"] == "gather_evidence"
+    assert failed["nodes"][1]["status"] == "failed"
+    assert "Execution result failed contract validation" in failed["error"]
+    assert verifier_calls == ["plan_query"]
 
 
 def test_research_run_evidence_graph_uses_persisted_artifacts_before_completion(
