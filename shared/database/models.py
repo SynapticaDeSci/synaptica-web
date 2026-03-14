@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     Boolean,
     UniqueConstraint,
+    ForeignKeyConstraint,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -562,6 +563,16 @@ class ClaimLink(Base):
             "artifact_key",
             "relation_type",
             name="uq_claim_links_relation",
+        ),
+        ForeignKeyConstraint(
+            ["research_run_id", "claim_id"],
+            ["claims.research_run_id", "claims.claim_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["research_run_id", "artifact_key"],
+            ["evidence_artifacts.research_run_id", "evidence_artifacts.artifact_key"],
+            ondelete="CASCADE",
         ),
     )
 
