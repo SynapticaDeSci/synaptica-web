@@ -78,6 +78,25 @@ RUN_CONTROL_CANCELLED = "cancelled"
 PHASE2_GRAPH_SCHEMA_VERSION = "phase2.v1"
 PHASE2_GRAPH_SCHEMA_META_KEY = "evidence_graph_schema_version"
 CLAIM_RELATION_SUPPORTS = "supports"
+PHASE2_CLAIM_SCORING_META_KEY = "phase2_scoring"
+PHASE2_HIGH_CONFIDENCE_THRESHOLD = 0.8
+PHASE2_CONTRADICTION_STATUS_NONE = "none"
+PHASE2_CONTRADICTION_STATUS_MIXED = "mixed"
+PHASE2_CONTRADICTION_STATUS_INSUFFICIENT = "insufficient_evidence"
+
+_PHASE2_CONFIDENCE_BASE_SCORES = {
+    "high": 0.85,
+    "medium": 0.65,
+    "low": 0.40,
+}
+_PHASE2_CONTRADICTION_MARKERS = (
+    "conflict",
+    "contradict",
+    "mixed",
+    "disputed",
+    "counterpoint",
+    "uncertain",
+)
 
 _ARTIFACT_STATUS_PRECEDENCE = {
     "gathered": 0,
@@ -235,6 +254,241 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _phase2_scoring_from_claim_meta(claim: Claim) -> Dict[str, Any]:
+    meta = dict(claim.meta or {})
+    scoring = meta.get(PHASE2_CLAIM_SCORING_META_KEY) or {}
+    return scoring if isinstance(scoring, dict) else {}
+
+
+def _collect_phase2_marker_hits(values: List[Any]) -> List[str]:
+    hits = set()
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip().lower()
+        if not normalized:
+            continue
+        for marker in _PHASE2_CONTRADICTION_MARKERS:
+            if marker in normalized:
+                hits.add(marker)
+    return sorted(hits)
+
+
+def _compute_phase2_claim_scoring(
+    *,
+    run_record: ResearchRun,
+    claim: Claim,
+    supporting_artifacts: List[EvidenceArtifact],
+    uncovered_claim_ids: set[str],
+    critic_findings: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    confidence_label = str(claim.confidence or "").strip().lower()
+    confidence_score = _PHASE2_CONFIDENCE_BASE_SCORES.get(confidence_label, 0.50)
+    supporting_count = len(supporting_artifacts)
+    publishers = {
+        str(artifact.publisher).strip()
+        for artifact in supporting_artifacts
+        if artifact.publisher
+    }
+    source_types = {
+        str(artifact.source_type or "").strip().lower()
+        for artifact in supporting_artifacts
+        if artifact.source_type
+    }
+    fresh_required = bool((run_record.meta or {}).get("freshness_required", False))
+    has_stale_support = fresh_required and any(
+        isinstance(artifact.freshness_metadata, dict)
+        and artifact.freshness_metadata.get("is_fresh") is False
+        for artifact in supporting_artifacts
+    )
+    has_high_severity_critic_finding = any(
+        str(finding.get("severity") or "").strip().lower() == "high"
+        for finding in critic_findings
+        if isinstance(finding, dict)
+    )
+
+    if supporting_count >= 2:
+        confidence_score += 0.05
+    else:
+        confidence_score -= 0.15
+
+    if len(publishers) >= 2 or bool(source_types & {"primary", "academic"}):
+        confidence_score += 0.05
+    if has_stale_support:
+        confidence_score -= 0.15
+    if has_high_severity_critic_finding:
+        confidence_score -= 0.10
+    confidence_score = round(max(0.0, min(1.0, confidence_score)), 3)
+
+    claim_meta = dict(claim.meta or {})
+    supporting_citation_ids = _coerce_string_list(claim_meta.get("supporting_citation_ids") or [])
+    has_placeholder_artifact = any(
+        bool(dict(artifact.meta or {}).get("placeholder"))
+        for artifact in supporting_artifacts
+    )
+    has_unresolved_citation_gap = (
+        not supporting_artifacts
+        or not supporting_citation_ids
+        or has_placeholder_artifact
+        or claim.claim_id in uncovered_claim_ids
+        or len(supporting_artifacts) < len(supporting_citation_ids)
+    )
+
+    contradiction_reasons: List[str] = []
+    if not supporting_artifacts:
+        contradiction_reasons.append("No persisted supporting evidence artifacts are linked to this claim.")
+    if not supporting_citation_ids:
+        contradiction_reasons.append("The claim is missing supporting citation IDs.")
+    if has_placeholder_artifact or len(supporting_artifacts) < len(supporting_citation_ids):
+        contradiction_reasons.append(
+            "Supporting citations were not fully resolved to persisted evidence artifacts."
+        )
+    if claim.claim_id in uncovered_claim_ids:
+        contradiction_reasons.append(
+            "Research quality checks flagged unresolved citation coverage gaps for this claim."
+        )
+    if has_unresolved_citation_gap:
+        contradiction_status = PHASE2_CONTRADICTION_STATUS_INSUFFICIENT
+    else:
+        artifact_marker_hits = _collect_phase2_marker_hits(
+            [
+                artifact.title
+                for artifact in supporting_artifacts
+            ]
+            + [artifact.snippet for artifact in supporting_artifacts]
+            + [artifact.display_snippet for artifact in supporting_artifacts]
+            + [artifact.filtered_reason for artifact in supporting_artifacts]
+            + [
+                flag
+                for artifact in supporting_artifacts
+                for flag in _coerce_string_list(artifact.quality_flags or [])
+            ]
+        )
+        critic_marker_hits = _collect_phase2_marker_hits(
+            [
+                finding.get("issue")
+                for finding in critic_findings
+                if isinstance(finding, dict)
+            ]
+            + [
+                finding.get("recommendation")
+                for finding in critic_findings
+                if isinstance(finding, dict)
+            ]
+        )
+        if artifact_marker_hits or critic_marker_hits:
+            contradiction_status = PHASE2_CONTRADICTION_STATUS_MIXED
+            if artifact_marker_hits:
+                contradiction_reasons.append(
+                    "Supporting evidence contains disagreement or uncertainty markers: "
+                    + ", ".join(artifact_marker_hits)
+                    + "."
+                )
+            if critic_marker_hits:
+                contradiction_reasons.append(
+                    "Critic findings highlight disagreement or uncertainty markers: "
+                    + ", ".join(critic_marker_hits)
+                    + "."
+                )
+        else:
+            contradiction_status = PHASE2_CONTRADICTION_STATUS_NONE
+
+    return {
+        "confidence_score": confidence_score,
+        "contradiction_status": contradiction_status,
+        "contradiction_reasons": contradiction_reasons,
+        "supporting_artifact_count": supporting_count,
+        "publisher_count": len(publishers),
+        "has_stale_support": has_stale_support,
+        "has_high_severity_critic_findings": has_high_severity_critic_finding,
+    }
+
+
+def _apply_phase2_claim_scoring(
+    *,
+    run_record: ResearchRun,
+    claims: List[Claim],
+    artifacts: List[EvidenceArtifact],
+    links: List[ClaimLink],
+) -> bool:
+    artifacts_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
+    links_by_claim: Dict[str, List[ClaimLink]] = {}
+    for link in links:
+        links_by_claim.setdefault(link.claim_id, []).append(link)
+
+    result_payload = dict(run_record.result or {}) if isinstance(run_record.result, dict) else {}
+    quality_summary = (
+        dict(result_payload.get("quality_summary") or {})
+        if isinstance(result_payload.get("quality_summary"), dict)
+        else {}
+    )
+    uncovered_claim_ids = set(_coerce_string_list(quality_summary.get("uncovered_claims") or []))
+    critic_findings = [
+        finding
+        for finding in (result_payload.get("critic_findings") or [])
+        if isinstance(finding, dict)
+    ]
+
+    updated = False
+    for claim in claims:
+        existing = _phase2_scoring_from_claim_meta(claim)
+        if all(
+            key in existing
+            for key in ("confidence_score", "contradiction_status", "contradiction_reasons")
+        ):
+            continue
+        supporting_artifacts = [
+            artifacts_by_key[link.artifact_key]
+            for link in links_by_claim.get(claim.claim_id, [])
+            if link.artifact_key in artifacts_by_key
+        ]
+        claim_meta = dict(claim.meta or {})
+        claim_meta[PHASE2_CLAIM_SCORING_META_KEY] = _compute_phase2_claim_scoring(
+            run_record=run_record,
+            claim=claim,
+            supporting_artifacts=supporting_artifacts,
+            uncovered_claim_ids=uncovered_claim_ids,
+            critic_findings=critic_findings,
+        )
+        claim.meta = claim_meta
+        updated = True
+    return updated
+
+
+def _build_phase2_claim_scoring_summary(claims: List[Claim]) -> Dict[str, Any]:
+    scores = [
+        float(scoring["confidence_score"])
+        for claim in claims
+        for scoring in [_phase2_scoring_from_claim_meta(claim)]
+        if scoring.get("confidence_score") is not None
+    ]
+    mixed_evidence_claim_count = sum(
+        1
+        for claim in claims
+        if _phase2_scoring_from_claim_meta(claim).get("contradiction_status")
+        == PHASE2_CONTRADICTION_STATUS_MIXED
+    )
+    insufficient_evidence_claim_count = sum(
+        1
+        for claim in claims
+        if _phase2_scoring_from_claim_meta(claim).get("contradiction_status")
+        == PHASE2_CONTRADICTION_STATUS_INSUFFICIENT
+    )
+    high_confidence_claim_count = sum(
+        1
+        for claim in claims
+        if (_phase2_scoring_from_claim_meta(claim).get("confidence_score") or 0.0)
+        >= PHASE2_HIGH_CONFIDENCE_THRESHOLD
+    )
+    return {
+        "claim_count": len(claims),
+        "high_confidence_claim_count": high_confidence_claim_count,
+        "mixed_evidence_claim_count": mixed_evidence_claim_count,
+        "insufficient_evidence_claim_count": insufficient_evidence_claim_count,
+        "average_confidence_score": round(sum(scores) / len(scores), 3) if scores else None,
+    }
 
 
 def _build_freshness_metadata(
@@ -900,6 +1154,33 @@ def _load_phase2_graph_records(
             .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
             .all()
         )
+        if _apply_phase2_claim_scoring(
+            run_record=record,
+            claims=claims,
+            artifacts=artifacts,
+            links=links,
+        ):
+            db.commit()
+            record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one()
+            artifacts = (
+                db.query(EvidenceArtifact)
+                .filter(EvidenceArtifact.research_run_id == research_run_id)
+                .order_by(EvidenceArtifact.id.asc())
+                .all()
+            )
+            claims = (
+                db.query(Claim)
+                .filter(Claim.research_run_id == research_run_id)
+                .order_by(Claim.claim_order.asc(), Claim.id.asc())
+                .all()
+            )
+            links = (
+                db.query(ClaimLink)
+                .filter(ClaimLink.research_run_id == research_run_id)
+                .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
+                .all()
+            )
+        db.expunge_all()
         return record, artifacts, claims, links
     finally:
         db.close()
@@ -939,6 +1220,7 @@ def get_research_run_evidence_graph_payload(research_run_id: str) -> Optional[Di
     serialized_artifacts = [EvidenceArtifactPayload.from_record(item) for item in artifacts]
     serialized_claims: List[EvidenceGraphClaimPayload] = []
     for claim in claims:
+        scoring = _phase2_scoring_from_claim_meta(claim)
         claim_links = links_by_claim.get(claim.claim_id, [])
         supporting_artifact_keys = [link.artifact_key for link in claim_links]
         supporting_citation_ids = [
@@ -951,6 +1233,9 @@ def get_research_run_evidence_graph_payload(research_run_id: str) -> Optional[Di
                 claim_order=claim.claim_order,
                 claim=claim.claim,
                 confidence=claim.confidence,
+                confidence_score=scoring.get("confidence_score"),
+                contradiction_status=scoring.get("contradiction_status"),
+                contradiction_reasons=_coerce_string_list(scoring.get("contradiction_reasons") or []),
                 supporting_artifact_keys=supporting_artifact_keys,
                 supporting_citation_ids=[item for item in supporting_citation_ids if item],
             )
@@ -970,6 +1255,7 @@ def get_research_run_evidence_graph_payload(research_run_id: str) -> Optional[Di
         )
 
     meta = dict(record.meta or {})
+    claim_scoring_summary = _build_phase2_claim_scoring_summary(claims)
     graph_payload = ResearchRunEvidenceGraphPayload(
         schema_version=PHASE2_GRAPH_SCHEMA_VERSION,
         research_run_id=record.id,
@@ -990,6 +1276,9 @@ def get_research_run_evidence_graph_payload(research_run_id: str) -> Optional[Di
             ),
             claim_count=len(serialized_claims),
             link_count=len(serialized_links),
+            high_confidence_claim_count=claim_scoring_summary["high_confidence_claim_count"],
+            mixed_evidence_claim_count=claim_scoring_summary["mixed_evidence_claim_count"],
+            insufficient_evidence_claim_count=claim_scoring_summary["insufficient_evidence_claim_count"],
         ),
     )
     return graph_payload.model_dump(mode="json")
@@ -1002,11 +1291,10 @@ def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[
     if loaded is None:
         return None
 
-    record, artifacts, _claims, _links = loaded
-    run_payload = get_research_run_payload(research_run_id) or {}
-    evidence_payload = run_payload.get("evidence") or {}
-    report_payload = run_payload.get("report") or {}
-    graph_payload = run_payload.get("evidence_graph") or {}
+    record, artifacts, claims, _links = loaded
+    evidence_payload = get_research_run_evidence_payload(research_run_id) or {}
+    report_payload = get_research_run_report_payload(research_run_id) or {}
+    graph_payload = get_research_run_evidence_graph_payload(research_run_id) or {}
 
     artifact_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
     artifact_by_citation = {
@@ -1081,6 +1369,8 @@ def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[
 
     generated_at = record.completed_at or record.updated_at or record.created_at
     meta = dict(record.meta or {})
+    quality_summary = dict(report_payload.get("quality_summary") or {})
+    quality_summary["claim_scoring"] = _build_phase2_claim_scoring_summary(claims)
     report_pack_payload = ResearchRunReportPackPayload(
         schema_version=PHASE2_GRAPH_SCHEMA_VERSION,
         research_run_id=record.id,
@@ -1096,7 +1386,7 @@ def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[
         citations=citation_artifacts,
         supporting_evidence=supporting_evidence,
         claim_lineage=graph_links,
-        quality_summary=report_payload.get("quality_summary") or {},
+        quality_summary=quality_summary,
         critic_findings=report_payload.get("critic_findings") or [],
         limitations=report_payload.get("limitations") or [],
     )
@@ -1244,6 +1534,7 @@ class ResearchRunExecutor:
                     }
                 ],
                 handoff_context=context.model_dump(mode="json"),
+                prefer_strands_backend=True,
             )
 
             snapshot = load_task_snapshot(task_id)
@@ -1491,16 +1782,40 @@ class ResearchRunExecutor:
                     else []
                 ),
             }
-            _persist_phase2_claims_and_links(
-                db,
-                run_record=record,
-                final_answer=final_answer,
-            )
             record_meta["rounds_completed"] = rounds_completed
             record.meta = record_meta
             record.status = ResearchRunStatus.COMPLETED
             record.completed_at = _utcnow()
             record.result = redact_sensitive_payload(result)
+            _persist_phase2_claims_and_links(
+                db,
+                run_record=record,
+                final_answer=final_answer,
+            )
+            artifacts = (
+                db.query(EvidenceArtifact)
+                .filter(EvidenceArtifact.research_run_id == self.research_run_id)
+                .order_by(EvidenceArtifact.id.asc())
+                .all()
+            )
+            claims = (
+                db.query(Claim)
+                .filter(Claim.research_run_id == self.research_run_id)
+                .order_by(Claim.claim_order.asc(), Claim.id.asc())
+                .all()
+            )
+            links = (
+                db.query(ClaimLink)
+                .filter(ClaimLink.research_run_id == self.research_run_id)
+                .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
+                .all()
+            )
+            _apply_phase2_claim_scoring(
+                run_record=record,
+                claims=claims,
+                artifacts=artifacts,
+                links=links,
+            )
             record.error = None
             db.commit()
         finally:

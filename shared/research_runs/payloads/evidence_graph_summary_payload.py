@@ -15,3 +15,6 @@ class EvidenceGraphSummaryPayload(BaseModel):
     filtered_artifact_count: int
     claim_count: int
     link_count: int
+    high_confidence_claim_count: int = 0
+    mixed_evidence_claim_count: int = 0
+    insufficient_evidence_claim_count: int = 0
