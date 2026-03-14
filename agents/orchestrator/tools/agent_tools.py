@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import Any, Dict, Optional
 
 from strands import tool
 
+from agents.executor.agent import create_executor_agent
 from agents.executor.tools.research_api_executor import execute_research_agent, get_agent_metadata
 from agents.negotiator.tools.payment_tools import authorize_payment as _authorize_payment
 from agents.negotiator.tools.payment_tools import create_payment_request
+from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
 from agents.verifier.tools.research_verification_tools import calculate_quality_score
 from shared.database import Agent, AgentReputation, SessionLocal
@@ -40,6 +43,21 @@ from shared.runtime import (
 from shared.task_progress import update_progress
 
 logger = logging.getLogger(__name__)
+
+_EXECUTION_CONTRACT_LIST_FIELDS = {
+    "sources",
+    "citations",
+    "claims",
+    "critic_findings",
+    "uncovered_claim_targets",
+}
+_EXECUTION_CONTRACT_DICT_FIELDS = {
+    "coverage_summary",
+    "source_summary",
+    "freshness_summary",
+    "rounds_completed",
+}
+_EXECUTION_CONTRACT_STRING_FIELDS = {"answer", "answer_markdown"}
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -100,6 +118,41 @@ def _validate_expected_format(task_result: Dict[str, Any], expected_format: Dict
             continue
         if isinstance(value, str) and not value.strip():
             issues.append(f"Missing required field: {field}.")
+    return issues
+
+
+def _validate_execution_result_contract(
+    task_result: Dict[str, Any],
+    execution_parameters: Optional[Dict[str, Any]] = None,
+) -> list[str]:
+    """Validate the executor result before verification or payment changes."""
+
+    expected_format = dict((execution_parameters or {}).get("expected_format") or {})
+    issues = _validate_expected_format(task_result, expected_format)
+
+    for field in sorted(_EXECUTION_CONTRACT_LIST_FIELDS):
+        if field not in task_result:
+            continue
+        value = task_result.get(field)
+        if not isinstance(value, list):
+            issues.append(f"Field '{field}' must be a list.")
+            continue
+        if any(not isinstance(item, dict) for item in value):
+            issues.append(f"Field '{field}' must be a list of objects.")
+
+    for field in sorted(_EXECUTION_CONTRACT_DICT_FIELDS):
+        if field not in task_result:
+            continue
+        if not isinstance(task_result.get(field), dict):
+            issues.append(f"Field '{field}' must be an object.")
+
+    for field in sorted(_EXECUTION_CONTRACT_STRING_FIELDS):
+        if field not in task_result:
+            continue
+        value = task_result.get(field)
+        if not isinstance(value, str) or not value.strip():
+            issues.append(f"Field '{field}' must be a non-empty string when present.")
+
     return issues
 
 
@@ -330,6 +383,494 @@ def _check_task_cancelled(task_id: str) -> bool:
     if snapshot is None:
         return False
     return str(snapshot.get("status") or "").lower() == "cancelled"
+
+
+def _strands_backend_enabled(prefer_strands_backend: bool) -> bool:
+    if not prefer_strands_backend:
+        return False
+    configured = str(os.getenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")).strip().lower()
+    return configured not in {"0", "false", "no", "off"}
+
+
+def _looks_like_executor_envelope(payload: Any) -> bool:
+    return isinstance(payload, dict) and "success" in payload and (
+        "result" in payload or "error" in payload
+    )
+
+
+def _looks_like_verifier_envelope(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and "success" in payload
+        and "verification_passed" in payload
+        and "overall_score" in payload
+    )
+
+
+def _parse_json_dict(candidate: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(candidate, dict):
+        return candidate
+    if not isinstance(candidate, str):
+        return None
+
+    text = candidate.strip()
+    if not text:
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _collect_embedded_json_objects(text: str) -> list[Dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    objects: list[Dict[str, Any]] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char != "{":
+            index += 1
+            continue
+        try:
+            parsed, offset = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        if isinstance(parsed, dict):
+            objects.append(parsed)
+            index += offset
+            continue
+        index += 1
+
+    return objects
+
+
+def _extract_json_object(raw_response: Any, *, expected_kind: Optional[str] = None) -> Dict[str, Any]:
+    if isinstance(raw_response, dict):
+        return raw_response
+
+    text = str(raw_response or "").strip()
+    if not text:
+        raise ValueError("Empty response")
+
+    parsed_whole_response = _parse_json_dict(text)
+    if parsed_whole_response is not None:
+        return parsed_whole_response
+
+    candidates = [text]
+    fenced_matches = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    candidates.extend(match.strip() for match in fenced_matches if match.strip())
+
+    parsed_objects: list[Dict[str, Any]] = []
+    seen_candidates: set[str] = set()
+    for candidate in candidates:
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+
+        parsed = _parse_json_dict(candidate)
+        if parsed is not None:
+            parsed_objects.append(parsed)
+            continue
+
+        parsed_objects.extend(_collect_embedded_json_objects(candidate))
+
+    if not parsed_objects:
+        raise ValueError(f"Response was not valid JSON: {text[:200]}")
+
+    matcher = None
+    if expected_kind == "executor":
+        matcher = _looks_like_executor_envelope
+    elif expected_kind == "verifier":
+        matcher = _looks_like_verifier_envelope
+
+    if matcher is not None:
+        for parsed in reversed(parsed_objects):
+            if matcher(parsed):
+                return parsed
+
+    return parsed_objects[-1]
+
+
+def _normalize_execution_task_result(task_result: Any) -> tuple[Dict[str, Any], list[str]]:
+    current = task_result
+    normalization_notes: list[str] = []
+
+    for _ in range(8):
+        if isinstance(current, str):
+            parsed = _parse_json_dict(current)
+            if parsed is None:
+                break
+            normalization_notes.append("parsed JSON string result")
+            current = parsed
+            continue
+
+        if _looks_like_executor_envelope(current) and "result" in current:
+            normalization_notes.append("unwrapped nested executor envelope")
+            current = current.get("result")
+            continue
+
+        break
+
+    deduped_notes = list(dict.fromkeys(normalization_notes))
+    if isinstance(current, dict):
+        return current, deduped_notes
+
+    return {"output": current}, deduped_notes
+
+
+def _describe_result_shape(task_result: Any) -> str:
+    if isinstance(task_result, dict):
+        keys = sorted(str(key) for key in task_result.keys())
+        return ",".join(keys) if keys else "<empty-dict>"
+    return f"<{type(task_result).__name__}>"
+
+
+def _build_executor_agent_prompt(request: ExecutionRequest, endpoint_url: Optional[str]) -> str:
+    request_payload = {
+        "agent_domain": request.agent_id,
+        "task_description": request.task_description,
+        "context": request.context,
+        "metadata": request.metadata,
+        "endpoint_url": endpoint_url,
+        "handoff_context": request.handoff_context.model_dump(mode="json"),
+    }
+    return (
+        "Execute exactly one already-selected supported research agent and return exactly one JSON object.\n\n"
+        "Rules:\n"
+        "- Call list_research_agents first.\n"
+        "- Call get_agent_metadata for REQUEST_JSON.agent_domain.\n"
+        "- Call execute_research_agent exactly once for REQUEST_JSON.agent_domain.\n"
+        "- Use the exact tool argument names: agent_domain, task_description, context, metadata, endpoint_url.\n"
+        "- Pass REQUEST_JSON.task_description exactly as the task_description argument.\n"
+        "- Pass REQUEST_JSON.context exactly as the context argument without adding, removing, or renaming keys.\n"
+        "- Pass REQUEST_JSON.metadata exactly as the metadata argument without adding, removing, or renaming keys.\n"
+        "- Pass REQUEST_JSON.endpoint_url exactly as the endpoint_url argument when present.\n"
+        "- Do not choose a different agent.\n"
+        "- Do not drop REQUEST_JSON.context. Dropping it breaks plan_query and downstream contracts.\n"
+        "- Do not summarize, reshape, wrap, or stringify the tool result.\n"
+        "- Return exactly the JSON object produced by execute_research_agent as the final answer.\n"
+        "- Do not wrap the final JSON in markdown fences.\n\n"
+        f"REQUEST_JSON:\n{json.dumps(request_payload, sort_keys=True)}"
+    )
+
+
+def _build_verifier_agent_prompt(request: VerificationRequest) -> str:
+    request_payload = {
+        "task_id": request.task_id,
+        "payment_id": request.payment_id,
+        "verification_mode": request.verification_mode,
+        "task_result": request.task_result,
+        "verification_criteria": request.verification_criteria,
+        "handoff_context": request.handoff_context.model_dump(mode="json"),
+    }
+    return (
+        "Evaluate exactly one completed research task and return exactly one JSON object.\n\n"
+        "Rules:\n"
+        "- Use calculate_quality_score as the primary scoring tool.\n"
+        "- You may use research verification tools for analysis, but do not call release_payment or reject_and_refund.\n"
+        "- Do not mutate payment state.\n"
+        "- Keep the result typed and concise.\n"
+        "- Do not wrap the final JSON in markdown fences.\n\n"
+        "Return schema:\n"
+        '{"success": true, "verification_passed": bool, "overall_score": number, "dimension_scores": object, "feedback": string, "decision": "auto_approve"|"review_required", "error": string|null}\n\n'
+        f"REQUEST_JSON:\n{json.dumps(request_payload, sort_keys=True)}"
+    )
+
+
+def _normalize_execution_result_payload(
+    payload: Dict[str, Any],
+    *,
+    request: ExecutionRequest,
+) -> Dict[str, Any]:
+    normalized = dict(payload)
+    normalized["success"] = normalized.get("success") is True
+    normalized.setdefault("agent_id", request.agent_id)
+    normalized.setdefault("metadata", {})
+    normalized["handoff_context"] = request.handoff_context.model_dump(mode="json")
+    if not normalized["success"] and not normalized.get("error"):
+        normalized["error"] = "Executor response was malformed or indicated failure."
+    return ExecutionResult.model_validate(normalized).model_dump(mode="json")
+
+
+def _build_execution_failure_result(
+    *,
+    agent_id: str,
+    context: HandoffContext,
+    error: str,
+) -> Dict[str, Any]:
+    return ExecutionResult(
+        success=False,
+        agent_id=agent_id,
+        error=error,
+        handoff_context=context,
+    ).model_dump(mode="json")
+
+
+def _finalize_verification_payload(
+    *,
+    task_result: Dict[str, Any],
+    verification_criteria: Dict[str, Any],
+    overall_score: float,
+    dimension_scores: Dict[str, float],
+    feedback: str,
+    context: HandoffContext,
+    base_passed: bool,
+) -> Dict[str, Any]:
+    research_contract = _evaluate_research_quality_contract(
+        task_result,
+        verification_criteria,
+    )
+    quality_summary = research_contract.get("quality_summary")
+    if quality_summary:
+        task_result["quality_summary"] = quality_summary
+
+    if research_contract["issues"]:
+        overall_score = min(float(overall_score), 49.0)
+        feedback = (
+            f"{feedback} Research contract checks: "
+            + "; ".join(research_contract["issues"])
+        ).strip()
+
+    verification_passed = (
+        base_passed
+        and float(overall_score) >= 50
+        and dimension_scores.get("ethics", 0) >= 50
+        and not research_contract["issues"]
+    )
+    result = VerificationResult(
+        success=True,
+        verification_passed=verification_passed,
+        overall_score=float(overall_score),
+        dimension_scores=dimension_scores,
+        feedback=feedback,
+        decision="auto_approve" if verification_passed else "review_required",
+        handoff_context=context,
+    )
+    return result.model_dump(mode="json")
+
+
+async def _run_strands_executor_step(
+    *,
+    agent: Any,
+    request: ExecutionRequest,
+    endpoint_url: Optional[str],
+) -> Dict[str, Any]:
+    payload = _extract_json_object(
+        await agent.run(_build_executor_agent_prompt(request, endpoint_url)),
+        expected_kind="executor",
+    )
+    return _normalize_execution_result_payload(payload, request=request)
+
+
+async def _run_strands_verifier_step(
+    *,
+    request: VerificationRequest,
+) -> Dict[str, Any]:
+    agent = create_research_verifier_agent()
+    payload = _extract_json_object(
+        await agent.run(_build_verifier_agent_prompt(request)),
+        expected_kind="verifier",
+    )
+    if payload.get("success") is not True:
+        raise RuntimeError(
+            str(payload.get("error") or "Strands verifier returned malformed verification output")
+        )
+
+    dimension_scores = {
+        key: float(value)
+        for key, value in (payload.get("dimension_scores") or {}).items()
+    }
+    return _finalize_verification_payload(
+        task_result=request.task_result,
+        verification_criteria=request.verification_criteria,
+        overall_score=float(payload.get("overall_score", 0)),
+        dimension_scores=dimension_scores,
+        feedback=str(payload.get("feedback") or "Quality analysis completed."),
+        context=request.handoff_context,
+        base_passed=bool(payload.get("verification_passed")),
+    )
+
+
+async def _execute_selected_agent(
+    *,
+    task_id: str,
+    agent_domain: str,
+    task_description: str,
+    execution_parameters: Optional[Dict[str, Any]] = None,
+    todo_id: Optional[str] = None,
+    todo_list: Optional[list] = None,
+    handoff_context: Optional[Dict[str, Any]] = None,
+    prefer_strands_backend: bool = False,
+) -> Dict[str, Any]:
+    context = _to_handoff_context(task_id, todo_id or "todo_0", handoff_context, agent_id=agent_domain)
+    persist_handoff_context(task_id, context)
+    step_name = f"executor_{todo_id or 'todo_0'}"
+    metadata_result = await get_agent_metadata(agent_domain)
+    if not metadata_result.get("success"):
+        return ExecutionResult(
+            success=False,
+            agent_id=agent_domain,
+            error=metadata_result.get("error"),
+            handoff_context=context,
+        ).model_dump(mode="json")
+    if metadata_result.get("support_tier") != "supported":
+        return ExecutionResult(
+            success=False,
+            agent_id=agent_domain,
+            error=f"Agent '{agent_domain}' is not in the supported tier",
+            handoff_context=context,
+        ).model_dump(mode="json")
+
+    request = ExecutionRequest(
+        agent_id=agent_domain,
+        task_description=task_description,
+        context=execution_parameters or {},
+        metadata={
+            "task_id": task_id,
+            "todo_id": todo_id or "todo_0",
+            "attempt_id": context.attempt_id,
+            "payment_id": context.payment_id,
+            "support_tier": "supported",
+        },
+        handoff_context=context,
+    )
+
+    if _strands_backend_enabled(prefer_strands_backend):
+        try:
+            agent = create_executor_agent()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Falling back to deterministic executor step for %s before invocation: %s",
+                agent_domain,
+                exc,
+            )
+        else:
+            update_progress(
+                task_id,
+                step_name,
+                "running",
+                {
+                    "message": f"Executing {metadata_result.get('name', agent_domain)}",
+                    "agent_id": agent_domain,
+                },
+            )
+            try:
+                result = await _run_strands_executor_step(
+                    agent=agent,
+                    request=request,
+                    endpoint_url=metadata_result.get("endpoint_url"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Strands executor step failed for %s after invocation: %s",
+                    agent_domain,
+                    exc,
+                )
+                result = _build_execution_failure_result(
+                    agent_id=agent_domain,
+                    context=context,
+                    error=f"Strands executor step failed: {exc}",
+                )
+
+            update_progress(
+                task_id,
+                step_name,
+                "completed" if result.get("success") else "failed",
+                {
+                    "message": (
+                        "✓ Task execution completed"
+                        if result.get("success")
+                        else "✗ Task execution failed"
+                    ),
+                    "agent_id": agent_domain,
+                    "error": result.get("error"),
+                },
+            )
+            return result
+
+    return await executor_agent(
+        task_id=task_id,
+        agent_domain=agent_domain,
+        task_description=task_description,
+        execution_parameters=execution_parameters,
+        todo_id=todo_id,
+        todo_list=todo_list,
+        handoff_context=handoff_context,
+    )
+
+
+async def _verify_selected_agent_result(
+    *,
+    task_id: str,
+    payment_id: str,
+    task_result: Dict[str, Any],
+    verification_criteria: Dict[str, Any],
+    verification_mode: str = "standard",
+    handoff_context: Optional[Dict[str, Any]] = None,
+    prefer_strands_backend: bool = False,
+) -> Dict[str, Any]:
+    context = _to_handoff_context(
+        task_id,
+        handoff_context.get("todo_id", "todo_0") if handoff_context else "todo_0",
+        handoff_context,
+        payment_id=payment_id,
+        verification_mode=verification_mode,
+    )
+    request = VerificationRequest(
+        task_id=task_id,
+        payment_id=payment_id,
+        task_result=task_result,
+        verification_criteria=verification_criteria,
+        verification_mode=verification_mode,
+        handoff_context=context,
+    )
+
+    if _strands_backend_enabled(prefer_strands_backend):
+        try:
+            update_progress(
+                task_id,
+                "verifier",
+                "running",
+                {
+                    "message": "Verifying task results and quality",
+                    "verification_mode": verification_mode,
+                    "payment_id": payment_id,
+                },
+            )
+            result = await _run_strands_verifier_step(request=request)
+            update_progress(
+                task_id,
+                "verifier",
+                "completed",
+                {
+                    "message": "✓ Verification completed",
+                    "payment_id": payment_id,
+                    "quality_score": result["overall_score"],
+                    "dimension_scores": result["dimension_scores"],
+                    "feedback": result["feedback"],
+                    "quality_summary": task_result.get("quality_summary"),
+                },
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Falling back to deterministic verifier step for %s/%s: %s",
+                task_id,
+                payment_id,
+                exc,
+            )
+
+    return await verifier_agent(
+        task_id=task_id,
+        payment_id=payment_id,
+        task_result=task_result,
+        verification_criteria=verification_criteria,
+        verification_mode=verification_mode,
+        handoff_context=handoff_context,
+    )
 
 
 async def _request_human_verification(
@@ -678,35 +1219,16 @@ async def verifier_agent(
         }
         feedback = f"Verification fallback triggered: {exc}"
 
-    research_contract = _evaluate_research_quality_contract(
-        request.task_result,
-        verification_criteria,
-    )
-    quality_summary = research_contract.get("quality_summary")
-    if quality_summary:
-        request.task_result["quality_summary"] = quality_summary
-
-    if research_contract["issues"]:
-        overall_score = min(overall_score, 49.0)
-        feedback = (
-            f"{feedback} Research contract checks: "
-            + "; ".join(research_contract["issues"])
-        ).strip()
-
-    verification_passed = (
-        overall_score >= 50
-        and dimension_scores.get("ethics", 0) >= 50
-        and not research_contract["issues"]
-    )
-    result = VerificationResult(
-        success=True,
-        verification_passed=verification_passed,
+    result = _finalize_verification_payload(
+        task_result=request.task_result,
+        verification_criteria=verification_criteria,
         overall_score=overall_score,
         dimension_scores=dimension_scores,
         feedback=feedback,
-        decision="auto_approve" if verification_passed else "review_required",
-        handoff_context=context,
+        context=context,
+        base_passed=overall_score >= 50 and dimension_scores.get("ethics", 0) >= 50,
     )
+    quality_summary = request.task_result.get("quality_summary")
 
     update_progress(
         task_id,
@@ -715,13 +1237,13 @@ async def verifier_agent(
         {
             "message": "✓ Verification completed",
             "payment_id": payment_id,
-            "quality_score": overall_score,
+            "quality_score": result["overall_score"],
             "dimension_scores": dimension_scores,
-            "feedback": feedback,
+            "feedback": result["feedback"],
             "quality_summary": quality_summary,
         },
     )
-    return result.model_dump(mode="json")
+    return result
 
 
 @tool
@@ -736,6 +1258,7 @@ async def execute_microtask(
     execution_parameters: Optional[Dict[str, Any]] = None,
     todo_list: Optional[list] = None,
     handoff_context: Optional[Dict[str, Any]] = None,
+    prefer_strands_backend: bool = False,
 ) -> Dict[str, Any]:
     """Run the full negotiation -> payment -> execution -> verification flow."""
 
@@ -790,7 +1313,7 @@ async def execute_microtask(
                 "todo_status": "failed",
             }
 
-    execution = await executor_agent(
+    execution = await _execute_selected_agent(
         task_id=task_id,
         agent_domain=selection["agent_id"],
         task_description=task_description,
@@ -798,6 +1321,7 @@ async def execute_microtask(
         todo_id=todo_id,
         todo_list=todo_list,
         handoff_context=selected_context.model_dump(mode="json"),
+        prefer_strands_backend=prefer_strands_backend,
     )
     if not execution.get("success"):
         await update_todo_item(task_id, todo_id, "failed", todo_list)
@@ -809,11 +1333,42 @@ async def execute_microtask(
             "todo_status": "failed",
         }
 
-    task_result = execution.get("result")
-    if not isinstance(task_result, dict):
-        task_result = {"output": task_result}
+    raw_task_result = execution.get("result")
+    task_result, normalization_notes = _normalize_execution_task_result(raw_task_result)
 
-    verification = await verifier_agent(
+    contract_issues = _validate_execution_result_contract(
+        task_result,
+        execution_parameters=execution_parameters,
+    )
+    if contract_issues:
+        node_strategy = str((execution_parameters or {}).get("node_strategy") or "unknown")
+        raw_shape = _describe_result_shape(raw_task_result)
+        effective_shape = _describe_result_shape(task_result)
+        normalization_summary = ", ".join(normalization_notes) if normalization_notes else "none"
+        logger.warning(
+            "Execution contract validation failed for node_strategy=%s raw_top_level_keys=%s "
+            "effective_top_level_keys=%s normalization=%s issues=%s",
+            node_strategy,
+            raw_shape,
+            effective_shape,
+            normalization_summary,
+            contract_issues,
+        )
+        await update_todo_item(task_id, todo_id, "failed", todo_list)
+        return {
+            "success": False,
+            "task_id": task_id,
+            "todo_id": todo_id,
+            "error": (
+                "Execution result failed contract validation: "
+                + "; ".join(contract_issues)
+                + f" [node_strategy={node_strategy}; raw_top_level_keys={raw_shape}; "
+                + f"effective_top_level_keys={effective_shape}; normalization={normalization_summary}]"
+            ),
+            "todo_status": "failed",
+        }
+
+    verification = await _verify_selected_agent_result(
         task_id=task_id,
         payment_id=payment_id or "missing-payment-id",
         task_result=task_result,
@@ -830,6 +1385,7 @@ async def execute_microtask(
         },
         verification_mode=selected_context.verification_mode,
         handoff_context=selected_context.model_dump(mode="json"),
+        prefer_strands_backend=prefer_strands_backend,
     )
     overall_score = float(verification.get("overall_score", 0))
     dimension_scores = verification.get("dimension_scores") or {}
