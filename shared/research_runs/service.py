@@ -412,7 +412,7 @@ def _apply_phase2_claim_scoring(
     claims: List[Claim],
     artifacts: List[EvidenceArtifact],
     links: List[ClaimLink],
-) -> bool:
+) -> List[Claim]:
     artifacts_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
     links_by_claim: Dict[str, List[ClaimLink]] = {}
     for link in links:
@@ -431,7 +431,7 @@ def _apply_phase2_claim_scoring(
         if isinstance(finding, dict)
     ]
 
-    updated = False
+    updated_claims: List[Claim] = []
     for claim in claims:
         existing = _phase2_scoring_from_claim_meta(claim)
         if all(
@@ -453,8 +453,26 @@ def _apply_phase2_claim_scoring(
             critic_findings=critic_findings,
         )
         claim.meta = claim_meta
-        updated = True
-    return updated
+        updated_claims.append(claim)
+    return updated_claims
+
+
+def _detach_phase2_graph_records(
+    db,
+    *,
+    record: Optional[ResearchRun] = None,
+    artifacts: Optional[List[EvidenceArtifact]] = None,
+    claims: Optional[List[Claim]] = None,
+    links: Optional[List[ClaimLink]] = None,
+) -> None:
+    if record is not None:
+        db.expunge(record)
+    for artifact in artifacts or []:
+        db.expunge(artifact)
+    for claim in claims or []:
+        db.expunge(claim)
+    for link in links or []:
+        db.expunge(link)
 
 
 def _build_phase2_claim_scoring_summary(claims: List[Claim]) -> Dict[str, Any]:
@@ -1154,33 +1172,41 @@ def _load_phase2_graph_records(
             .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
             .all()
         )
-        if _apply_phase2_claim_scoring(
+        updated_claims = _apply_phase2_claim_scoring(
             run_record=record,
             claims=claims,
             artifacts=artifacts,
             links=links,
-        ):
-            db.commit()
-            record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one()
-            artifacts = (
-                db.query(EvidenceArtifact)
-                .filter(EvidenceArtifact.research_run_id == research_run_id)
-                .order_by(EvidenceArtifact.id.asc())
-                .all()
+        )
+        if updated_claims:
+            unchanged_claims = [claim for claim in claims if claim not in updated_claims]
+            db.flush()
+            _detach_phase2_graph_records(
+                db,
+                record=record,
+                artifacts=artifacts,
+                claims=unchanged_claims,
+                links=links,
             )
+            db.commit()
             claims = (
                 db.query(Claim)
                 .filter(Claim.research_run_id == research_run_id)
                 .order_by(Claim.claim_order.asc(), Claim.id.asc())
                 .all()
             )
-            links = (
-                db.query(ClaimLink)
-                .filter(ClaimLink.research_run_id == research_run_id)
-                .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
-                .all()
+            _detach_phase2_graph_records(
+                db,
+                claims=claims,
             )
-        db.expunge_all()
+        else:
+            _detach_phase2_graph_records(
+                db,
+                record=record,
+                artifacts=artifacts,
+                claims=claims,
+                links=links,
+            )
         return record, artifacts, claims, links
     finally:
         db.close()

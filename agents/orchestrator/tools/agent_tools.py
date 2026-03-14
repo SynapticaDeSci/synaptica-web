@@ -58,6 +58,7 @@ _EXECUTION_CONTRACT_DICT_FIELDS = {
     "rounds_completed",
 }
 _EXECUTION_CONTRACT_STRING_FIELDS = {"answer", "answer_markdown"}
+_MAX_EXECUTION_RESULT_NORMALIZATION_DEPTH = 8
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -498,7 +499,7 @@ def _normalize_execution_task_result(task_result: Any) -> tuple[Dict[str, Any], 
     current = task_result
     normalization_notes: list[str] = []
 
-    for _ in range(8):
+    for _ in range(_MAX_EXECUTION_RESULT_NORMALIZATION_DEPTH):
         if isinstance(current, str):
             parsed = _parse_json_dict(current)
             if parsed is None:
