@@ -10,9 +10,12 @@ from pydantic import BaseModel, Field
 
 from shared.research_runs import (
     ResearchRunExecutor,
+    ResearchRunPhase2UnavailableError,
     create_research_run,
+    get_research_run_evidence_graph_payload,
     get_research_run_evidence_payload,
     get_research_run_payload,
+    get_research_run_report_pack_payload,
     get_research_run_report_payload,
     request_cancel_research_run,
     request_pause_research_run,
@@ -125,6 +128,98 @@ class ResearchRunReportResponse(BaseModel):
     quality_summary: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchRunArtifactResponse(BaseModel):
+    """Serialized evidence artifact for Phase 2 graph/report endpoints."""
+
+    artifact_key: str
+    citation_id: Optional[str] = None
+    artifact_type: str
+    origin_node_id: Optional[str] = None
+    last_seen_node_id: Optional[str] = None
+    order_index: Optional[int] = None
+    title: Optional[str] = None
+    url: Optional[str] = None
+    normalized_url: Optional[str] = None
+    publisher: Optional[str] = None
+    published_at: Optional[str] = None
+    source_type: Optional[str] = None
+    snippet: Optional[str] = None
+    display_snippet: Optional[str] = None
+    relevance_score: Optional[float] = None
+    curation_status: str
+    quality_flags: List[str] = Field(default_factory=list)
+    filtered_reason: Optional[str] = None
+    freshness_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchRunPersistedClaimResponse(BaseModel):
+    """Serialized persisted claim record for Phase 2 graph/report endpoints."""
+
+    claim_id: str
+    claim_order: int
+    claim: str
+    confidence: Optional[str] = None
+    supporting_artifact_keys: List[str] = Field(default_factory=list)
+    supporting_citation_ids: List[str] = Field(default_factory=list)
+
+
+class ResearchRunClaimLinkResponse(BaseModel):
+    """Serialized persisted claim-to-evidence lineage link."""
+
+    claim_id: str
+    artifact_key: str
+    citation_id: Optional[str] = None
+    relation_type: str
+    link_order: Optional[int] = None
+
+
+class ResearchRunEvidenceGraphSummaryResponse(BaseModel):
+    """Compact summary for a persisted evidence graph."""
+
+    artifact_count: int
+    cited_artifact_count: int
+    filtered_artifact_count: int
+    claim_count: int
+    link_count: int
+
+
+class ResearchRunEvidenceGraphResponse(BaseModel):
+    """Persisted evidence graph payload for a research run."""
+
+    schema_version: str
+    research_run_id: str
+    title: str
+    description: str
+    status: str
+    workflow: str
+    artifacts: List[ResearchRunArtifactResponse] = Field(default_factory=list)
+    claims: List[ResearchRunPersistedClaimResponse] = Field(default_factory=list)
+    links: List[ResearchRunClaimLinkResponse] = Field(default_factory=list)
+    summary: ResearchRunEvidenceGraphSummaryResponse
+
+
+class ResearchRunReportPackResponse(BaseModel):
+    """Persisted JSON report pack for a research run."""
+
+    schema_version: str
+    research_run_id: str
+    title: str
+    description: str
+    status: str
+    workflow: str
+    generated_at: Optional[str] = None
+    rewritten_research_brief: Optional[str] = None
+    answer_markdown: Optional[str] = None
+    answer: Optional[str] = None
+    claims: List[ResearchRunPersistedClaimResponse] = Field(default_factory=list)
+    citations: List[ResearchRunArtifactResponse] = Field(default_factory=list)
+    supporting_evidence: List[ResearchRunArtifactResponse] = Field(default_factory=list)
+    claim_lineage: List[ResearchRunClaimLinkResponse] = Field(default_factory=list)
+    quality_summary: Dict[str, Any] = Field(default_factory=dict)
+    critic_findings: List[Dict[str, Any]] = Field(default_factory=list)
+    limitations: List[Any] = Field(default_factory=list)
+
+
 class ResearchRunCreateRequest(BaseModel):
     """Payload for creating a research run."""
 
@@ -233,3 +328,31 @@ async def get_research_run_report_route(research_run_id: str) -> ResearchRunRepo
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
     return ResearchRunReportResponse.model_validate(payload)
+
+
+@router.get("/{research_run_id}/evidence-graph", response_model=ResearchRunEvidenceGraphResponse)
+async def get_research_run_evidence_graph_route(
+    research_run_id: str,
+) -> ResearchRunEvidenceGraphResponse:
+    """Return the persisted Phase 2 evidence graph for a research run."""
+
+    try:
+        payload = get_research_run_evidence_graph_payload(research_run_id)
+    except ResearchRunPhase2UnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunEvidenceGraphResponse.model_validate(payload)
+
+
+@router.get("/{research_run_id}/report-pack", response_model=ResearchRunReportPackResponse)
+async def get_research_run_report_pack_route(research_run_id: str) -> ResearchRunReportPackResponse:
+    """Return the persisted Phase 2 JSON report pack for a research run."""
+
+    try:
+        payload = get_research_run_report_pack_payload(research_run_id)
+    except ResearchRunPhase2UnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return ResearchRunReportPackResponse.model_validate(payload)

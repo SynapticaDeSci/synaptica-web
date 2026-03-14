@@ -132,7 +132,9 @@ Research run APIs:
 - `GET /api/research-runs/{id}`
 - `POST /api/research-runs/{id}/pause|resume|cancel`
 - `GET /api/research-runs/{id}/evidence`
+- `GET /api/research-runs/{id}/evidence-graph`
 - `GET /api/research-runs/{id}/report`
+- `GET /api/research-runs/{id}/report-pack`
 
 Payment APIs:
 - `GET /api/payments/{payment_id}`
@@ -166,6 +168,8 @@ Core entities:
 Compatibility:
 - Keep existing `tasks` and `payments` during migration.
 - Migrate traffic to research-run-backed execution.
+- Keep shaped `/evidence` and `/report` payloads backward-compatible while the first-class graph/report-pack model rolls out.
+- Do not backfill legacy Phase 1 runs automatically; Phase 2 graph/report-pack data is populated for new or rerun research runs.
 
 ## 6. Functional Requirements
 
@@ -240,8 +244,10 @@ Phase 1 (4 weeks): research-run MVP
 
 Phase 2 (4 weeks): evidence + report
 - Build evidence ingestion and claim linking.
+- Persist `evidence_artifacts`, `claims`, and `claim_links` from structured node outputs without re-parsing markdown.
 - Add contradiction/confidence scoring.
-- Generate report pack from verified claims.
+- Generate JSON report pack from verified claims.
+- Ship additive read APIs for the persisted evidence graph and report pack before frontend graph visualizations.
 - Migrate executor/verifier interactions to Strands-native model.
 
 Phase 3 (4 weeks): adaptive orchestration

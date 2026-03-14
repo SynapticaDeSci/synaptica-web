@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     Boolean,
     UniqueConstraint,
+    ForeignKeyConstraint,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -402,6 +403,11 @@ class ResearchRun(Base):
     nodes = relationship("ResearchRunNode", back_populates="research_run", cascade="all, delete-orphan")
     edges = relationship("ResearchRunEdge", back_populates="research_run", cascade="all, delete-orphan")
     attempts = relationship("ExecutionAttempt", back_populates="research_run", cascade="all, delete-orphan")
+    evidence_artifacts = relationship(
+        "EvidenceArtifact", back_populates="research_run", cascade="all, delete-orphan"
+    )
+    claims = relationship("Claim", back_populates="research_run", cascade="all, delete-orphan")
+    claim_links = relationship("ClaimLink", back_populates="research_run", cascade="all, delete-orphan")
 
 
 class ResearchRunNode(Base):
@@ -486,6 +492,102 @@ class ExecutionAttempt(Base):
     task = relationship("Task", foreign_keys=[task_id])
     payment = relationship("Payment", foreign_keys=[payment_id])
     agent = relationship("Agent", foreign_keys=[agent_id])
+
+
+class EvidenceArtifact(Base):
+    """First-class evidence artifact persisted for a research run."""
+
+    __tablename__ = "evidence_artifacts"
+    __table_args__ = (
+        UniqueConstraint("research_run_id", "artifact_key", name="uq_evidence_artifacts_key"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    artifact_key = Column(String, nullable=False)
+    citation_id = Column(String, nullable=True)
+    artifact_type = Column(String, nullable=False, default="source")
+    origin_node_id = Column(String, nullable=True)
+    last_seen_node_id = Column(String, nullable=True)
+    order_index = Column(Integer, nullable=True)
+    title = Column(String, nullable=True)
+    url = Column(Text, nullable=True)
+    normalized_url = Column(Text, nullable=True)
+    publisher = Column(String, nullable=True)
+    published_at = Column(String, nullable=True)
+    source_type = Column(String, nullable=True)
+    snippet = Column(Text, nullable=True)
+    display_snippet = Column(Text, nullable=True)
+    relevance_score = Column(Float, nullable=True)
+    curation_status = Column(String, nullable=False, default="gathered")
+    quality_flags = Column(JSON, nullable=True)
+    filtered_reason = Column(Text, nullable=True)
+    freshness_metadata = Column(JSON, nullable=True)
+    raw_payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="evidence_artifacts")
+
+
+class Claim(Base):
+    """Final claim persisted for evidence-graph lineage and report export."""
+
+    __tablename__ = "claims"
+    __table_args__ = (UniqueConstraint("research_run_id", "claim_id", name="uq_claims_claim_id"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    claim_id = Column(String, nullable=False)
+    claim_order = Column(Integer, nullable=False, default=0)
+    claim = Column(Text, nullable=False)
+    confidence = Column(String, nullable=True)
+    source_of_truth_node_id = Column(String, nullable=True)
+    raw_payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="claims")
+
+
+class ClaimLink(Base):
+    """Relationship between a persisted claim and an evidence artifact."""
+
+    __tablename__ = "claim_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id",
+            "claim_id",
+            "artifact_key",
+            "relation_type",
+            name="uq_claim_links_relation",
+        ),
+        ForeignKeyConstraint(
+            ["research_run_id", "claim_id"],
+            ["claims.research_run_id", "claims.claim_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["research_run_id", "artifact_key"],
+            ["evidence_artifacts.research_run_id", "evidence_artifacts.artifact_key"],
+            ondelete="CASCADE",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    claim_id = Column(String, nullable=False)
+    artifact_key = Column(String, nullable=False)
+    relation_type = Column(String, nullable=False, default="supports")
+    link_order = Column(Integer, nullable=True)
+    raw_payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="claim_links")
 
 class AgentReputation(Base):
     """Agent reputation tracking model."""

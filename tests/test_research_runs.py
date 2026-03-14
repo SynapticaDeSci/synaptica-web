@@ -20,6 +20,9 @@ from shared.database import (
     AgentReputation,
     AgentsCacheEntry,
     Base,
+    Claim,
+    ClaimLink,
+    EvidenceArtifact,
     ExecutionAttempt,
     Payment,
     PaymentNotification,
@@ -46,6 +49,9 @@ def _reset_runtime_state():
     research_api_executor._agent_cache.clear()
     session = SessionLocal()
     try:
+        session.query(ClaimLink).delete()
+        session.query(Claim).delete()
+        session.query(EvidenceArtifact).delete()
         session.query(ExecutionAttempt).delete()
         session.query(ResearchRunEdge).delete()
         session.query(ResearchRunNode).delete()
@@ -675,6 +681,9 @@ def test_alembic_upgrade_preserves_phase0_data(tmp_path, monkeypatch):
     assert "research_run_nodes" in inspector.get_table_names()
     assert "research_run_edges" in inspector.get_table_names()
     assert "execution_attempts" in inspector.get_table_names()
+    assert "evidence_artifacts" in inspector.get_table_names()
+    assert "claims" in inspector.get_table_names()
+    assert "claim_links" in inspector.get_table_names()
     assert "agent_payment_profiles" in inspector.get_table_names()
     assert "payment_notifications" in inspector.get_table_names()
     assert "payment_reconciliations" in inspector.get_table_names()
@@ -709,6 +718,9 @@ def test_alembic_upgrade_is_idempotent_for_precreated_tables(tmp_path, monkeypat
     inspector = inspect(engine)
     assert "alembic_version" in inspector.get_table_names()
     assert "research_runs" in inspector.get_table_names()
+    assert "evidence_artifacts" in inspector.get_table_names()
+    assert "claims" in inspector.get_table_names()
+    assert "claim_links" in inspector.get_table_names()
     assert "agent_payment_profiles" in inspector.get_table_names()
 
 
@@ -783,6 +795,217 @@ def test_research_run_evidence_and_report_routes(client: TestClient):
     assert len(report_payload["claims"]) >= 3
     assert len(report_payload["critic_findings"]) >= 1
     assert report_payload["quality_summary"]["citation_coverage"] == 1.0
+
+
+def test_research_run_persists_phase2_evidence_graph_records(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+    assert completed["status"] == "completed"
+
+    session = SessionLocal()
+    try:
+        artifacts = (
+            session.query(EvidenceArtifact)
+            .filter(EvidenceArtifact.research_run_id == research_run_id)
+            .order_by(EvidenceArtifact.order_index.asc(), EvidenceArtifact.id.asc())
+            .all()
+        )
+        claims = (
+            session.query(Claim)
+            .filter(Claim.research_run_id == research_run_id)
+            .order_by(Claim.claim_order.asc(), Claim.id.asc())
+            .all()
+        )
+        links = (
+            session.query(ClaimLink)
+            .filter(ClaimLink.research_run_id == research_run_id)
+            .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
+            .all()
+        )
+    finally:
+        session.close()
+
+    assert [artifact.artifact_key for artifact in artifacts] == [f"S{index}" for index in range(1, 7)]
+    assert [artifact.curation_status for artifact in artifacts] == [
+        "cited",
+        "cited",
+        "selected",
+        "selected",
+        "selected",
+        "selected",
+    ]
+    assert [claim.claim_id for claim in claims] == ["C1", "C2", "C3"]
+    assert [claim.claim for claim in claims] == [
+        "Markets priced in immediate supply and shipping risk.",
+        "The answer reflects evidence available on March 9, 2026.",
+        "Longer-run effects remain uncertain while the conflict evolves.",
+    ]
+    assert len(links) == 4
+    assert [link.artifact_key for link in links if link.claim_id == "C1"] == ["S1", "S2"]
+
+
+def test_research_run_evidence_graph_and_report_pack_routes(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+    assert completed["status"] == "completed"
+
+    graph_response = client.get(f"/api/research-runs/{research_run_id}/evidence-graph")
+    assert graph_response.status_code == 200
+    graph_payload = graph_response.json()
+    assert graph_payload["schema_version"] == "phase2.v1"
+    assert graph_payload["summary"] == {
+        "artifact_count": 6,
+        "cited_artifact_count": 2,
+        "filtered_artifact_count": 0,
+        "claim_count": 3,
+        "link_count": 4,
+    }
+    assert [artifact["artifact_key"] for artifact in graph_payload["artifacts"]] == [
+        f"S{index}" for index in range(1, 7)
+    ]
+    assert [claim["claim_id"] for claim in graph_payload["claims"]] == ["C1", "C2", "C3"]
+    assert graph_payload["claims"][0]["supporting_citation_ids"] == ["S1", "S2"]
+    assert graph_payload["claims"][2]["supporting_citation_ids"] == ["S1"]
+    assert graph_payload["links"][0] == {
+        "claim_id": "C1",
+        "artifact_key": "S1",
+        "citation_id": "S1",
+        "relation_type": "supports",
+        "link_order": 1,
+    }
+
+    report_pack_response = client.get(f"/api/research-runs/{research_run_id}/report-pack")
+    assert report_pack_response.status_code == 200
+    report_pack_payload = report_pack_response.json()
+    assert report_pack_payload["schema_version"] == "phase2.v1"
+    assert report_pack_payload["generated_at"]
+    assert report_pack_payload["rewritten_research_brief"].startswith("Investigate:")
+    assert report_pack_payload["answer_markdown"].startswith("## Summary")
+    assert [claim["claim_id"] for claim in report_pack_payload["claims"]] == ["C1", "C2", "C3"]
+    assert [citation["artifact_key"] for citation in report_pack_payload["citations"]] == ["S1", "S2"]
+    assert [item["artifact_key"] for item in report_pack_payload["supporting_evidence"]] == ["S1", "S2"]
+    assert len(report_pack_payload["claim_lineage"]) == 4
+    assert report_pack_payload["quality_summary"]["citation_coverage"] == 1.0
+
+
+def test_research_run_evidence_graph_uses_persisted_artifacts_before_completion(
+    client: TestClient, monkeypatch
+):
+    original_post_agent_request = research_api_executor._post_agent_request
+    gate = asyncio.Event()
+
+    async def _slow_draft_node(endpoint, payload):
+        context = payload.get("context") or {}
+        if context.get("node_strategy") == "draft_synthesis":
+            await gate.wait()
+        return await original_post_agent_request(endpoint, payload)
+
+    monkeypatch.setattr(research_api_executor, "_post_agent_request", _slow_draft_node)
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    in_flight = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: any(
+            node["node_id"] == "draft_synthesis" and node["status"] == "running"
+            for node in item["nodes"]
+        ),
+        timeout=10.0,
+    )
+    assert in_flight["status"] == "running"
+
+    graph_response = client.get(f"/api/research-runs/{research_run_id}/evidence-graph")
+    assert graph_response.status_code == 200
+    graph_payload = graph_response.json()
+    assert graph_payload["status"] == "running"
+    assert graph_payload["summary"]["artifact_count"] == 6
+    assert graph_payload["summary"]["claim_count"] == 0
+    assert graph_payload["summary"]["link_count"] == 0
+    assert graph_payload["artifacts"][0]["artifact_key"] == "S1"
+
+    gate.set()
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+        timeout=10.0,
+    )
+    assert completed["status"] == "completed"
+
+
+def test_phase2_graph_routes_return_409_for_legacy_runs_without_backfill(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+    assert completed["status"] == "completed"
+
+    session = SessionLocal()
+    try:
+        run_record = session.query(ResearchRun).filter(ResearchRun.id == research_run_id).one()
+        run_meta = dict(run_record.meta or {})
+        run_meta.pop("evidence_graph_schema_version", None)
+        run_record.meta = run_meta
+        session.query(ClaimLink).filter(ClaimLink.research_run_id == research_run_id).delete(
+            synchronize_session=False
+        )
+        session.query(Claim).filter(Claim.research_run_id == research_run_id).delete(
+            synchronize_session=False
+        )
+        session.query(EvidenceArtifact).filter(
+            EvidenceArtifact.research_run_id == research_run_id
+        ).delete(synchronize_session=False)
+        session.commit()
+    finally:
+        session.close()
+
+    evidence_response = client.get(f"/api/research-runs/{research_run_id}/evidence")
+    assert evidence_response.status_code == 200
+    report_response = client.get(f"/api/research-runs/{research_run_id}/report")
+    assert report_response.status_code == 200
+
+    graph_response = client.get(f"/api/research-runs/{research_run_id}/evidence-graph")
+    assert graph_response.status_code == 409
+    assert "Rerun the research job" in graph_response.json()["detail"]
+
+    report_pack_response = client.get(f"/api/research-runs/{research_run_id}/report-pack")
+    assert report_pack_response.status_code == 409
+    assert "Rerun the research job" in report_pack_response.json()["detail"]
 
 
 def test_research_run_pause_and_resume(client: TestClient, monkeypatch):

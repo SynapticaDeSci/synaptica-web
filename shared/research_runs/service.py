@@ -7,7 +7,9 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from hashlib import sha1
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from strands.agent.agent_result import AgentResult
 from strands._async import run_async
@@ -16,6 +18,9 @@ from strands.telemetry.metrics import EventLoopMetrics
 
 from agents.orchestrator.tools import create_todo_list, execute_microtask
 from shared.database import (
+    Claim,
+    ClaimLink,
+    EvidenceArtifact,
     ExecutionAttempt,
     ResearchRun,
     ResearchRunEdge,
@@ -45,6 +50,22 @@ from .planner import (
     SourceRequirements,
     build_research_run_plan,
 )
+from .payloads import (
+    EvidenceArtifactPayload,
+    EvidenceGraphClaimPayload,
+    EvidenceGraphLinkPayload,
+    EvidenceGraphSummaryPayload,
+    ResearchRunAttemptPayload,
+    ResearchRunEdgePayload,
+    ResearchRunEvidenceGraphPayload,
+    ResearchRunEvidencePayload,
+    ResearchRunNodePayload,
+    ResearchRunPayload,
+    ResearchRunReportPackPayload,
+    ResearchRunReportPayload,
+    ResearchRunSourcePayload,
+    RoundsCompletedPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +75,24 @@ RUN_CONTROL_PAUSE_REQUESTED = "pause_requested"
 RUN_CONTROL_PAUSED = "paused"
 RUN_CONTROL_CANCEL_REQUESTED = "cancel_requested"
 RUN_CONTROL_CANCELLED = "cancelled"
+PHASE2_GRAPH_SCHEMA_VERSION = "phase2.v1"
+PHASE2_GRAPH_SCHEMA_META_KEY = "evidence_graph_schema_version"
+CLAIM_RELATION_SUPPORTS = "supports"
+
+_ARTIFACT_STATUS_PRECEDENCE = {
+    "gathered": 0,
+    "selected": 1,
+    "filtered": 1,
+    "cited": 2,
+}
 
 
 class ResearchRunCancelledError(RuntimeError):
     """Raised when a research run has been cancelled cooperatively."""
+
+
+class ResearchRunPhase2UnavailableError(RuntimeError):
+    """Raised when a legacy run lacks persisted Phase 2 graph data."""
 
 
 class _ResearchRunGraphNodeExecutor:
@@ -98,23 +133,16 @@ def _enum_value(value: Any) -> Any:
 
 
 def _normalize_rounds_completed(result: Any) -> Dict[str, int]:
-    if isinstance(result, dict):
-        rounds = result.get("rounds_completed")
-        if isinstance(rounds, dict):
-            return {
-                "evidence_rounds": int(rounds.get("evidence_rounds", 0) or 0),
-                "critique_rounds": int(rounds.get("critique_rounds", 0) or 0),
-            }
-    return {"evidence_rounds": 0, "critique_rounds": 0}
+    return RoundsCompletedPayload.from_payload(result).model_dump(mode="json")
 
 
 def _merge_rounds_completed(*payloads: Any) -> Dict[str, int]:
-    merged = {"evidence_rounds": 0, "critique_rounds": 0}
+    merged = RoundsCompletedPayload()
     for payload in payloads:
-        rounds = _normalize_rounds_completed(payload)
-        merged["evidence_rounds"] = max(merged["evidence_rounds"], rounds["evidence_rounds"])
-        merged["critique_rounds"] = max(merged["critique_rounds"], rounds["critique_rounds"])
-    return merged
+        rounds = RoundsCompletedPayload.from_payload(payload)
+        merged.evidence_rounds = max(merged.evidence_rounds, rounds.evidence_rounds)
+        merged.critique_rounds = max(merged.critique_rounds, rounds.critique_rounds)
+    return merged.model_dump(mode="json")
 
 
 def _build_research_run_title(description: str) -> str:
@@ -146,6 +174,102 @@ def _get_node_result_from_payload(payload: Dict[str, Any], node_id: str) -> Opti
         if isinstance(result, dict):
             return result
     return None
+
+
+def _coerce_string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        trimmed = item.strip()
+        if trimmed:
+            normalized.append(trimmed)
+    return normalized
+
+
+def _normalize_source_url(url: Any) -> Optional[str]:
+    if not isinstance(url, str):
+        return None
+    raw = url.strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw)
+    if not parsed.scheme and not parsed.netloc:
+        return raw.lower()
+    path = parsed.path or ""
+    if path not in {"", "/"}:
+        path = path.rstrip("/")
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)), doseq=True)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, query, ""))
+
+
+def _build_fallback_artifact_key(source: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    normalized_url = _normalize_source_url(source.get("url"))
+    if normalized_url:
+        return f"url:{sha1(normalized_url.encode('utf-8')).hexdigest()[:16]}", normalized_url
+
+    fingerprint = json.dumps(
+        {
+            "title": source.get("title"),
+            "url": source.get("url"),
+            "publisher": source.get("publisher"),
+            "published_at": source.get("published_at"),
+            "source_type": source.get("source_type"),
+            "snippet": source.get("snippet"),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return f"artifact:{sha1(fingerprint.encode('utf-8')).hexdigest()[:16]}", normalized_url
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _build_freshness_metadata(
+    *,
+    source: Dict[str, Any],
+    freshness_required: bool,
+    freshness_window_days: Optional[int],
+    reference_time: Optional[datetime],
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "required": freshness_required,
+        "window_days": freshness_window_days,
+    }
+    published_at = source.get("published_at")
+    if published_at:
+        metadata["published_at"] = published_at
+
+    published_at_dt = _parse_datetime(published_at)
+    if published_at_dt is None or freshness_window_days is None:
+        return metadata
+
+    comparison_time = reference_time or _utcnow()
+    if published_at_dt.tzinfo is not None and comparison_time.tzinfo is None:
+        comparison_time = comparison_time.replace(tzinfo=published_at_dt.tzinfo)
+    if published_at_dt.tzinfo is None and comparison_time.tzinfo is not None:
+        published_at_dt = published_at_dt.replace(tzinfo=comparison_time.tzinfo)
+
+    age_days = max((comparison_time - published_at_dt).total_seconds() / 86400.0, 0.0)
+    metadata["age_days"] = round(age_days, 3)
+    metadata["is_fresh"] = age_days <= freshness_window_days
+    return metadata
+
+
+def _artifact_status_rank(status: Optional[str]) -> int:
+    return _ARTIFACT_STATUS_PRECEDENCE.get(str(status or "").lower(), -1)
 
 
 def create_research_run(
@@ -187,6 +311,7 @@ def create_research_run(
                 "planner_notes": plan.profile.planner_notes,
                 "scenario_analysis_requested": plan.profile.scenario_analysis_requested,
                 "generated_at": plan.profile.generated_at,
+                PHASE2_GRAPH_SCHEMA_META_KEY: PHASE2_GRAPH_SCHEMA_VERSION,
                 "control_state": RUN_CONTROL_ACTIVE,
                 "control_reason": None,
             },
@@ -404,21 +529,20 @@ def get_research_run_evidence_payload(research_run_id: str) -> Optional[Dict[str
     curated_sources = (
         result.get("curated_sources") if isinstance(result, dict) else None
     ) or _get_node_result_from_payload(payload, "curate_sources") or {}
-    return {
-        "research_run_id": research_run_id,
-        "status": payload.get("status"),
-        "claim_targets": (planning or {}).get("claim_targets") or [],
-        "rewritten_research_brief": (planning or {}).get("rewritten_research_brief"),
-        "sources": (curated_sources or {}).get("sources")
-        or (evidence or {}).get("sources")
-        or [],
-        "filtered_sources": (curated_sources or {}).get("filtered_sources") or [],
-        "citations": (curated_sources or {}).get("citations") or [],
-        "coverage_summary": (evidence or {}).get("coverage_summary") or {},
-        "source_summary": (curated_sources or {}).get("source_summary") or {},
-        "freshness_summary": (curated_sources or {}).get("freshness_summary") or {},
-        "search_lanes_used": (evidence or {}).get("search_lanes_used") or [],
-    }
+    evidence_payload = ResearchRunEvidencePayload(
+        research_run_id=research_run_id,
+        status=str(payload.get("status") or ""),
+        claim_targets=(planning or {}).get("claim_targets") or [],
+        rewritten_research_brief=(planning or {}).get("rewritten_research_brief"),
+        sources=(curated_sources or {}).get("sources") or (evidence or {}).get("sources") or [],
+        filtered_sources=(curated_sources or {}).get("filtered_sources") or [],
+        citations=(curated_sources or {}).get("citations") or [],
+        coverage_summary=(evidence or {}).get("coverage_summary") or {},
+        source_summary=(curated_sources or {}).get("source_summary") or {},
+        freshness_summary=(curated_sources or {}).get("freshness_summary") or {},
+        search_lanes_used=(evidence or {}).get("search_lanes_used") or [],
+    )
+    return evidence_payload.model_dump(mode="json")
 
 
 def get_research_run_report_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
@@ -428,17 +552,555 @@ def get_research_run_report_payload(research_run_id: str) -> Optional[Dict[str, 
     if payload is None:
         return None
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    return {
-        "research_run_id": research_run_id,
-        "status": payload.get("status"),
-        "answer_markdown": (result or {}).get("answer_markdown"),
-        "answer": (result or {}).get("answer"),
-        "claims": (result or {}).get("claims") or [],
-        "citations": (result or {}).get("citations") or [],
-        "limitations": (result or {}).get("limitations") or [],
-        "critic_findings": (result or {}).get("critic_findings") or [],
-        "quality_summary": (result or {}).get("quality_summary") or {},
+    report_payload = ResearchRunReportPayload(
+        research_run_id=research_run_id,
+        status=str(payload.get("status") or ""),
+        answer_markdown=(result or {}).get("answer_markdown"),
+        answer=(result or {}).get("answer"),
+        claims=(result or {}).get("claims") or [],
+        citations=(result or {}).get("citations") or [],
+        limitations=(result or {}).get("limitations") or [],
+        critic_findings=(result or {}).get("critic_findings") or [],
+        quality_summary=(result or {}).get("quality_summary") or {},
+    )
+    return report_payload.model_dump(mode="json")
+
+
+def _upsert_evidence_artifact(
+    db,
+    *,
+    run_record: ResearchRun,
+    source: Dict[str, Any],
+    node_id: str,
+    curation_status: str,
+    order_index: int,
+) -> EvidenceArtifact:
+    source_payload = ResearchRunSourcePayload.model_validate(source)
+    source_data = source_payload.model_dump(mode="python")
+    citation_id = source_payload.citation_id
+    fallback_key, normalized_url = _build_fallback_artifact_key(source_data)
+
+    query = db.query(EvidenceArtifact).filter(EvidenceArtifact.research_run_id == run_record.id)
+    artifact = None
+    if citation_id:
+        artifact = query.filter(EvidenceArtifact.artifact_key == citation_id).one_or_none()
+    if artifact is None:
+        artifact = query.filter(EvidenceArtifact.artifact_key == fallback_key).one_or_none()
+    if artifact is None and citation_id and normalized_url:
+        artifact = (
+            query.filter(EvidenceArtifact.normalized_url == normalized_url)
+            .order_by(EvidenceArtifact.id.asc())
+            .one_or_none()
+        )
+
+    if artifact is None:
+        artifact = EvidenceArtifact(  # type: ignore[call-arg]
+            research_run_id=run_record.id,
+            artifact_key=citation_id or fallback_key,
+            origin_node_id=node_id,
+            last_seen_node_id=node_id,
+        )
+        db.add(artifact)
+
+    current_rank = _artifact_status_rank(artifact.curation_status)
+    incoming_rank = _artifact_status_rank(curation_status)
+
+    if citation_id:
+        artifact.artifact_key = citation_id
+        artifact.citation_id = citation_id
+    elif not artifact.artifact_key:
+        artifact.artifact_key = fallback_key
+
+    artifact.artifact_type = source_payload.artifact_type or artifact.artifact_type or "source"
+    artifact.origin_node_id = artifact.origin_node_id or node_id
+    artifact.last_seen_node_id = node_id
+    if artifact.order_index is None or incoming_rank >= current_rank:
+        artifact.order_index = order_index
+    if incoming_rank >= current_rank:
+        artifact.curation_status = curation_status
+
+    if source_payload.title is not None:
+        artifact.title = source_payload.title
+    if source_payload.url is not None:
+        artifact.url = source_payload.url
+    artifact.normalized_url = normalized_url or artifact.normalized_url
+    if source_payload.publisher is not None:
+        artifact.publisher = source_payload.publisher
+    if source_payload.published_at is not None:
+        artifact.published_at = source_payload.published_at
+    if source_payload.source_type is not None:
+        artifact.source_type = source_payload.source_type
+    if source_payload.snippet is not None:
+        artifact.snippet = source_payload.snippet
+    if source_payload.display_snippet is not None:
+        artifact.display_snippet = source_payload.display_snippet
+    if source_payload.filtered_reason is not None:
+        artifact.filtered_reason = source_payload.filtered_reason
+    if source_payload.relevance_score is not None:
+        artifact.relevance_score = source_payload.relevance_score
+
+    merged_quality_flags = sorted(
+        set(_coerce_string_list(artifact.quality_flags or []))
+        | set(source_payload.quality_flags)
+    )
+    artifact.quality_flags = merged_quality_flags
+
+    source_requirements = dict((run_record.meta or {}).get("source_requirements") or {})
+    freshness_window_days = source_requirements.get("freshness_window_days")
+    try:
+        freshness_window_days = (
+            int(freshness_window_days) if freshness_window_days is not None else None
+        )
+    except (TypeError, ValueError):
+        freshness_window_days = None
+    artifact.freshness_metadata = _build_freshness_metadata(
+        source=source_data,
+        freshness_required=bool((run_record.meta or {}).get("freshness_required", False)),
+        freshness_window_days=freshness_window_days,
+        reference_time=run_record.completed_at or run_record.updated_at or run_record.created_at,
+    )
+    artifact.raw_payload = redact_sensitive_payload(
+        source_payload.model_dump(mode="json", exclude_none=True)
+    )
+
+    artifact_meta = dict(artifact.meta or {})
+    observed_node_ids = _coerce_string_list(artifact_meta.get("observed_node_ids") or [])
+    if node_id not in observed_node_ids:
+        observed_node_ids.append(node_id)
+    artifact_meta["observed_node_ids"] = observed_node_ids
+    artifact_meta["fallback_key"] = fallback_key
+    artifact.meta = artifact_meta
+    return artifact
+
+
+def _persist_phase2_evidence_artifacts(
+    db,
+    *,
+    run_record: ResearchRun,
+    node_id: str,
+    node_result: Any,
+) -> None:
+    if not isinstance(node_result, dict):
+        return
+
+    if node_id == "gather_evidence":
+        sources = [item for item in (node_result.get("sources") or []) if isinstance(item, dict)]
+        for index, source in enumerate(sources, start=1):
+            _upsert_evidence_artifact(
+                db,
+                run_record=run_record,
+                source=source,
+                node_id=node_id,
+                curation_status="gathered",
+                order_index=index,
+            )
+        return
+
+    if node_id != "curate_sources":
+        return
+
+    citations = [item for item in (node_result.get("citations") or []) if isinstance(item, dict)]
+    sources = [item for item in (node_result.get("sources") or []) if isinstance(item, dict)]
+    filtered_sources = [
+        item for item in (node_result.get("filtered_sources") or []) if isinstance(item, dict)
+    ]
+
+    for index, citation in enumerate(citations, start=1):
+        _upsert_evidence_artifact(
+            db,
+            run_record=run_record,
+            source=citation,
+            node_id=node_id,
+            curation_status="cited",
+            order_index=index,
+        )
+    for index, source in enumerate(sources, start=1):
+        _upsert_evidence_artifact(
+            db,
+            run_record=run_record,
+            source=source,
+            node_id=node_id,
+            curation_status="selected",
+            order_index=index,
+        )
+    for index, source in enumerate(filtered_sources, start=len(sources) + 1):
+        _upsert_evidence_artifact(
+            db,
+            run_record=run_record,
+            source=source,
+            node_id=node_id,
+            curation_status="filtered",
+            order_index=index,
+        )
+
+
+def _ensure_placeholder_artifact(
+    db,
+    *,
+    run_record: ResearchRun,
+    citation_id: str,
+    order_index: int,
+) -> EvidenceArtifact:
+    artifact = (
+        db.query(EvidenceArtifact)
+        .filter(EvidenceArtifact.research_run_id == run_record.id)
+        .filter(EvidenceArtifact.artifact_key == citation_id)
+        .one_or_none()
+    )
+    if artifact is not None:
+        return artifact
+
+    artifact = EvidenceArtifact(  # type: ignore[call-arg]
+        research_run_id=run_record.id,
+        artifact_key=citation_id,
+        citation_id=citation_id,
+        artifact_type="source",
+        origin_node_id="revise_final_answer",
+        last_seen_node_id="revise_final_answer",
+        order_index=order_index,
+        curation_status="cited",
+        quality_flags=[],
+        freshness_metadata={},
+        raw_payload={"citation_id": citation_id},
+        meta={"placeholder": True},
+    )
+    db.add(artifact)
+    return artifact
+
+
+def _persist_phase2_claims_and_links(
+    db,
+    *,
+    run_record: ResearchRun,
+    final_answer: Any,
+) -> None:
+    if not isinstance(final_answer, dict):
+        return
+
+    citations = [item for item in (final_answer.get("citations") or []) if isinstance(item, dict)]
+    for index, citation in enumerate(citations, start=1):
+        _upsert_evidence_artifact(
+            db,
+            run_record=run_record,
+            source=citation,
+            node_id="revise_final_answer",
+            curation_status="cited",
+            order_index=index,
+        )
+    db.flush()
+
+    db.query(ClaimLink).filter(ClaimLink.research_run_id == run_record.id).delete(
+        synchronize_session=False
+    )
+    db.query(Claim).filter(Claim.research_run_id == run_record.id).delete(synchronize_session=False)
+
+    artifacts = (
+        db.query(EvidenceArtifact)
+        .filter(EvidenceArtifact.research_run_id == run_record.id)
+        .order_by(EvidenceArtifact.id.asc())
+        .all()
+    )
+    artifacts_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
+    artifacts_by_citation = {
+        artifact.citation_id: artifact for artifact in artifacts if artifact.citation_id
     }
+
+    claims = [item for item in (final_answer.get("claims") or []) if isinstance(item, dict)]
+    used_claim_ids: set[str] = set()
+    for claim_index, item in enumerate(claims, start=1):
+        raw_claim_id = item.get("claim_id")
+        candidate_id = str(raw_claim_id).strip() if raw_claim_id is not None else ""
+        if not candidate_id:
+            candidate_id = f"C{claim_index}"
+
+        claim_id = candidate_id
+        suffix = 2
+        while claim_id in used_claim_ids:
+            claim_id = f"{candidate_id}-{suffix}"
+            suffix += 1
+        used_claim_ids.add(claim_id)
+
+        claim_text = str(item.get("claim") or "").strip() or f"Claim {claim_index}"
+        supporting_citation_ids: List[str] = []
+        seen_citation_ids = set()
+        for citation_id in _coerce_string_list(item.get("supporting_citation_ids") or []):
+            if citation_id in seen_citation_ids:
+                continue
+            seen_citation_ids.add(citation_id)
+            supporting_citation_ids.append(citation_id)
+
+        db.add(
+            Claim(  # type: ignore[call-arg]
+                research_run_id=run_record.id,
+                claim_id=claim_id,
+                claim_order=claim_index,
+                claim=claim_text,
+                confidence=str(item.get("confidence")) if item.get("confidence") is not None else None,
+                source_of_truth_node_id="revise_final_answer",
+                raw_payload=redact_sensitive_payload(dict(item)),
+                meta={"supporting_citation_ids": supporting_citation_ids},
+            )
+        )
+
+        for link_order, citation_id in enumerate(supporting_citation_ids, start=1):
+            artifact = artifacts_by_key.get(citation_id) or artifacts_by_citation.get(citation_id)
+            if artifact is None:
+                artifact = _ensure_placeholder_artifact(
+                    db,
+                    run_record=run_record,
+                    citation_id=citation_id,
+                    order_index=link_order,
+                )
+                artifacts_by_key[artifact.artifact_key] = artifact
+                if artifact.citation_id:
+                    artifacts_by_citation[artifact.citation_id] = artifact
+
+            db.add(
+                ClaimLink(  # type: ignore[call-arg]
+                    research_run_id=run_record.id,
+                    claim_id=claim_id,
+                    artifact_key=artifact.artifact_key,
+                    relation_type=CLAIM_RELATION_SUPPORTS,
+                    link_order=link_order,
+                    raw_payload={"citation_id": citation_id},
+                )
+            )
+
+
+def _load_phase2_graph_records(
+    research_run_id: str,
+) -> Optional[tuple[ResearchRun, List[EvidenceArtifact], List[Claim], List[ClaimLink]]]:
+    db = SessionLocal()
+    try:
+        record = db.query(ResearchRun).filter(ResearchRun.id == research_run_id).one_or_none()
+        if record is None:
+            return None
+
+        meta = dict(record.meta or {})
+        if meta.get(PHASE2_GRAPH_SCHEMA_META_KEY) != PHASE2_GRAPH_SCHEMA_VERSION:
+            raise ResearchRunPhase2UnavailableError(
+                "Research run predates Phase 2 graph persistence. Rerun the research job to hydrate evidence graph data."
+            )
+
+        artifacts = (
+            db.query(EvidenceArtifact)
+            .filter(EvidenceArtifact.research_run_id == research_run_id)
+            .order_by(EvidenceArtifact.id.asc())
+            .all()
+        )
+        claims = (
+            db.query(Claim)
+            .filter(Claim.research_run_id == research_run_id)
+            .order_by(Claim.claim_order.asc(), Claim.id.asc())
+            .all()
+        )
+        links = (
+            db.query(ClaimLink)
+            .filter(ClaimLink.research_run_id == research_run_id)
+            .order_by(ClaimLink.claim_id.asc(), ClaimLink.link_order.asc(), ClaimLink.id.asc())
+            .all()
+        )
+        return record, artifacts, claims, links
+    finally:
+        db.close()
+
+
+def get_research_run_evidence_graph_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Return the persisted Phase 2 evidence graph for a research run."""
+
+    loaded = _load_phase2_graph_records(research_run_id)
+    if loaded is None:
+        return None
+
+    record, artifacts, claims, links = loaded
+    payload = get_research_run_payload(research_run_id) or {}
+    artifacts = sorted(
+        artifacts,
+        key=lambda item: (
+            item.order_index is None,
+            item.order_index or 0,
+            item.citation_id or item.artifact_key,
+        ),
+    )
+    claim_order_by_id = {claim.claim_id: claim.claim_order for claim in claims}
+    artifact_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
+    links = sorted(
+        links,
+        key=lambda item: (
+            claim_order_by_id.get(item.claim_id, 0),
+            item.link_order or 0,
+            item.artifact_key,
+        ),
+    )
+    links_by_claim: Dict[str, List[ClaimLink]] = {}
+    for link in links:
+        links_by_claim.setdefault(link.claim_id, []).append(link)
+
+    serialized_artifacts = [EvidenceArtifactPayload.from_record(item) for item in artifacts]
+    serialized_claims: List[EvidenceGraphClaimPayload] = []
+    for claim in claims:
+        claim_links = links_by_claim.get(claim.claim_id, [])
+        supporting_artifact_keys = [link.artifact_key for link in claim_links]
+        supporting_citation_ids = [
+            artifact_by_key.get(link.artifact_key).citation_id if artifact_by_key.get(link.artifact_key) else None
+            for link in claim_links
+        ]
+        serialized_claims.append(
+            EvidenceGraphClaimPayload(
+                claim_id=claim.claim_id,
+                claim_order=claim.claim_order,
+                claim=claim.claim,
+                confidence=claim.confidence,
+                supporting_artifact_keys=supporting_artifact_keys,
+                supporting_citation_ids=[item for item in supporting_citation_ids if item],
+            )
+        )
+
+    serialized_links: List[EvidenceGraphLinkPayload] = []
+    for link in links:
+        artifact = artifact_by_key.get(link.artifact_key)
+        serialized_links.append(
+            EvidenceGraphLinkPayload(
+                claim_id=link.claim_id,
+                artifact_key=link.artifact_key,
+                citation_id=artifact.citation_id if artifact else None,
+                relation_type=link.relation_type,
+                link_order=link.link_order,
+            )
+        )
+
+    meta = dict(record.meta or {})
+    graph_payload = ResearchRunEvidenceGraphPayload(
+        schema_version=PHASE2_GRAPH_SCHEMA_VERSION,
+        research_run_id=record.id,
+        title=record.title,
+        description=record.description,
+        status=str(payload.get("status") or _enum_value(record.status)),
+        workflow=meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+        artifacts=serialized_artifacts,
+        claims=serialized_claims,
+        links=serialized_links,
+        summary=EvidenceGraphSummaryPayload(
+            artifact_count=len(serialized_artifacts),
+            cited_artifact_count=sum(
+                1 for item in serialized_artifacts if item.curation_status == "cited"
+            ),
+            filtered_artifact_count=sum(
+                1 for item in serialized_artifacts if item.curation_status == "filtered"
+            ),
+            claim_count=len(serialized_claims),
+            link_count=len(serialized_links),
+        ),
+    )
+    return graph_payload.model_dump(mode="json")
+
+
+def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
+    """Return the persisted Phase 2 JSON report pack for a research run."""
+
+    loaded = _load_phase2_graph_records(research_run_id)
+    if loaded is None:
+        return None
+
+    record, artifacts, _claims, _links = loaded
+    run_payload = get_research_run_payload(research_run_id) or {}
+    evidence_payload = run_payload.get("evidence") or {}
+    report_payload = run_payload.get("report") or {}
+    graph_payload = run_payload.get("evidence_graph") or {}
+
+    artifact_by_key = {artifact.artifact_key: artifact for artifact in artifacts}
+    artifact_by_citation = {
+        artifact.citation_id: artifact for artifact in artifacts if artifact.citation_id
+    }
+
+    citation_artifacts: List[EvidenceArtifactPayload] = []
+    seen_citations = set()
+    for index, citation in enumerate(report_payload.get("citations") or [], start=1):
+        if not isinstance(citation, dict):
+            continue
+        citation_payload = ResearchRunSourcePayload.model_validate(citation)
+        citation_id = citation_payload.citation_id or ""
+        artifact = artifact_by_citation.get(citation_id) or artifact_by_key.get(citation_id)
+        if artifact is None:
+            fallback_key, _ = _build_fallback_artifact_key(citation)
+            artifact = artifact_by_key.get(fallback_key)
+        if artifact is None:
+            artifact_payload = EvidenceArtifactPayload(
+                artifact_key=citation_id or f"report-citation-{index}",
+                citation_id=citation_id or None,
+                artifact_type="source",
+                origin_node_id="revise_final_answer",
+                last_seen_node_id="revise_final_answer",
+                order_index=index,
+                title=citation_payload.title,
+                url=citation_payload.url,
+                normalized_url=_normalize_source_url(citation_payload.url),
+                publisher=citation_payload.publisher,
+                published_at=citation_payload.published_at,
+                source_type=citation_payload.source_type,
+                snippet=citation_payload.snippet,
+                display_snippet=citation_payload.display_snippet,
+                relevance_score=citation_payload.relevance_score,
+                curation_status="cited",
+                quality_flags=citation_payload.quality_flags,
+                filtered_reason=citation_payload.filtered_reason,
+                freshness_metadata={},
+            )
+        else:
+            artifact_payload = EvidenceArtifactPayload.from_record(artifact)
+        dedupe_key = artifact_payload.artifact_key
+        if dedupe_key in seen_citations:
+            continue
+        seen_citations.add(dedupe_key)
+        citation_artifacts.append(artifact_payload)
+
+    supporting_evidence: List[EvidenceArtifactPayload] = []
+    seen_supporting_keys = set()
+    for link in graph_payload.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        artifact_key = link.get("artifact_key")
+        if not artifact_key or artifact_key in seen_supporting_keys:
+            continue
+        artifact = artifact_by_key.get(artifact_key)
+        if artifact is None:
+            continue
+        supporting_evidence.append(EvidenceArtifactPayload.from_record(artifact))
+        seen_supporting_keys.add(artifact_key)
+
+    graph_claims = [
+        EvidenceGraphClaimPayload.model_validate(item)
+        for item in graph_payload.get("claims") or []
+        if isinstance(item, dict)
+    ]
+    graph_links = [
+        EvidenceGraphLinkPayload.model_validate(item)
+        for item in graph_payload.get("links") or []
+        if isinstance(item, dict)
+    ]
+
+    generated_at = record.completed_at or record.updated_at or record.created_at
+    meta = dict(record.meta or {})
+    report_pack_payload = ResearchRunReportPackPayload(
+        schema_version=PHASE2_GRAPH_SCHEMA_VERSION,
+        research_run_id=record.id,
+        title=record.title,
+        description=record.description,
+        status=str(report_payload.get("status") or _enum_value(record.status)),
+        workflow=meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+        generated_at=generated_at.isoformat() if generated_at else None,
+        rewritten_research_brief=evidence_payload.get("rewritten_research_brief"),
+        answer_markdown=report_payload.get("answer_markdown"),
+        answer=report_payload.get("answer"),
+        claims=graph_claims,
+        citations=citation_artifacts,
+        supporting_evidence=supporting_evidence,
+        claim_lineage=graph_links,
+        quality_summary=report_payload.get("quality_summary") or {},
+        critic_findings=report_payload.get("critic_findings") or [],
+        limitations=report_payload.get("limitations") or [],
+    )
+    return report_pack_payload.model_dump(mode="json")
 
 
 def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
@@ -829,6 +1491,11 @@ class ResearchRunExecutor:
                     else []
                 ),
             }
+            _persist_phase2_claims_and_links(
+                db,
+                run_record=record,
+                final_answer=final_answer,
+            )
             record_meta["rounds_completed"] = rounds_completed
             record.meta = record_meta
             record.status = ResearchRunStatus.COMPLETED
@@ -1076,6 +1743,7 @@ class ResearchRunExecutor:
         db = SessionLocal()
         try:
             attempt = db.query(ExecutionAttempt).filter(ExecutionAttempt.id == attempt_id).one()
+            run_record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
             node_record = (
                 db.query(ResearchRunNode)
                 .filter(ResearchRunNode.research_run_id == self.research_run_id)
@@ -1102,6 +1770,14 @@ class ResearchRunExecutor:
             task.result = task_result
             if success or cancelled:
                 task.completed_at = _utcnow()
+
+            if success:
+                _persist_phase2_evidence_artifacts(
+                    db,
+                    run_record=run_record,
+                    node_id=node_id,
+                    node_result=result.get("result"),
+                )
 
             db.commit()
         except Exception:
@@ -1247,9 +1923,9 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         attempts_by_node.setdefault(attempt.node_id, []).append(attempt)
 
     any_waiting_for_review = False
-    nodes_payload: List[Dict[str, Any]] = []
+    nodes_payload: List[ResearchRunNodePayload] = []
     for node in nodes:
-        attempt_payloads = []
+        attempt_payloads: List[ResearchRunAttemptPayload] = []
         latest_attempt_status = None
         for attempt in attempts_by_node.get(node.node_id, []):
             derived_status = _derive_attempt_status(attempt)
@@ -1258,20 +1934,20 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
             )
             latest_attempt_status = derived_status
             attempt_payloads.append(
-                {
-                    "attempt_id": attempt.id,
-                    "attempt_number": attempt.attempt_number,
-                    "status": derived_status,
-                    "task_id": attempt.task_id,
-                    "payment_id": attempt.payment_id,
-                    "agent_id": attempt.agent_id,
-                    "verification_score": attempt.verification_score,
-                    "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
-                    "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
-                    "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
-                    "result": attempt.result,
-                    "error": attempt.error,
-                }
+                ResearchRunAttemptPayload(
+                    attempt_id=attempt.id,
+                    attempt_number=attempt.attempt_number,
+                    status=derived_status,
+                    task_id=attempt.task_id,
+                    payment_id=attempt.payment_id,
+                    agent_id=attempt.agent_id,
+                    verification_score=attempt.verification_score,
+                    created_at=attempt.created_at.isoformat() if attempt.created_at else None,
+                    started_at=attempt.started_at.isoformat() if attempt.started_at else None,
+                    completed_at=attempt.completed_at.isoformat() if attempt.completed_at else None,
+                    result=attempt.result,
+                    error=attempt.error,
+                )
             )
 
         node_status = _enum_value(node.status)
@@ -1282,31 +1958,34 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
             node_status = ResearchRunNodeStatus.WAITING_FOR_REVIEW.value
 
         nodes_payload.append(
-            {
-                "node_id": node.node_id,
-                "title": node.title,
-                "description": node.description,
-                "capability_requirements": node.capability_requirements,
-                "assigned_agent_id": node.assigned_agent_id,
-                "execution_order": node.execution_order,
-                "status": node_status,
-                "task_id": node.latest_task_id,
-                "payment_id": node.latest_payment_id,
-                "created_at": node.created_at.isoformat() if node.created_at else None,
-                "started_at": node.started_at.isoformat() if node.started_at else None,
-                "completed_at": node.completed_at.isoformat() if node.completed_at else None,
-                "result": node.result,
-                "error": node.error,
-                "attempts": attempt_payloads,
-            }
+            ResearchRunNodePayload(
+                node_id=node.node_id,
+                title=node.title,
+                description=node.description,
+                capability_requirements=node.capability_requirements,
+                assigned_agent_id=node.assigned_agent_id,
+                execution_order=node.execution_order,
+                status=node_status,
+                task_id=node.latest_task_id,
+                payment_id=node.latest_payment_id,
+                created_at=node.created_at.isoformat() if node.created_at else None,
+                started_at=node.started_at.isoformat() if node.started_at else None,
+                completed_at=node.completed_at.isoformat() if node.completed_at else None,
+                result=node.result,
+                error=node.error,
+                attempts=attempt_payloads,
+            )
         )
 
     run_status = _enum_value(record.status)
     meta = record.meta or {}
     control_state = _get_control_state(meta)
-    evidence_result = _get_node_result_from_payload({"nodes": nodes_payload}, "gather_evidence")
-    critique_result = _get_node_result_from_payload({"nodes": nodes_payload}, "critique_and_fact_check")
-    final_result = _get_node_result_from_payload({"nodes": nodes_payload}, "revise_final_answer")
+    nodes_payload_dicts = [item.model_dump(mode="json") for item in nodes_payload]
+    evidence_result = _get_node_result_from_payload({"nodes": nodes_payload_dicts}, "gather_evidence")
+    critique_result = _get_node_result_from_payload(
+        {"nodes": nodes_payload_dicts}, "critique_and_fact_check"
+    )
+    final_result = _get_node_result_from_payload({"nodes": nodes_payload_dicts}, "revise_final_answer")
     derived_rounds_completed = _merge_rounds_completed(
         evidence_result,
         critique_result,
@@ -1318,41 +1997,43 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         run_status = ResearchRunStatus.PAUSED.value
     if run_status == ResearchRunStatus.RUNNING.value and control_state == RUN_CONTROL_CANCEL_REQUESTED:
         run_status = ResearchRunStatus.CANCELLED.value if record.completed_at else ResearchRunStatus.RUNNING.value
-    return {
-        "id": record.id,
-        "title": record.title,
-        "description": record.description,
-        "status": run_status,
-        "workflow_template": record.workflow_template,
-        "workflow": meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
-        "budget_limit": record.budget_limit,
-        "verification_mode": record.verification_mode,
-        "research_mode": meta.get("research_mode", ResearchMode.AUTO.value),
-        "classified_mode": meta.get("classified_mode", ResearchMode.LITERATURE.value),
-        "depth_mode": meta.get("depth_mode", DepthMode.STANDARD.value),
-        "freshness_required": bool(meta.get("freshness_required", False)),
-        "source_requirements": meta.get("source_requirements") or {},
-        "rounds_planned": meta.get("rounds_planned") or {},
-        "rounds_completed": (
-            (record.result or {}).get("rounds_completed")
-            if isinstance(record.result, dict)
-            else None
-        )
-        or (derived_rounds_completed if any(derived_rounds_completed.values()) else None)
-        or meta.get("rounds_completed")
-        or {"evidence_rounds": 0, "critique_rounds": 0},
-        "created_at": record.created_at.isoformat() if record.created_at else None,
-        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
-        "started_at": record.started_at.isoformat() if record.started_at else None,
-        "completed_at": record.completed_at.isoformat() if record.completed_at else None,
-        "result": record.result,
-        "error": record.error,
-        "nodes": nodes_payload,
-        "edges": [
-            {
-                "from_node_id": edge.from_node_id,
-                "to_node_id": edge.to_node_id,
-            }
+    rounds_completed_payload = (
+        (record.result or {}).get("rounds_completed")
+        if isinstance(record.result, dict)
+        else None
+    ) or (derived_rounds_completed if any(derived_rounds_completed.values()) else None) or meta.get(
+        "rounds_completed"
+    )
+
+    research_run_payload = ResearchRunPayload(
+        id=record.id,
+        title=record.title,
+        description=record.description,
+        status=run_status,
+        workflow_template=record.workflow_template,
+        workflow=meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
+        budget_limit=record.budget_limit,
+        verification_mode=record.verification_mode,
+        research_mode=meta.get("research_mode", ResearchMode.AUTO.value),
+        classified_mode=meta.get("classified_mode", ResearchMode.LITERATURE.value),
+        depth_mode=meta.get("depth_mode", DepthMode.STANDARD.value),
+        freshness_required=bool(meta.get("freshness_required", False)),
+        source_requirements=meta.get("source_requirements") or {},
+        rounds_planned=meta.get("rounds_planned") or {},
+        rounds_completed=RoundsCompletedPayload.from_payload(rounds_completed_payload),
+        created_at=record.created_at.isoformat() if record.created_at else None,
+        updated_at=record.updated_at.isoformat() if record.updated_at else None,
+        started_at=record.started_at.isoformat() if record.started_at else None,
+        completed_at=record.completed_at.isoformat() if record.completed_at else None,
+        result=record.result,
+        error=record.error,
+        nodes=nodes_payload,
+        edges=[
+            ResearchRunEdgePayload(
+                from_node_id=edge.from_node_id,
+                to_node_id=edge.to_node_id,
+            )
             for edge in edges
         ],
-    }
+    )
+    return research_run_payload.model_dump(mode="json")
