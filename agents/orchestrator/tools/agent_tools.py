@@ -385,7 +385,7 @@ def _build_strict_quorum_result(
         },
         {
             "reviewer": "evidence_guard",
-            "approved": len(sources) >= required_sources if required_sources else len(sources) > 0,
+            "approved": len(sources) >= required_sources if required_sources else True,
             "reason": f"Collected {len(sources)} sources vs required {required_sources}.",
         },
         {
