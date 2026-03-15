@@ -17,7 +17,7 @@ from agents.orchestrator.tools.agent_tools import (
     _evaluate_research_quality_contract,
     _extract_json_object,
     _execute_selected_agent,
-    _strands_backend_enabled,
+    _strands_executor_relay_enabled,
 )
 from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
@@ -95,7 +95,8 @@ def _reset_runtime_state():
 def client(monkeypatch):
     _reset_runtime_state()
     monkeypatch.setenv("PAYMENT_MODE", "offline")
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "0")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "0")
+    monkeypatch.delenv("RESEARCH_RUN_USE_STRANDS_BACKEND", raising=False)
     monkeypatch.delenv("X402_OFFLINE", raising=False)
     monkeypatch.setattr("api.main.ensure_registry_cache", lambda: None)
     monkeypatch.setattr("api.routes.agents.ensure_registry_cache", lambda force=False: None)
@@ -1252,16 +1253,24 @@ def test_phase2_claim_scoring_summary_counts():
     }
 
 
-def test_strands_backend_is_disabled_by_default(monkeypatch):
+def test_strands_executor_relay_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", raising=False)
     monkeypatch.delenv("RESEARCH_RUN_USE_STRANDS_BACKEND", raising=False)
 
-    assert _strands_backend_enabled(True) is False
-    assert _strands_backend_enabled(False) is False
+    assert _strands_executor_relay_enabled(True) is False
+    assert _strands_executor_relay_enabled(False) is False
+
+
+def test_strands_executor_relay_respects_legacy_env_alias(monkeypatch):
+    monkeypatch.delenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", raising=False)
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+
+    assert _strands_executor_relay_enabled(True) is True
 
 
 def test_research_run_uses_strands_executor_and_verifier_when_available(client: TestClient, monkeypatch):
     call_counts = {"executor": 0, "verifier": 0}
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
 
     class FakeStrandsExecutor:
         model = "fake-executor"
@@ -1339,7 +1348,7 @@ def test_research_run_uses_strands_executor_and_verifier_when_available(client: 
 
 
 def test_research_run_normalizes_double_wrapped_plan_query_result(client: TestClient, monkeypatch):
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
 
     class FakeStrandsExecutor:
         model = "fake-executor"
@@ -1425,7 +1434,7 @@ def test_research_run_normalizes_double_wrapped_plan_query_result(client: TestCl
 
 
 def test_research_run_normalizes_stringified_plan_query_result(client: TestClient, monkeypatch):
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
 
     class FakeStrandsExecutor:
         model = "fake-executor"
@@ -1505,7 +1514,7 @@ def test_research_run_normalizes_stringified_plan_query_result(client: TestClien
 
 
 def test_strands_executor_missing_success_is_treated_as_failure(monkeypatch):
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
     monkeypatch.setattr(
         "agents.orchestrator.tools.agent_tools.get_agent_metadata",
         _supported_agent_metadata,
@@ -1534,7 +1543,7 @@ def test_strands_executor_missing_success_is_treated_as_failure(monkeypatch):
             agent_domain="literature-miner-001",
             task_description="Gather evidence",
             execution_parameters={"node_strategy": "gather_evidence"},
-            prefer_strands_backend=True,
+            prefer_strands_executor_relay=True,
         )
     )
 
@@ -1543,7 +1552,7 @@ def test_strands_executor_missing_success_is_treated_as_failure(monkeypatch):
 
 
 def test_strands_executor_parse_error_does_not_fallback_or_rerun(monkeypatch):
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
     monkeypatch.setattr(
         "agents.orchestrator.tools.agent_tools.get_agent_metadata",
         _supported_agent_metadata,
@@ -1578,7 +1587,7 @@ def test_strands_executor_parse_error_does_not_fallback_or_rerun(monkeypatch):
             agent_domain="literature-miner-001",
             task_description="Gather evidence",
             execution_parameters={"node_strategy": "gather_evidence"},
-            prefer_strands_backend=True,
+            prefer_strands_executor_relay=True,
         )
     )
 
@@ -1622,9 +1631,11 @@ def test_research_verifier_agent_excludes_payment_mutation_tools(monkeypatch):
     assert calculate_quality_score in captured["tools"]
 
 
-def test_research_run_falls_back_when_strands_backend_is_unavailable(client: TestClient, monkeypatch):
+def test_research_run_falls_back_when_strands_executor_relay_is_unavailable(
+    client: TestClient, monkeypatch
+):
     call_counts = {"executor": 0, "verifier": 0}
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
 
     def _raise_executor():
         call_counts["executor"] += 1
@@ -1664,7 +1675,7 @@ def test_research_run_falls_back_when_strands_backend_is_unavailable(client: Tes
 def test_research_run_rejects_legacy_literature_miner_payload_before_review(
     client: TestClient, monkeypatch
 ):
-    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")
+    monkeypatch.setenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY", "1")
     verifier_calls = []
 
     class FakeStrandsExecutor:

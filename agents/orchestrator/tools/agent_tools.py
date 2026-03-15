@@ -520,10 +520,13 @@ def _check_task_cancelled(task_id: str) -> bool:
     return str(snapshot.get("status") or "").lower() == "cancelled"
 
 
-def _strands_backend_enabled(prefer_strands_backend: bool) -> bool:
-    if not prefer_strands_backend:
+def _strands_executor_relay_enabled(prefer_strands_executor_relay: bool) -> bool:
+    if not prefer_strands_executor_relay:
         return False
-    configured = str(os.getenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "0")).strip().lower()
+    configured = os.getenv("RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY")
+    if configured is None:
+        configured = os.getenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "0")
+    configured = str(configured).strip().lower()
     return configured not in {"0", "false", "no", "off"}
 
 
@@ -854,7 +857,7 @@ async def _execute_selected_agent(
     todo_id: Optional[str] = None,
     todo_list: Optional[list] = None,
     handoff_context: Optional[Dict[str, Any]] = None,
-    prefer_strands_backend: bool = False,
+    prefer_strands_executor_relay: bool = False,
 ) -> Dict[str, Any]:
     context = _to_handoff_context(task_id, todo_id or "todo_0", handoff_context, agent_id=agent_domain)
     persist_handoff_context(task_id, context)
@@ -889,7 +892,7 @@ async def _execute_selected_agent(
         handoff_context=context,
     )
 
-    if _strands_backend_enabled(prefer_strands_backend):
+    if _strands_executor_relay_enabled(prefer_strands_executor_relay):
         try:
             agent = create_executor_agent()
         except Exception as exc:  # noqa: BLE001
@@ -961,7 +964,7 @@ async def _verify_selected_agent_result(
     verification_criteria: Dict[str, Any],
     verification_mode: str = "standard",
     handoff_context: Optional[Dict[str, Any]] = None,
-    prefer_strands_backend: bool = False,
+    prefer_strands_executor_relay: bool = False,
 ) -> Dict[str, Any]:
     context = _to_handoff_context(
         task_id,
@@ -979,7 +982,7 @@ async def _verify_selected_agent_result(
         handoff_context=context,
     )
 
-    if _strands_backend_enabled(prefer_strands_backend):
+    if _strands_executor_relay_enabled(prefer_strands_executor_relay):
         try:
             update_progress(
                 task_id,
@@ -1419,7 +1422,7 @@ async def execute_microtask(
     execution_parameters: Optional[Dict[str, Any]] = None,
     todo_list: Optional[list] = None,
     handoff_context: Optional[Dict[str, Any]] = None,
-    prefer_strands_backend: bool = False,
+    prefer_strands_executor_relay: bool = False,
     preferred_agent_id: Optional[str] = None,
     excluded_agent_ids: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
@@ -1486,7 +1489,7 @@ async def execute_microtask(
         todo_id=todo_id,
         todo_list=todo_list,
         handoff_context=selected_context.model_dump(mode="json"),
-        prefer_strands_backend=prefer_strands_backend,
+        prefer_strands_executor_relay=prefer_strands_executor_relay,
     )
     if not execution.get("success"):
         await update_todo_item(task_id, todo_id, "failed", todo_list)
@@ -1553,7 +1556,7 @@ async def execute_microtask(
         },
         verification_mode=selected_context.verification_mode,
         handoff_context=selected_context.model_dump(mode="json"),
-        prefer_strands_backend=prefer_strands_backend,
+        prefer_strands_executor_relay=prefer_strands_executor_relay,
     )
     overall_score = float(verification.get("overall_score", 0))
     dimension_scores = verification.get("dimension_scores") or {}

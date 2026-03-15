@@ -2137,7 +2137,7 @@ class ResearchRunExecutor:
                         }
                     ],
                     handoff_context=context.model_dump(mode="json"),
-                    prefer_strands_backend=True,
+                    prefer_strands_executor_relay=True,
                     preferred_agent_id=node_record.assigned_agent_id,
                     excluded_agent_ids=previous_agent_ids,
                 )
