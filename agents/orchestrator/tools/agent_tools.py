@@ -329,6 +329,7 @@ def _build_strict_quorum_result(
     if not strict_mode and quorum_policy == "single_verifier":
         return {}
 
+    node_strategy = str(verification_criteria.get("node_strategy") or "").strip().lower()
     quality_summary = (
         dict(task_result.get("quality_summary") or {})
         if isinstance(task_result.get("quality_summary"), dict)
@@ -354,7 +355,10 @@ def _build_strict_quorum_result(
         if isinstance(item, dict)
     ]
     uncovered_claims = _normalize_string_list(quality_summary.get("uncovered_claims"))
-    citation_coverage = float(quality_summary.get("citation_coverage") or 0.0)
+    citation_coverage_raw = quality_summary.get("citation_coverage")
+    citation_coverage = float(
+        citation_coverage_raw if citation_coverage_raw is not None else (1.0 if citations else 0.0)
+    )
     min_citation_coverage = float(quality_requirements.get("min_citation_coverage", 0.0) or 0.0)
     required_sources = int(source_requirements.get("total_sources", 0) or 0)
     min_fresh_sources = int(source_requirements.get("min_fresh_sources", 0) or 0)
@@ -369,39 +373,67 @@ def _build_strict_quorum_result(
         for finding in critic_findings
         if str(finding.get("severity") or "").strip().lower() == "high"
     ]
+    has_source_artifacts = bool(sources or citations or source_summary or freshness_summary)
+    citation_guard_relevant = (
+        node_strategy in {"curate_sources", "revise_final_answer"}
+        or bool(citations)
+        or citation_coverage_raw is not None
+    )
+    evidence_guard_relevant = node_strategy in {"gather_evidence", "curate_sources"} or has_source_artifacts
+    freshness_guard_relevant = (
+        node_strategy in {"gather_evidence", "curate_sources", "revise_final_answer"}
+        or bool(freshness_summary)
+    ) and (min_fresh_sources > 0 or bool(freshness_summary))
+    critic_guard_relevant = (
+        node_strategy in {"critique_and_fact_check", "revise_final_answer"}
+        or bool(critic_findings)
+        or bool(uncovered_claims)
+    )
 
     votes = [
         {
             "reviewer": "verifier",
             "approved": bool(verification_passed and overall_score >= 50),
             "reason": f"Verifier overall score {overall_score:.1f}.",
-        },
-        {
-            "reviewer": "citation_guard",
-            "approved": citation_coverage >= min_citation_coverage,
-            "reason": (
-                f"Citation coverage {citation_coverage:.2f} vs required {min_citation_coverage:.2f}."
-            ),
-        },
-        {
-            "reviewer": "evidence_guard",
-            "approved": len(sources) >= required_sources if required_sources else True,
-            "reason": f"Collected {len(sources)} sources vs required {required_sources}.",
-        },
-        {
-            "reviewer": "freshness_guard",
-            "approved": fresh_sources >= min_fresh_sources if min_fresh_sources else True,
-            "reason": f"Fresh sources {fresh_sources} vs required {min_fresh_sources}.",
-        },
-        {
-            "reviewer": "critic_guard",
-            "approved": len(high_severity_findings) == 0 and len(uncovered_claims) == 0,
-            "reason": (
-                f"{len(high_severity_findings)} high-severity critic findings and "
-                f"{len(uncovered_claims)} uncovered claims."
-            ),
-        },
+        }
     ]
+    if citation_guard_relevant:
+        votes.append(
+            {
+                "reviewer": "citation_guard",
+                "approved": citation_coverage >= min_citation_coverage,
+                "reason": (
+                    f"Citation coverage {citation_coverage:.2f} vs required {min_citation_coverage:.2f}."
+                ),
+            }
+        )
+    if evidence_guard_relevant:
+        votes.append(
+            {
+                "reviewer": "evidence_guard",
+                "approved": len(sources) >= required_sources if required_sources else True,
+                "reason": f"Collected {len(sources)} sources vs required {required_sources}.",
+            }
+        )
+    if freshness_guard_relevant:
+        votes.append(
+            {
+                "reviewer": "freshness_guard",
+                "approved": fresh_sources >= min_fresh_sources if min_fresh_sources else True,
+                "reason": f"Fresh sources {fresh_sources} vs required {min_fresh_sources}.",
+            }
+        )
+    if critic_guard_relevant:
+        votes.append(
+            {
+                "reviewer": "critic_guard",
+                "approved": len(high_severity_findings) == 0 and len(uncovered_claims) == 0,
+                "reason": (
+                    f"{len(high_severity_findings)} high-severity critic findings and "
+                    f"{len(uncovered_claims)} uncovered claims."
+                ),
+            }
+        )
 
     if quorum_policy == "single_verifier":
         active_votes = votes[:1]
@@ -1125,50 +1157,52 @@ async def negotiator_agent(
         preferred_agent_id=preferred_agent_id,
         excluded_agent_ids=excluded_agent_ids or [],
     )
-    selected_agent_id = (
-        ranked_agent_ids[0]
-        if ranked_agent_ids
-        else select_supported_agent_for_todo(todo_id, capability_requirements, task_name or "")
-    )
-    agent_record = _load_marketplace_agent(selected_agent_id)
-    if agent_record is None:
-        return AgentSelectionResult(
-            success=False,
-            error=f"Supported agent '{selected_agent_id}' is not registered",
-            handoff_context=context,
-        ).model_dump(mode="json")
-
-    if agent_record.get("support_tier") != "supported":
-        return AgentSelectionResult(
-            success=False,
-            error=f"Agent '{selected_agent_id}' is not in the supported tier",
-            handoff_context=context,
-        ).model_dump(mode="json")
-
-    if agent_record.get("reputation_score", 0.0) < (min_reputation_score or 0.0):
-        return AgentSelectionResult(
-            success=False,
-            error=f"Agent '{selected_agent_id}' is below the minimum reputation threshold",
-            handoff_context=context,
-        ).model_dump(mode="json")
-
+    candidate_agent_ids = ranked_agent_ids or [
+        select_supported_agent_for_todo(todo_id, capability_requirements, task_name or "")
+    ]
+    selected_agent_id: Optional[str] = None
+    agent_record: Optional[Dict[str, Any]] = None
     payment_profile_status = None
-    db = SessionLocal()
-    try:
-        profile = require_verified_payment_profile(
-            db,
-            agent_id=selected_agent_id,
-            hedera_account_id=agent_record.get("hedera_account_id"),
-        )
-        payment_profile_status = profile.status
-    except Exception as exc:  # noqa: BLE001
+    selection_errors: List[str] = []
+
+    for candidate_agent_id in candidate_agent_ids:
+        candidate_record = _load_marketplace_agent(candidate_agent_id)
+        if candidate_record is None:
+            selection_errors.append(f"Supported agent '{candidate_agent_id}' is not registered")
+            continue
+        if candidate_record.get("support_tier") != "supported":
+            selection_errors.append(f"Agent '{candidate_agent_id}' is not in the supported tier")
+            continue
+        if candidate_record.get("reputation_score", 0.0) < (min_reputation_score or 0.0):
+            selection_errors.append(
+                f"Agent '{candidate_agent_id}' is below the minimum reputation threshold"
+            )
+            continue
+
+        db = SessionLocal()
+        try:
+            profile = require_verified_payment_profile(
+                db,
+                agent_id=candidate_agent_id,
+                hedera_account_id=candidate_record.get("hedera_account_id"),
+            )
+            payment_profile_status = profile.status
+        except Exception as exc:  # noqa: BLE001
+            selection_errors.append(str(exc))
+            continue
+        finally:
+            db.close()
+
+        selected_agent_id = candidate_agent_id
+        agent_record = candidate_record
+        break
+
+    if selected_agent_id is None or agent_record is None:
         return AgentSelectionResult(
             success=False,
-            error=str(exc),
+            error=selection_errors[-1] if selection_errors else "No supported agent is available",
             handoff_context=context,
         ).model_dump(mode="json")
-    finally:
-        db.close()
 
     payment_result = await create_payment_request(
         task_id=task_id,

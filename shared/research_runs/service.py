@@ -1877,12 +1877,7 @@ def _update_trace_summary(db: Any, run_record: ResearchRun) -> None:
         .filter(PolicyEvaluation.research_run_id == run_record.id)
         .count()
     )
-    unresolved_count = (
-        db.query(VerificationDecision)
-        .filter(VerificationDecision.research_run_id == run_record.id)
-        .filter(VerificationDecision.approved.is_(False))
-        .count()
-    )
+    unresolved_count = _count_unresolved_dissent_nodes(db, run_record.id)
     run_meta = dict(run_record.meta or {})
     run_meta["trace_summary"] = _trace_summary(
         verification_decision_count=verification_count,
@@ -1891,6 +1886,23 @@ def _update_trace_summary(db: Any, run_record: ResearchRun) -> None:
         unresolved_dissent_count=unresolved_count,
     )
     run_record.meta = run_meta
+
+
+def _count_unresolved_dissent_nodes(db: Any, research_run_id: str) -> int:
+    latest_by_node: Dict[str, bool] = {}
+    rows = (
+        db.query(VerificationDecision.node_id, VerificationDecision.approved)
+        .filter(VerificationDecision.research_run_id == research_run_id)
+        .order_by(
+            VerificationDecision.created_at.desc(),
+            VerificationDecision.id.desc(),
+        )
+        .all()
+    )
+    for node_id, approved in rows:
+        if node_id not in latest_by_node:
+            latest_by_node[str(node_id)] = bool(approved)
+    return sum(1 for approved in latest_by_node.values() if not approved)
 
 
 def _persist_attempt_trace_bundle(
@@ -2848,14 +2860,26 @@ class ResearchRunExecutor:
     ) -> None:
         db = SessionLocal()
         try:
+            snapshot = load_task_snapshot(task_id) if task_id else None
+            result_payload = result or {
+                "success": False,
+                "error": error,
+            }
+            payment_id = self._extract_payment_id(result_payload, snapshot)
+            agent_id = self._extract_agent_id(result_payload, snapshot)
+            verification_score = result_payload.get("verification_score")
             attempt = db.query(ExecutionAttempt).filter(ExecutionAttempt.id == attempt_id).one_or_none()
             if attempt is not None and _enum_value(attempt.status) == ResearchRunNodeStatus.RUNNING.value:
                 attempt.status = (
                     ResearchRunNodeStatus.CANCELLED if cancelled else ResearchRunNodeStatus.FAILED
                 )
                 attempt.completed_at = _utcnow()
+                attempt.payment_id = payment_id
+                attempt.agent_id = agent_id or attempt.agent_id
+                if verification_score is not None:
+                    attempt.verification_score = verification_score
                 attempt.error = error
-                attempt.result = {"error": error}
+                attempt.result = redact_sensitive_payload(result_payload)
 
             node_record = (
                 db.query(ResearchRunNode)
@@ -2867,6 +2891,7 @@ class ResearchRunExecutor:
                 node_record.status = (
                     ResearchRunNodeStatus.CANCELLED if cancelled else ResearchRunNodeStatus.FAILED
                 )
+                node_record.latest_payment_id = payment_id
                 node_record.completed_at = _utcnow()
                 node_record.error = error
 
@@ -2893,7 +2918,7 @@ class ResearchRunExecutor:
                             "agent_id": attempt.agent_id or node_record.assigned_agent_id,
                         },
                     },
-                    snapshot=load_task_snapshot(task_id) if task_id else None,
+                    snapshot=snapshot,
                     cancelled=cancelled,
                     error=error,
                 )
@@ -3003,12 +3028,7 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
             .filter(PolicyEvaluation.research_run_id == research_run_id)
             .count()
         )
-        unresolved_dissent_count = (
-            db.query(VerificationDecision)
-            .filter(VerificationDecision.research_run_id == research_run_id)
-            .filter(VerificationDecision.approved.is_(False))
-            .count()
-        )
+        unresolved_dissent_count = _count_unresolved_dissent_nodes(db, research_run_id)
     finally:
         db.close()
 

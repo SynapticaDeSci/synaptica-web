@@ -18,6 +18,7 @@ from agents.orchestrator.tools.agent_tools import (
     _extract_json_object,
     _execute_selected_agent,
     _strands_executor_relay_enabled,
+    negotiator_agent,
 )
 from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
@@ -1139,6 +1140,29 @@ def test_research_run_trace_routes_return_persisted_decisions(client: TestClient
     }
 
 
+def test_research_run_strict_high_risk_defaults_complete(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={
+            "description": "Review literature on autonomous agent payments in DeSci.",
+            "strict_mode": True,
+            "risk_level": "high",
+        },
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+
+    assert completed["policy"]["strict_mode"] is True
+    assert completed["policy"]["quorum_policy"] == "unanimous"
+    assert completed["nodes"][0]["status"] == "completed"
+
+
 def test_phase2_claim_scoring_rewards_multi_source_supported_claims():
     scoring = _compute_phase2_claim_scoring(
         run_record=SimpleNamespace(meta={"freshness_required": False}, result={}),
@@ -2253,7 +2277,12 @@ def test_research_run_strict_mode_retries_and_reroutes_failed_node(
     assert gather_node["candidate_agent_ids"] == ["literature-miner-001", "literature-miner-002"]
     assert len(gather_node["attempts"]) == 2
     assert gather_node["attempts"][0]["agent_id"] == "literature-miner-001"
+    assert gather_node["attempts"][0]["payment_id"] is not None
+    assert gather_node["attempts"][0]["verification_score"] == 42
     assert gather_node["attempts"][1]["agent_id"] == "literature-miner-002"
+    assert gather_node["attempts"][1]["payment_id"] is not None
+    assert gather_node["attempts"][1]["verification_score"] == 88
+    assert completed["trace_summary"]["unresolved_dissent_count"] == 0
 
     verification_response = client.get(f"/api/research-runs/{research_run_id}/verification-decisions")
     assert verification_response.status_code == 200
@@ -2271,6 +2300,68 @@ def test_research_run_strict_mode_retries_and_reroutes_failed_node(
     ]
     assert any(item["status"] == "retry" for item in policy_payload)
     assert any(item["status"] == "passed" for item in policy_payload)
+
+
+def test_negotiator_agent_falls_back_when_top_ranked_agent_lacks_payment_profile(
+    client: TestClient,
+    monkeypatch,
+):
+    session = SessionLocal()
+    try:
+        session.add(
+            AgentModel(
+                agent_id="custom-evidence-001",
+                name="Custom Evidence Agent",
+                agent_type="research",
+                description="Custom evidence gatherer",
+                capabilities=["evidence-gathering", "source-discovery"],
+                hedera_account_id="0.0.8001",
+                status="active",
+                meta={
+                    "support_tier": "supported",
+                    "endpoint_url": "https://unit.test/custom-evidence-001",
+                    "pricing": {"rate": 3.0, "currency": "HBAR", "rate_type": "per_task"},
+                    "research_run_contract_version": "phase2.v1",
+                    "supported_node_strategies": ["gather_evidence"],
+                    "role_families": ["evidence"],
+                },
+            )
+        )
+        session.add(
+            AgentReputation(
+                agent_id="custom-evidence-001",
+                total_tasks=4,
+                successful_tasks=4,
+                failed_tasks=0,
+                average_quality_score=0.98,
+                reputation_score=0.99,
+                payment_multiplier=1.0,
+                meta={},
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.rank_supported_agents_for_todo",
+        lambda *args, **kwargs: ["custom-evidence-001", "literature-miner-001"],
+    )
+
+    result = asyncio.run(
+        negotiator_agent(
+            task_id="task-fallback",
+            capability_requirements="evidence gathering, source discovery, fresh web research",
+            budget_limit=10,
+            min_reputation_score=0.0,
+            task_name="Gather evidence",
+            todo_id="gather_evidence",
+        )
+    )
+
+    assert result["success"] is True
+    assert result["agent_id"] == "literature-miner-001"
+    assert result["payment_profile_status"] == "verified"
 
 
 def test_research_run_waits_for_human_review_and_resumes(client: TestClient, monkeypatch):
