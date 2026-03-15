@@ -105,3 +105,41 @@ def test_list_agents_returns_created_agent(client: TestClient):
     assert created["pricing"]["rate"] == 1.5
     assert created["reputation_score"] == 0.5
     assert created["registry_status"] == "pending"
+
+
+def test_legacy_builtin_research_agents_are_hidden_from_directory(client: TestClient):
+    session = SessionLocal()
+    try:
+        session.add(
+            AgentModel(  # type: ignore[call-arg]
+                agent_id="bias-detector-001",
+                name="Bias Detector",
+                agent_type="research",
+                description="Legacy built-in specialist",
+                capabilities=["bias-detection"],
+                status="active",
+                meta={
+                    "support_tier": "legacy",
+                    "endpoint_url": "http://localhost:5001/agents/bias-detector-001",
+                },
+            )
+        )
+        session.add(
+            AgentReputation(
+                agent_id="bias-detector-001",
+                reputation_score=0.25,
+                payment_multiplier=1.0,
+            )
+        )
+        session.query(AgentsCacheEntry).delete()
+        session.commit()
+    finally:
+        session.close()
+
+    listing = client.get("/api/agents")
+    assert listing.status_code == 200
+    ids = [agent["agent_id"] for agent in listing.json()["agents"]]
+    assert "bias-detector-001" not in ids
+
+    detail = client.get("/api/agents/bias-detector-001")
+    assert detail.status_code == 404

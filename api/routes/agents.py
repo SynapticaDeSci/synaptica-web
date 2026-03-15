@@ -20,6 +20,7 @@ from shared.agents_cache import (
     get_cached_agents_payload,
     rebuild_agents_cache,
 )
+from shared.research.agent_inventory import is_public_builtin_research_agent
 from shared.registry_sync import (
     ensure_registry_cache as _ensure_registry_cache,
     get_registry_sync_status,
@@ -363,7 +364,7 @@ async def list_agents() -> AgentsListResponse:
 async def get_agent(agent_id: str, db: Session = Depends(get_db)) -> AgentResponse:
     """Retrieve a single agent."""
     agent = db.query(Agent).filter(Agent.agent_id == agent_id).first()
-    if not agent:
+    if not agent or not is_public_builtin_research_agent(agent_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     reputation = (
         db.query(AgentReputation)

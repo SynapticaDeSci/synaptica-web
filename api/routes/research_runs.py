@@ -15,8 +15,11 @@ from shared.research_runs import (
     get_research_run_evidence_graph_payload,
     get_research_run_evidence_payload,
     get_research_run_payload,
+    get_research_run_policy_evaluations_payload,
     get_research_run_report_pack_payload,
     get_research_run_report_payload,
+    get_research_run_swarm_handoffs_payload,
+    get_research_run_verification_decisions_payload,
     request_cancel_research_run,
     request_pause_research_run,
     request_resume_research_run,
@@ -51,6 +54,7 @@ class ResearchRunNodeResponse(BaseModel):
     description: str
     capability_requirements: str
     assigned_agent_id: str
+    candidate_agent_ids: List[str] = Field(default_factory=list)
     execution_order: int
     status: str
     task_id: Optional[str] = None
@@ -85,6 +89,8 @@ class ResearchRunResponse(BaseModel):
     classified_mode: str
     depth_mode: str
     freshness_required: bool = False
+    policy: Dict[str, Any] = Field(default_factory=dict)
+    trace_summary: Dict[str, Any] = Field(default_factory=dict)
     source_requirements: Dict[str, Any] = Field(default_factory=dict)
     rounds_planned: Dict[str, int] = Field(default_factory=dict)
     rounds_completed: Dict[str, int] = Field(default_factory=dict)
@@ -226,6 +232,69 @@ class ResearchRunReportPackResponse(BaseModel):
     limitations: List[Any] = Field(default_factory=list)
 
 
+class ResearchRunVerificationDecisionResponse(BaseModel):
+    """Persisted verification decision for a research run attempt."""
+
+    id: int
+    research_run_id: str
+    node_id: str
+    attempt_id: str
+    task_id: Optional[str] = None
+    payment_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    decision: str
+    approved: bool
+    decision_source: str
+    overall_score: Optional[float] = None
+    dimension_scores: Dict[str, Any] = Field(default_factory=dict)
+    rationale: Optional[str] = None
+    dissent_count: Optional[int] = None
+    quorum_policy: Optional[str] = None
+    policy_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchRunSwarmHandoffResponse(BaseModel):
+    """Persisted swarm handoff / blackboard entry for a research run attempt."""
+
+    id: int
+    research_run_id: str
+    node_id: str
+    attempt_id: str
+    handoff_index: int
+    from_agent_id: Optional[str] = None
+    to_agent_id: Optional[str] = None
+    handoff_type: str
+    round_number: int
+    status: str
+    budget_remaining: Optional[float] = None
+    verification_mode: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    blackboard_delta: Dict[str, Any] = Field(default_factory=dict)
+    decision_log: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchRunPolicyEvaluationResponse(BaseModel):
+    """Persisted policy evaluation for a research run attempt."""
+
+    id: int
+    research_run_id: str
+    node_id: str
+    attempt_id: str
+    task_id: Optional[str] = None
+    payment_id: Optional[str] = None
+    evaluation_type: str
+    status: str
+    outcome: Optional[str] = None
+    summary: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class ResearchRunCreateRequest(BaseModel):
     """Payload for creating a research run."""
 
@@ -234,6 +303,12 @@ class ResearchRunCreateRequest(BaseModel):
     verification_mode: str = "standard"
     research_mode: Literal["auto", "literature", "live_analysis", "hybrid"] = "auto"
     depth_mode: Literal["standard", "deep"] = "standard"
+    strict_mode: bool = False
+    risk_level: Literal["low", "medium", "high"] = "medium"
+    quorum_policy: Optional[
+        Literal["single_verifier", "two_of_three", "three_of_five", "unanimous"]
+    ] = None
+    max_node_attempts: Optional[int] = Field(default=None, ge=1, le=5)
 
 
 async def _run_research_run_job(research_run_id: str) -> None:
@@ -262,6 +337,10 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
         verification_mode=request.verification_mode,
         research_mode=request.research_mode,
         depth_mode=request.depth_mode,
+        strict_mode=request.strict_mode,
+        risk_level=request.risk_level,
+        quorum_policy=request.quorum_policy,
+        max_node_attempts=request.max_node_attempts,
     )
     _ensure_research_run_job(research_run_id)
 
@@ -362,3 +441,45 @@ async def get_research_run_report_pack_route(research_run_id: str) -> ResearchRu
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
     return ResearchRunReportPackResponse.model_validate(payload)
+
+
+@router.get(
+    "/{research_run_id}/verification-decisions",
+    response_model=List[ResearchRunVerificationDecisionResponse],
+)
+async def get_research_run_verification_decisions_route(
+    research_run_id: str,
+) -> List[ResearchRunVerificationDecisionResponse]:
+    """Return persisted verification decision rows for a research run."""
+
+    payload = get_research_run_verification_decisions_payload(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return [ResearchRunVerificationDecisionResponse.model_validate(item) for item in payload]
+
+
+@router.get("/{research_run_id}/swarm-handoffs", response_model=List[ResearchRunSwarmHandoffResponse])
+async def get_research_run_swarm_handoffs_route(
+    research_run_id: str,
+) -> List[ResearchRunSwarmHandoffResponse]:
+    """Return persisted swarm / blackboard handoff rows for a research run."""
+
+    payload = get_research_run_swarm_handoffs_payload(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return [ResearchRunSwarmHandoffResponse.model_validate(item) for item in payload]
+
+
+@router.get(
+    "/{research_run_id}/policy-evaluations",
+    response_model=List[ResearchRunPolicyEvaluationResponse],
+)
+async def get_research_run_policy_evaluations_route(
+    research_run_id: str,
+) -> List[ResearchRunPolicyEvaluationResponse]:
+    """Return persisted policy evaluation rows for a research run."""
+
+    payload = get_research_run_policy_evaluations_payload(research_run_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Research run not found")
+    return [ResearchRunPolicyEvaluationResponse.model_validate(item) for item in payload]

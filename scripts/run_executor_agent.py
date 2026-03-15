@@ -92,7 +92,7 @@ async def demo_query_agent_by_domain():
     print("="*80)
     
     query = """
-    Query an agent from the Hedera registry by domain name "reputation-manager-001".
+    Query an agent from the Hedera registry by domain name "problem-framer-001".
     Show me the agent information including agent_id, domain, address, and metadata URI if available.
     """
     
@@ -221,4 +221,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

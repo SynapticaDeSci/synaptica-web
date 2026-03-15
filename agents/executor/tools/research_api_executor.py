@@ -11,6 +11,8 @@ from strands import tool
 from shared.agent_utils import serialize_agent
 from shared.database import Agent as AgentModel
 from shared.database import AgentReputation, SessionLocal
+from shared.research.agent_inventory import is_supported_builtin_research_agent
+from shared.research.catalog import default_research_endpoint
 from shared.task_progress import update_progress
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,13 @@ def _legacy_agent_endpoint(agent_domain: str) -> str:
     return f"{RESEARCH_API_BASE_URL.rstrip('/')}/agents/{agent_domain}"
 
 
+def _normalize_supported_builtin_endpoint(agent_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(record)
+    if is_supported_builtin_research_agent(agent_id):
+        normalized["endpoint_url"] = default_research_endpoint(agent_id)
+    return normalized
+
+
 def _load_local_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
     """Load agent metadata directly from the local marketplace database."""
 
@@ -51,7 +60,10 @@ def _load_local_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
             .one_or_none()
         )
         score = reputation.reputation_score if reputation else None
-        return serialize_agent(agent, reputation_score=score)
+        return _normalize_supported_builtin_endpoint(
+            agent_id,
+            serialize_agent(agent, reputation_score=score),
+        )
     finally:
         session.close()
 
@@ -74,8 +86,9 @@ async def _fetch_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict):
-                _agent_cache[agent_id] = data
-                return data
+                normalized = _normalize_supported_builtin_endpoint(agent_id, data)
+                _agent_cache[agent_id] = normalized
+                return normalized
     except Exception as error:
         logger.debug("[fetch_agent_record] Failed to fetch agent %s: %s", agent_id, error)
 
@@ -87,10 +100,14 @@ async def _resolve_agent_endpoint(agent_domain: str, explicit_endpoint: Optional
     Determine the best endpoint for executing the agent.
 
     Preference order:
-    1. Explicit endpoint supplied via tool argument.
-    2. Stored endpoint from marketplace metadata.
-    3. Legacy research API fallback.
+    1. Local supported-built-in endpoint for the active built-in trio.
+    2. Explicit endpoint supplied via tool argument.
+    3. Stored endpoint from marketplace metadata.
+    4. Legacy research API fallback.
     """
+    if is_supported_builtin_research_agent(agent_domain):
+        return default_research_endpoint(agent_domain)
+
     if explicit_endpoint:
         return explicit_endpoint
 
@@ -242,7 +259,7 @@ async def execute_research_agent(
     running on port 5001. No simulation - actual agent execution.
 
     Args:
-        agent_domain: The agent domain (e.g., "feasibility-analyst-001", "literature-miner-001")
+        agent_domain: The agent domain (e.g., "problem-framer-001", "literature-miner-001")
         task_description: Description of the task to execute
         context: Optional context dict with additional parameters (budget, timeline, etc.)
         metadata: Optional metadata (task_id, user_id, etc.)
@@ -260,9 +277,9 @@ async def execute_research_agent(
 
     Example:
         result = await execute_research_agent(
-            agent_id="feasibility-analyst-001",
-            task_description="Analyze feasibility of building a blockchain analytics platform",
-            context={"budget": "5000 HBAR", "timeline": "3 months"},
+            agent_domain="problem-framer-001",
+            task_description="Frame a research question about agentic micropayments",
+            context={"budget": "5 HBAR", "depth_mode": "standard"},
             metadata={"task_id": "task-123"}
         )
     """
@@ -417,7 +434,7 @@ async def get_agent_metadata(agent_id: str) -> Dict[str, Any]:
     Get detailed metadata for a specific research agent.
 
     Args:
-        agent_id: The agent ID (e.g., "feasibility-analyst-001")
+        agent_id: The agent ID (e.g., "problem-framer-001")
 
     Returns:
         Dict with agent metadata including capabilities, pricing, API spec, etc.

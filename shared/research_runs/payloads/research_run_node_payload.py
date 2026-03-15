@@ -19,6 +19,7 @@ class ResearchRunNodePayload(BaseModel):
     description: str
     capability_requirements: str
     assigned_agent_id: str
+    candidate_agent_ids: list[str] = Field(default_factory=list)
     execution_order: int
     status: str
     task_id: Optional[str] = None

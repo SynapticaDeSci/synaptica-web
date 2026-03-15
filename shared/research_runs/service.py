@@ -22,15 +22,19 @@ from shared.database import (
     ClaimLink,
     EvidenceArtifact,
     ExecutionAttempt,
+    PolicyEvaluation,
     ResearchRun,
     ResearchRunEdge,
     ResearchRunNode,
     ResearchRunNodeStatus,
     ResearchRunStatus,
     SessionLocal,
+    SwarmHandoff,
     Task,
+    VerificationDecision,
 )
 from shared.database.models import TaskStatus
+from shared.research.catalog import rank_supported_agents_for_todo
 from shared.runtime import (
     HandoffContext,
     initialize_runtime_state,
@@ -75,6 +79,17 @@ RUN_CONTROL_PAUSE_REQUESTED = "pause_requested"
 RUN_CONTROL_PAUSED = "paused"
 RUN_CONTROL_CANCEL_REQUESTED = "cancel_requested"
 RUN_CONTROL_CANCELLED = "cancelled"
+DEFAULT_QUORUM_POLICY = "single_verifier"
+DEFAULT_RISK_LEVEL = "medium"
+DEFAULT_MAX_NODE_ATTEMPTS = 1
+STRICT_DEFAULT_MAX_NODE_ATTEMPTS = 2
+SUPPORTED_RISK_LEVELS = {"low", "medium", "high"}
+SUPPORTED_QUORUM_POLICIES = {
+    "single_verifier",
+    "two_of_three",
+    "three_of_five",
+    "unanimous",
+}
 PHASE2_GRAPH_SCHEMA_VERSION = "phase2.v1"
 PHASE2_GRAPH_SCHEMA_META_KEY = "evidence_graph_schema_version"
 CLAIM_RELATION_SUPPORTS = "supports"
@@ -149,6 +164,88 @@ def _utcnow() -> datetime:
 
 def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
+
+
+def _normalize_risk_level(value: Any) -> str:
+    candidate = str(value or DEFAULT_RISK_LEVEL).strip().lower()
+    return candidate if candidate in SUPPORTED_RISK_LEVELS else DEFAULT_RISK_LEVEL
+
+
+def _default_quorum_policy(*, strict_mode: bool, risk_level: str) -> str:
+    if not strict_mode:
+        return DEFAULT_QUORUM_POLICY
+    if risk_level == "high":
+        return "unanimous"
+    return "two_of_three"
+
+
+def _normalize_quorum_policy(
+    value: Any,
+    *,
+    strict_mode: bool,
+    risk_level: str,
+) -> str:
+    candidate = str(value or "").strip().lower()
+    if candidate in SUPPORTED_QUORUM_POLICIES:
+        return candidate
+    return _default_quorum_policy(strict_mode=strict_mode, risk_level=risk_level)
+
+
+def _build_run_policy(
+    *,
+    strict_mode: bool = False,
+    risk_level: Any = DEFAULT_RISK_LEVEL,
+    quorum_policy: Any = None,
+    max_node_attempts: Any = None,
+    depth_mode: str = DepthMode.STANDARD.value,
+) -> Dict[str, Any]:
+    normalized_risk = _normalize_risk_level(risk_level)
+    normalized_quorum = _normalize_quorum_policy(
+        quorum_policy,
+        strict_mode=bool(strict_mode),
+        risk_level=normalized_risk,
+    )
+    if max_node_attempts in {None, ""}:
+        attempts = STRICT_DEFAULT_MAX_NODE_ATTEMPTS if strict_mode else DEFAULT_MAX_NODE_ATTEMPTS
+    else:
+        attempts = max(1, min(int(max_node_attempts), 5))
+
+    max_swarm_rounds = 2 if str(depth_mode) == DepthMode.DEEP.value else 1
+    return {
+        "strict_mode": bool(strict_mode),
+        "risk_level": normalized_risk,
+        "quorum_policy": normalized_quorum,
+        "max_node_attempts": attempts,
+        "reroute_on_failure": attempts > 1,
+        "max_swarm_rounds": max_swarm_rounds,
+        "escalate_on_dissent": bool(strict_mode),
+    }
+
+
+def _get_run_policy(meta: Dict[str, Any]) -> Dict[str, Any]:
+    stored = dict(meta.get("policy") or {})
+    return _build_run_policy(
+        strict_mode=bool(stored.get("strict_mode", False)),
+        risk_level=stored.get("risk_level", meta.get("risk_level", DEFAULT_RISK_LEVEL)),
+        quorum_policy=stored.get("quorum_policy", meta.get("quorum_policy")),
+        max_node_attempts=stored.get("max_node_attempts", meta.get("max_node_attempts")),
+        depth_mode=str(meta.get("depth_mode", DepthMode.STANDARD.value)),
+    )
+
+
+def _trace_summary(
+    *,
+    verification_decision_count: int = 0,
+    swarm_handoff_count: int = 0,
+    policy_evaluation_count: int = 0,
+    unresolved_dissent_count: int = 0,
+) -> Dict[str, int]:
+    return {
+        "verification_decision_count": verification_decision_count,
+        "swarm_handoff_count": swarm_handoff_count,
+        "policy_evaluation_count": policy_evaluation_count,
+        "unresolved_dissent_count": unresolved_dissent_count,
+    }
 
 
 def _normalize_rounds_completed(result: Any) -> Dict[str, int]:
@@ -551,6 +648,10 @@ def create_research_run(
     verification_mode: str,
     research_mode: str = ResearchMode.AUTO.value,
     depth_mode: str = DepthMode.STANDARD.value,
+    strict_mode: bool = False,
+    risk_level: str = DEFAULT_RISK_LEVEL,
+    quorum_policy: Optional[str] = None,
+    max_node_attempts: Optional[int] = None,
 ) -> str:
     """Persist a research run plus its template graph."""
 
@@ -560,6 +661,13 @@ def create_research_run(
         depth_mode=DepthMode(depth_mode),
     )
     research_run_id = str(uuid.uuid4())
+    policy = _build_run_policy(
+        strict_mode=strict_mode,
+        risk_level=risk_level,
+        quorum_policy=quorum_policy,
+        max_node_attempts=max_node_attempts,
+        depth_mode=depth_mode,
+    )
 
     db = SessionLocal()
     try:
@@ -583,6 +691,14 @@ def create_research_run(
                 "planner_notes": plan.profile.planner_notes,
                 "scenario_analysis_requested": plan.profile.scenario_analysis_requested,
                 "generated_at": plan.profile.generated_at,
+                "policy": policy,
+                "session_state": {
+                    "session_id": f"research-run:{research_run_id}",
+                    "last_node_id": None,
+                    "last_attempt_id": None,
+                    "blackboard_keys": [],
+                },
+                "trace_summary": _trace_summary(),
                 PHASE2_GRAPH_SCHEMA_META_KEY: PHASE2_GRAPH_SCHEMA_VERSION,
                 "control_state": RUN_CONTROL_ACTIVE,
                 "control_reason": None,
@@ -591,6 +707,22 @@ def create_research_run(
         db.add(record)
 
         for node in plan.nodes:
+            candidate_agent_ids = rank_supported_agents_for_todo(
+                node.node_id,
+                node.capability_requirements,
+                node.title,
+                preferred_agent_id=node.assigned_agent_id,
+            )
+            assigned_agent_id = candidate_agent_ids[0] if candidate_agent_ids else node.assigned_agent_id
+            execution_parameters = {
+                **node.execution_parameters,
+                "strict_mode": policy["strict_mode"],
+                "risk_level": policy["risk_level"],
+                "quorum_policy": policy["quorum_policy"],
+                "max_node_attempts": policy["max_node_attempts"],
+                "reroute_on_failure": policy["reroute_on_failure"],
+                "max_swarm_rounds": policy["max_swarm_rounds"],
+            }
             db.add(
                 ResearchRunNode(  # type: ignore[call-arg]
                     research_run_id=research_run_id,
@@ -598,12 +730,14 @@ def create_research_run(
                     title=node.title,
                     description=node.description,
                     capability_requirements=node.capability_requirements,
-                    assigned_agent_id=node.assigned_agent_id,
+                    assigned_agent_id=assigned_agent_id,
                     execution_order=node.execution_order,
                     status=ResearchRunNodeStatus.PENDING,
                     meta={
-                        "execution_parameters": node.execution_parameters,
+                        "execution_parameters": execution_parameters,
                         "input_bindings": node.input_bindings,
+                        "candidate_agent_ids": candidate_agent_ids,
+                        "selection_strategy": "marketplace_ranker",
                     },
                 )
             )
@@ -1419,6 +1553,126 @@ def get_research_run_report_pack_payload(research_run_id: str) -> Optional[Dict[
     return report_pack_payload.model_dump(mode="json")
 
 
+def _serialize_verification_decision_record(record: VerificationDecision) -> Dict[str, Any]:
+    return {
+        "id": record.id,
+        "research_run_id": record.research_run_id,
+        "node_id": record.node_id,
+        "attempt_id": record.attempt_id,
+        "task_id": record.task_id,
+        "payment_id": record.payment_id,
+        "agent_id": record.agent_id,
+        "decision": record.decision,
+        "approved": bool(record.approved),
+        "decision_source": record.decision_source,
+        "overall_score": record.overall_score,
+        "dimension_scores": record.dimension_scores or {},
+        "rationale": record.rationale,
+        "dissent_count": record.dissent_count,
+        "quorum_policy": record.quorum_policy,
+        "policy_snapshot": record.policy_snapshot or {},
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "meta": record.meta or {},
+    }
+
+
+def _serialize_swarm_handoff_record(record: SwarmHandoff) -> Dict[str, Any]:
+    return {
+        "id": record.id,
+        "research_run_id": record.research_run_id,
+        "node_id": record.node_id,
+        "attempt_id": record.attempt_id,
+        "handoff_index": record.handoff_index,
+        "from_agent_id": record.from_agent_id,
+        "to_agent_id": record.to_agent_id,
+        "handoff_type": record.handoff_type,
+        "round_number": record.round_number,
+        "status": record.status,
+        "budget_remaining": record.budget_remaining,
+        "verification_mode": record.verification_mode,
+        "idempotency_key": record.idempotency_key,
+        "blackboard_delta": record.blackboard_delta or {},
+        "decision_log": record.decision_log or {},
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "meta": record.meta or {},
+    }
+
+
+def _serialize_policy_evaluation_record(record: PolicyEvaluation) -> Dict[str, Any]:
+    return {
+        "id": record.id,
+        "research_run_id": record.research_run_id,
+        "node_id": record.node_id,
+        "attempt_id": record.attempt_id,
+        "task_id": record.task_id,
+        "payment_id": record.payment_id,
+        "evaluation_type": record.evaluation_type,
+        "status": record.status,
+        "outcome": record.outcome,
+        "summary": record.summary,
+        "details": record.details or {},
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "meta": record.meta or {},
+    }
+
+
+def get_research_run_verification_decisions_payload(
+    research_run_id: str,
+) -> Optional[List[Dict[str, Any]]]:
+    db = SessionLocal()
+    try:
+        exists = db.query(ResearchRun.id).filter(ResearchRun.id == research_run_id).one_or_none()
+        if exists is None:
+            return None
+        records = (
+            db.query(VerificationDecision)
+            .filter(VerificationDecision.research_run_id == research_run_id)
+            .order_by(VerificationDecision.created_at.asc(), VerificationDecision.id.asc())
+            .all()
+        )
+        return [_serialize_verification_decision_record(record) for record in records]
+    finally:
+        db.close()
+
+
+def get_research_run_swarm_handoffs_payload(
+    research_run_id: str,
+) -> Optional[List[Dict[str, Any]]]:
+    db = SessionLocal()
+    try:
+        exists = db.query(ResearchRun.id).filter(ResearchRun.id == research_run_id).one_or_none()
+        if exists is None:
+            return None
+        records = (
+            db.query(SwarmHandoff)
+            .filter(SwarmHandoff.research_run_id == research_run_id)
+            .order_by(SwarmHandoff.created_at.asc(), SwarmHandoff.id.asc())
+            .all()
+        )
+        return [_serialize_swarm_handoff_record(record) for record in records]
+    finally:
+        db.close()
+
+
+def get_research_run_policy_evaluations_payload(
+    research_run_id: str,
+) -> Optional[List[Dict[str, Any]]]:
+    db = SessionLocal()
+    try:
+        exists = db.query(ResearchRun.id).filter(ResearchRun.id == research_run_id).one_or_none()
+        if exists is None:
+            return None
+        records = (
+            db.query(PolicyEvaluation)
+            .filter(PolicyEvaluation.research_run_id == research_run_id)
+            .order_by(PolicyEvaluation.created_at.asc(), PolicyEvaluation.id.asc())
+            .all()
+        )
+        return [_serialize_policy_evaluation_record(record) for record in records]
+    finally:
+        db.close()
+
+
 def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
     db = SessionLocal()
     try:
@@ -1483,6 +1737,314 @@ def _load_plan_for_run(research_run_id: str) -> ResearchRunPlan:
         db.close()
 
 
+def _extract_node_candidate_agent_ids(node_record: ResearchRunNode) -> List[str]:
+    return [
+        str(item).strip()
+        for item in list((node_record.meta or {}).get("candidate_agent_ids") or [])
+        if str(item).strip()
+    ]
+
+
+def _serialize_blackboard_delta(
+    *,
+    node_id: str,
+    result_payload: Dict[str, Any],
+    verification_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    sources = [
+        {
+            "citation_id": item.get("citation_id"),
+            "title": item.get("title"),
+            "url": item.get("url"),
+        }
+        for item in (result_payload.get("sources") or result_payload.get("citations") or [])[:5]
+        if isinstance(item, dict)
+    ]
+    claims = [
+        {
+            "claim_id": item.get("claim_id"),
+            "claim": item.get("claim"),
+            "confidence": item.get("confidence"),
+        }
+        for item in (result_payload.get("claims") or [])[:5]
+        if isinstance(item, dict)
+    ]
+    critic_notes = [
+        {
+            "issue": item.get("issue"),
+            "severity": item.get("severity"),
+        }
+        for item in (result_payload.get("critic_findings") or [])[:5]
+        if isinstance(item, dict)
+    ]
+    decision_logs = []
+    if verification_payload:
+        decision_logs.append(
+            {
+                "overall_score": verification_payload.get("overall_score"),
+                "decision": verification_payload.get("decision"),
+                "retry_recommended": verification_payload.get("retry_recommended", False),
+                "feedback": verification_payload.get("feedback"),
+                "quorum_result": verification_payload.get("quorum_result") or {},
+            }
+        )
+    return {
+        "node_id": node_id,
+        "evidence_cards": sources,
+        "claim_drafts": claims,
+        "critic_notes": critic_notes,
+        "decision_logs": decision_logs,
+    }
+
+
+def _build_swarm_handoff_entries(
+    *,
+    node_id: str,
+    attempt: ExecutionAttempt,
+    run_record: ResearchRun,
+    node_record: ResearchRunNode,
+    selected_agent_id: Optional[str],
+    verification_payload: Dict[str, Any],
+    result_payload: Dict[str, Any],
+    snapshot: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    handoff_context = dict((snapshot or {}).get("current_handoff_context") or {})
+    budget_remaining = handoff_context.get("budget_remaining")
+    verification_mode = handoff_context.get("verification_mode") or run_record.verification_mode
+    idempotency_key = handoff_context.get("idempotency_key")
+    blackboard_delta = _serialize_blackboard_delta(
+        node_id=node_id,
+        result_payload=result_payload,
+        verification_payload=verification_payload,
+    )
+
+    stages_by_node = {
+        "plan_query": [("orchestrator-agent", selected_agent_id, "plan_dispatch"), (selected_agent_id, selected_agent_id, "blackboard_update")],
+        "gather_evidence": [("orchestrator-agent", selected_agent_id, "scout_dispatch"), (selected_agent_id, selected_agent_id, "evidence_merge")],
+        "curate_sources": [("orchestrator-agent", selected_agent_id, "curation_dispatch"), (selected_agent_id, selected_agent_id, "source_filter_merge")],
+        "draft_synthesis": [("orchestrator-agent", selected_agent_id, "synthesis_dispatch"), (selected_agent_id, selected_agent_id, "claim_draft_merge")],
+        "critique_and_fact_check": [("orchestrator-agent", selected_agent_id, "critic_dispatch"), (selected_agent_id, selected_agent_id, "debate_merge")],
+        "revise_final_answer": [("orchestrator-agent", selected_agent_id, "revision_dispatch"), (selected_agent_id, "orchestrator-agent", "final_merge")],
+    }
+    stages = stages_by_node.get(
+        node_id,
+        [("orchestrator-agent", selected_agent_id, "task_dispatch"), (selected_agent_id, "orchestrator-agent", "task_merge")],
+    )
+
+    entries: List[Dict[str, Any]] = []
+    for handoff_index, (from_agent_id, to_agent_id, handoff_type) in enumerate(stages, start=1):
+        entries.append(
+            {
+                "research_run_id": run_record.id,
+                "node_id": node_record.node_id,
+                "attempt_id": attempt.id,
+                "handoff_index": handoff_index,
+                "from_agent_id": from_agent_id,
+                "to_agent_id": to_agent_id,
+                "handoff_type": handoff_type,
+                "round_number": int((verification_payload.get("quorum_result") or {}).get("round_number", 1) or 1),
+                "status": "completed",
+                "budget_remaining": budget_remaining,
+                "verification_mode": verification_mode,
+                "idempotency_key": idempotency_key,
+                "blackboard_delta": blackboard_delta,
+                "decision_log": {
+                    "feedback": verification_payload.get("feedback"),
+                    "decision": verification_payload.get("decision"),
+                },
+                "meta": {
+                    "session_id": dict((run_record.meta or {}).get("session_state") or {}).get("session_id"),
+                    "candidate_agent_ids": _extract_node_candidate_agent_ids(node_record),
+                },
+            }
+        )
+    return entries
+
+
+def _update_trace_summary(db: Any, run_record: ResearchRun) -> None:
+    verification_count = (
+        db.query(VerificationDecision)
+        .filter(VerificationDecision.research_run_id == run_record.id)
+        .count()
+    )
+    handoff_count = (
+        db.query(SwarmHandoff)
+        .filter(SwarmHandoff.research_run_id == run_record.id)
+        .count()
+    )
+    evaluation_count = (
+        db.query(PolicyEvaluation)
+        .filter(PolicyEvaluation.research_run_id == run_record.id)
+        .count()
+    )
+    unresolved_count = (
+        db.query(VerificationDecision)
+        .filter(VerificationDecision.research_run_id == run_record.id)
+        .filter(VerificationDecision.approved.is_(False))
+        .count()
+    )
+    run_meta = dict(run_record.meta or {})
+    run_meta["trace_summary"] = _trace_summary(
+        verification_decision_count=verification_count,
+        swarm_handoff_count=handoff_count,
+        policy_evaluation_count=evaluation_count,
+        unresolved_dissent_count=unresolved_count,
+    )
+    run_record.meta = run_meta
+
+
+def _persist_attempt_trace_bundle(
+    db: Any,
+    *,
+    run_record: ResearchRun,
+    node_record: ResearchRunNode,
+    attempt: ExecutionAttempt,
+    task: Optional[Task],
+    result: Dict[str, Any],
+    snapshot: Optional[Dict[str, Any]],
+    cancelled: bool = False,
+    error: Optional[str] = None,
+) -> None:
+    verification_payload = (
+        dict(result.get("verification") or {})
+        if isinstance(result.get("verification"), dict)
+        else {}
+    )
+    selected_agent = (
+        dict(result.get("selected_agent") or {})
+        if isinstance(result.get("selected_agent"), dict)
+        else {}
+    )
+    selected_agent_id = str(
+        selected_agent.get("agent_id")
+        or result.get("agent_used")
+        or attempt.agent_id
+        or node_record.assigned_agent_id
+        or ""
+    ).strip() or None
+    run_policy = _get_run_policy(dict(run_record.meta or {}))
+    quorum_result = (
+        dict(verification_payload.get("quorum_result") or {})
+        if isinstance(verification_payload.get("quorum_result"), dict)
+        else {}
+    )
+    retry_recommended = bool(verification_payload.get("retry_recommended") or result.get("retry_recommended"))
+    approved = bool(result.get("success")) and not cancelled and not retry_recommended
+
+    if cancelled:
+        decision = "cancelled"
+        decision_source = "cancellation"
+    elif retry_recommended:
+        decision = "retry_requested"
+        decision_source = "strict_quorum"
+    elif approved:
+        decision = "approved"
+        decision_source = "human_reviewer" if result.get("human_approved") else "auto_verifier"
+    else:
+        decision = "rejected"
+        decision_source = "runtime_failure"
+
+    decision_row = VerificationDecision(  # type: ignore[call-arg]
+        research_run_id=run_record.id,
+        node_id=node_record.node_id,
+        attempt_id=attempt.id,
+        task_id=task.id if task else attempt.task_id,
+        payment_id=attempt.payment_id,
+        agent_id=selected_agent_id,
+        decision=decision,
+        approved=approved,
+        decision_source=decision_source,
+        overall_score=verification_payload.get("overall_score") or attempt.verification_score,
+        dimension_scores=verification_payload.get("dimension_scores") or {},
+        rationale=verification_payload.get("feedback") or error or result.get("error"),
+        dissent_count=quorum_result.get("dissent_count"),
+        quorum_policy=quorum_result.get("quorum_policy") or run_policy.get("quorum_policy"),
+        policy_snapshot={**run_policy, **quorum_result},
+        meta={
+            "auto_approved": bool(result.get("auto_approved")),
+            "human_approved": bool(result.get("human_approved")),
+            "retry_recommended": retry_recommended,
+        },
+    )
+    db.add(decision_row)
+
+    policy_rows = []
+    if selected_agent_id:
+        policy_rows.append(
+            PolicyEvaluation(  # type: ignore[call-arg]
+                research_run_id=run_record.id,
+                node_id=node_record.node_id,
+                attempt_id=attempt.id,
+                task_id=task.id if task else attempt.task_id,
+                payment_id=attempt.payment_id,
+                evaluation_type="agent_selection",
+                status="passed",
+                outcome="selected",
+                summary=f"Selected agent {selected_agent_id} for node {node_record.node_id}",
+                details={
+                    "selected_agent_id": selected_agent_id,
+                    "candidate_agent_ids": _extract_node_candidate_agent_ids(node_record),
+                },
+                meta={"selection_strategy": (node_record.meta or {}).get("selection_strategy")},
+            )
+        )
+    policy_rows.append(
+        PolicyEvaluation(  # type: ignore[call-arg]
+            research_run_id=run_record.id,
+            node_id=node_record.node_id,
+            attempt_id=attempt.id,
+            task_id=task.id if task else attempt.task_id,
+            payment_id=attempt.payment_id,
+            evaluation_type="verification_gate",
+            status="passed" if approved else ("retry" if retry_recommended else "failed"),
+            outcome="allow" if approved else ("retry" if retry_recommended else "reject"),
+            summary=verification_payload.get("feedback") or error or result.get("error"),
+            details={
+                "overall_score": verification_payload.get("overall_score") or attempt.verification_score,
+                "decision": verification_payload.get("decision"),
+                "quorum_result": quorum_result,
+                "strict_mode": run_policy.get("strict_mode", False),
+            },
+            meta={"policy": run_policy},
+        )
+    )
+    for row in policy_rows:
+        db.add(row)
+
+    result_payload = (
+        dict(result.get("result") or {})
+        if isinstance(result.get("result"), dict)
+        else {}
+    )
+    for entry in _build_swarm_handoff_entries(
+        node_id=node_record.node_id,
+        attempt=attempt,
+        run_record=run_record,
+        node_record=node_record,
+        selected_agent_id=selected_agent_id,
+        verification_payload=verification_payload,
+        result_payload=result_payload,
+        snapshot=snapshot,
+    ):
+        db.add(SwarmHandoff(**entry))  # type: ignore[arg-type]
+
+    run_meta = dict(run_record.meta or {})
+    session_state = dict(run_meta.get("session_state") or {})
+    blackboard_delta = _serialize_blackboard_delta(
+        node_id=node_record.node_id,
+        result_payload=result_payload,
+        verification_payload=verification_payload,
+    )
+    session_state["last_node_id"] = node_record.node_id
+    session_state["last_attempt_id"] = attempt.id
+    session_state["blackboard_keys"] = sorted(
+        key for key, value in blackboard_delta.items() if value
+    )
+    run_meta["session_state"] = session_state
+    run_record.meta = run_meta
+    _update_trace_summary(db, run_record)
+
+
 class ResearchRunExecutor:
     """Execute a persisted research run through a Strands graph."""
 
@@ -1528,69 +2090,126 @@ class ResearchRunExecutor:
             raise ResearchRunCancelledError(node_record.error or "Cancelled by user")
 
         await self._wait_for_control_state()
+        max_node_attempts = self._resolve_max_node_attempts(
+            self._resolve_execution_parameters(node_record)
+        )
 
-        attempt_id, task_id, node_title = self._create_attempt(node_id)
-        await self._initialize_attempt_runtime(node_id=node_id, attempt_id=attempt_id, task_id=task_id)
-
-        try:
-            context = self._build_handoff_context(
+        while True:
+            attempt_id, task_id, node_title = self._create_attempt(node_id)
+            await self._initialize_attempt_runtime(
                 node_id=node_id,
                 attempt_id=attempt_id,
                 task_id=task_id,
             )
-            node_record = self._get_node(node_id)
-            execution_parameters = self._resolve_execution_parameters(node_record)
+            attempt_failure_recorded = False
 
-            result = await execute_microtask(
-                task_id=task_id,
-                todo_id=node_id,
-                task_name=node_title,
-                task_description=node_record.description,
-                capability_requirements=node_record.capability_requirements,
-                budget_limit=self._get_research_run().budget_limit,
-                min_reputation_score=DEFAULT_MIN_REPUTATION_SCORE,
-                execution_parameters=execution_parameters,
-                todo_list=[
-                    {
-                        "id": node_id,
-                        "title": node_record.title,
-                        "description": node_record.description,
-                        "assigned_to": node_record.assigned_agent_id,
-                        "status": "pending",
-                    }
-                ],
-                handoff_context=context.model_dump(mode="json"),
-                prefer_strands_backend=True,
-            )
+            try:
+                context = self._build_handoff_context(
+                    node_id=node_id,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                )
+                node_record = self._get_node(node_id)
+                execution_parameters = self._resolve_execution_parameters(node_record)
+                previous_attempts = self._load_attempts_for_node(node_id)
+                previous_agent_ids = [
+                    str(item.agent_id or "").strip()
+                    for item in previous_attempts
+                    if item.id != attempt_id and item.agent_id
+                ]
 
-            snapshot = load_task_snapshot(task_id)
-            cancelled = self._attempt_was_cancelled(result=result, snapshot=snapshot)
-            self._finalize_attempt(
-                node_id=node_id,
-                attempt_id=attempt_id,
-                task_id=task_id,
-                result=result,
-                snapshot=snapshot,
-                cancelled=cancelled,
-            )
+                result = await execute_microtask(
+                    task_id=task_id,
+                    todo_id=node_id,
+                    task_name=node_title,
+                    task_description=node_record.description,
+                    capability_requirements=node_record.capability_requirements,
+                    budget_limit=self._get_research_run().budget_limit,
+                    min_reputation_score=DEFAULT_MIN_REPUTATION_SCORE,
+                    execution_parameters=execution_parameters,
+                    todo_list=[
+                        {
+                            "id": node_id,
+                            "title": node_record.title,
+                            "description": node_record.description,
+                            "assigned_to": node_record.assigned_agent_id,
+                            "status": "pending",
+                        }
+                    ],
+                    handoff_context=context.model_dump(mode="json"),
+                    prefer_strands_backend=True,
+                    preferred_agent_id=node_record.assigned_agent_id,
+                    excluded_agent_ids=previous_agent_ids,
+                )
 
-            if not result.get("success"):
+                snapshot = load_task_snapshot(task_id)
+                cancelled = self._attempt_was_cancelled(result=result, snapshot=snapshot)
+                if result.get("success"):
+                    self._finalize_attempt(
+                        node_id=node_id,
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        result=result,
+                        snapshot=snapshot,
+                        cancelled=cancelled,
+                    )
+                    return result
+
                 if cancelled:
+                    self._finalize_attempt(
+                        node_id=node_id,
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        result=result,
+                        snapshot=snapshot,
+                        cancelled=True,
+                    )
                     raise ResearchRunCancelledError(result.get("error") or "Cancelled by user")
-                raise RuntimeError(result.get("error", f"Research run node '{node_id}' failed"))
 
-            return result
-        except ResearchRunCancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            self._record_attempt_failure(
-                node_id=node_id,
-                attempt_id=attempt_id,
-                task_id=task_id,
-                error=str(exc),
-                cancelled=isinstance(exc, ResearchRunCancelledError),
-            )
-            raise
+                self._record_attempt_failure(
+                    node_id=node_id,
+                    attempt_id=attempt_id,
+                    task_id=task_id,
+                    error=str(result.get("error") or f"Research run node '{node_id}' failed"),
+                    result=result,
+                    cancelled=False,
+                )
+                attempt_failure_recorded = True
+
+                if self._should_retry_attempt(
+                    max_node_attempts=max_node_attempts,
+                    completed_attempts=len(previous_attempts),
+                    result=result,
+                    cancelled=False,
+                ):
+                    self._prepare_retry_candidate(
+                        node_id,
+                        error=str(result.get("error") or "Retrying failed node"),
+                    )
+                    continue
+
+                raise RuntimeError(result.get("error", f"Research run node '{node_id}' failed"))
+            except ResearchRunCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if not attempt_failure_recorded:
+                    self._record_attempt_failure(
+                        node_id=node_id,
+                        attempt_id=attempt_id,
+                        task_id=task_id,
+                        error=str(exc),
+                        cancelled=False,
+                    )
+                completed_attempts = len(self._load_attempts_for_node(node_id))
+                if self._should_retry_attempt(
+                    max_node_attempts=max_node_attempts,
+                    completed_attempts=completed_attempts,
+                    result=None,
+                    cancelled=False,
+                ):
+                    self._prepare_retry_candidate(node_id, error=str(exc))
+                    continue
+                raise
 
     def _build_graph(self):
         plan = _load_plan_for_run(self.research_run_id)
@@ -1624,9 +2243,87 @@ class ResearchRunExecutor:
         finally:
             db.close()
 
+    def _load_attempts_for_node(self, node_id: str) -> List[ExecutionAttempt]:
+        db = SessionLocal()
+        try:
+            return (
+                db.query(ExecutionAttempt)
+                .filter(ExecutionAttempt.research_run_id == self.research_run_id)
+                .filter(ExecutionAttempt.node_id == node_id)
+                .order_by(ExecutionAttempt.attempt_number.asc(), ExecutionAttempt.created_at.asc())
+                .all()
+            )
+        finally:
+            db.close()
+
     def _get_run_meta(self) -> Dict[str, Any]:
         run_record = self._get_research_run()
         return dict(run_record.meta or {})
+
+    def _resolve_max_node_attempts(self, execution_parameters: Dict[str, Any]) -> int:
+        return max(
+            1,
+            int(
+                execution_parameters.get("max_node_attempts")
+                or self._get_run_policy().get("max_node_attempts")
+                or DEFAULT_MAX_NODE_ATTEMPTS
+            ),
+        )
+
+    def _get_run_policy(self) -> Dict[str, Any]:
+        return _get_run_policy(self._get_run_meta())
+
+    def _prepare_retry_candidate(self, node_id: str, *, error: str) -> str:
+        db = SessionLocal()
+        try:
+            node_record = (
+                db.query(ResearchRunNode)
+                .filter(ResearchRunNode.research_run_id == self.research_run_id)
+                .filter(ResearchRunNode.node_id == node_id)
+                .one()
+            )
+            attempts = (
+                db.query(ExecutionAttempt)
+                .filter(ExecutionAttempt.research_run_id == self.research_run_id)
+                .filter(ExecutionAttempt.node_id == node_id)
+                .order_by(ExecutionAttempt.attempt_number.asc(), ExecutionAttempt.created_at.asc())
+                .all()
+            )
+            used_agent_ids = [str(item.agent_id or "").strip() for item in attempts if item.agent_id]
+            candidate_agent_ids = _extract_node_candidate_agent_ids(node_record)
+            next_agent_id = node_record.assigned_agent_id
+            if self._get_run_policy().get("reroute_on_failure", False):
+                for candidate_agent_id in candidate_agent_ids:
+                    if candidate_agent_id not in used_agent_ids:
+                        next_agent_id = candidate_agent_id
+                        break
+
+            node_meta = dict(node_record.meta or {})
+            node_meta["last_retry_error"] = error
+            node_record.meta = node_meta
+            node_record.status = ResearchRunNodeStatus.PENDING
+            node_record.completed_at = None
+            node_record.result = None
+            node_record.error = error
+            node_record.assigned_agent_id = next_agent_id
+            db.commit()
+            return next_agent_id
+        finally:
+            db.close()
+
+    def _should_retry_attempt(
+        self,
+        *,
+        max_node_attempts: int,
+        completed_attempts: int,
+        result: Optional[Dict[str, Any]],
+        cancelled: bool,
+    ) -> bool:
+        if cancelled or completed_attempts >= max_node_attempts:
+            return False
+        if result is None:
+            return True
+        return bool(result.get("retry_recommended")) or completed_attempts < max_node_attempts
 
     async def _wait_for_control_state(self) -> None:
         while True:
@@ -2120,6 +2817,18 @@ class ResearchRunExecutor:
                     node_result=result.get("result"),
                 )
 
+            _persist_attempt_trace_bundle(
+                db,
+                run_record=run_record,
+                node_record=node_record,
+                attempt=attempt,
+                task=task,
+                result=result,
+                snapshot=snapshot,
+                cancelled=cancelled,
+                error=None if success else result.get("error"),
+            )
+
             db.commit()
         except Exception:
             db.rollback()
@@ -2134,6 +2843,7 @@ class ResearchRunExecutor:
         attempt_id: str,
         task_id: str,
         error: str,
+        result: Optional[Dict[str, Any]] = None,
         cancelled: bool = False,
     ) -> None:
         db = SessionLocal()
@@ -2165,6 +2875,28 @@ class ResearchRunExecutor:
                 task.status = TaskStatus.CANCELLED if cancelled else TaskStatus.FAILED
                 task.result = {"error": error}
                 task.completed_at = _utcnow()
+
+            if attempt is not None and node_record is not None:
+                run_record = db.query(ResearchRun).filter(ResearchRun.id == self.research_run_id).one()
+                _persist_attempt_trace_bundle(
+                    db,
+                    run_record=run_record,
+                    node_record=node_record,
+                    attempt=attempt,
+                    task=task,
+                    result=result
+                    or {
+                        "success": False,
+                        "error": error,
+                        "agent_used": attempt.agent_id or node_record.assigned_agent_id,
+                        "selected_agent": {
+                            "agent_id": attempt.agent_id or node_record.assigned_agent_id,
+                        },
+                    },
+                    snapshot=load_task_snapshot(task_id) if task_id else None,
+                    cancelled=cancelled,
+                    error=error,
+                )
 
             db.commit()
         except Exception:
@@ -2256,6 +2988,27 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
             .order_by(ExecutionAttempt.attempt_number.asc(), ExecutionAttempt.created_at.asc())
             .all()
         )
+        verification_decision_count = (
+            db.query(VerificationDecision)
+            .filter(VerificationDecision.research_run_id == research_run_id)
+            .count()
+        )
+        swarm_handoff_count = (
+            db.query(SwarmHandoff)
+            .filter(SwarmHandoff.research_run_id == research_run_id)
+            .count()
+        )
+        policy_evaluation_count = (
+            db.query(PolicyEvaluation)
+            .filter(PolicyEvaluation.research_run_id == research_run_id)
+            .count()
+        )
+        unresolved_dissent_count = (
+            db.query(VerificationDecision)
+            .filter(VerificationDecision.research_run_id == research_run_id)
+            .filter(VerificationDecision.approved.is_(False))
+            .count()
+        )
     finally:
         db.close()
 
@@ -2305,6 +3058,7 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
                 description=node.description,
                 capability_requirements=node.capability_requirements,
                 assigned_agent_id=node.assigned_agent_id,
+                candidate_agent_ids=list((node.meta or {}).get("candidate_agent_ids") or []),
                 execution_order=node.execution_order,
                 status=node_status,
                 task_id=node.latest_task_id,
@@ -2359,6 +3113,13 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         classified_mode=meta.get("classified_mode", ResearchMode.LITERATURE.value),
         depth_mode=meta.get("depth_mode", DepthMode.STANDARD.value),
         freshness_required=bool(meta.get("freshness_required", False)),
+        policy=_get_run_policy(meta),
+        trace_summary=_trace_summary(
+            verification_decision_count=verification_decision_count,
+            swarm_handoff_count=swarm_handoff_count,
+            policy_evaluation_count=policy_evaluation_count,
+            unresolved_dissent_count=unresolved_dissent_count,
+        ),
         source_requirements=meta.get("source_requirements") or {},
         rounds_planned=meta.get("rounds_planned") or {},
         rounds_completed=RoundsCompletedPayload.from_payload(rounds_completed_payload),

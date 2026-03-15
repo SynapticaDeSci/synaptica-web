@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from strands import tool
 
@@ -23,7 +23,12 @@ from shared.database import Agent, AgentReputation, SessionLocal
 from shared.payments.service import get_payment_mode
 from shared.payments.service import build_idempotency_key
 from shared.payments.runtime import require_verified_payment_profile
-from shared.research.catalog import select_supported_agent_for_todo
+from shared.research.agent_inventory import is_supported_builtin_research_agent
+from shared.research.catalog import (
+    default_research_endpoint,
+    rank_supported_agents_for_todo,
+    select_supported_agent_for_todo,
+)
 from shared.runtime import (
     AgentSelectionResult,
     ExecutionRequest,
@@ -300,6 +305,130 @@ def _evaluate_research_quality_contract(
     return {"issues": issues, "quality_summary": merged_summary}
 
 
+def _quorum_required_approvals(quorum_policy: str, total_votes: int) -> int:
+    if quorum_policy == "single_verifier":
+        return 1
+    if quorum_policy == "two_of_three":
+        return min(2, total_votes)
+    if quorum_policy == "three_of_five":
+        return min(3, total_votes)
+    if quorum_policy == "unanimous":
+        return total_votes
+    return 1
+
+
+def _build_strict_quorum_result(
+    task_result: Dict[str, Any],
+    verification_criteria: Dict[str, Any],
+    *,
+    overall_score: float,
+    verification_passed: bool,
+) -> Dict[str, Any]:
+    strict_mode = bool(verification_criteria.get("strict_mode", False))
+    quorum_policy = str(verification_criteria.get("quorum_policy") or "single_verifier")
+    if not strict_mode and quorum_policy == "single_verifier":
+        return {}
+
+    quality_summary = (
+        dict(task_result.get("quality_summary") or {})
+        if isinstance(task_result.get("quality_summary"), dict)
+        else {}
+    )
+    source_requirements = dict(verification_criteria.get("source_requirements") or {})
+    quality_requirements = dict(verification_criteria.get("quality_requirements") or {})
+    source_summary = (
+        dict(task_result.get("source_summary") or {})
+        if isinstance(task_result.get("source_summary"), dict)
+        else {}
+    )
+    freshness_summary = (
+        dict(task_result.get("freshness_summary") or {})
+        if isinstance(task_result.get("freshness_summary"), dict)
+        else {}
+    )
+    citations = list(task_result.get("citations") or [])
+    sources = list(task_result.get("sources") or citations)
+    critic_findings = [
+        item
+        for item in (task_result.get("critic_findings") or [])
+        if isinstance(item, dict)
+    ]
+    uncovered_claims = _normalize_string_list(quality_summary.get("uncovered_claims"))
+    citation_coverage = float(quality_summary.get("citation_coverage") or 0.0)
+    min_citation_coverage = float(quality_requirements.get("min_citation_coverage", 0.0) or 0.0)
+    required_sources = int(source_requirements.get("total_sources", 0) or 0)
+    min_fresh_sources = int(source_requirements.get("min_fresh_sources", 0) or 0)
+    fresh_sources = int(
+        source_summary.get("fresh_sources")
+        or freshness_summary.get("fresh_sources")
+        or freshness_summary.get("fresh_source_count")
+        or 0
+    )
+    high_severity_findings = [
+        finding
+        for finding in critic_findings
+        if str(finding.get("severity") or "").strip().lower() == "high"
+    ]
+
+    votes = [
+        {
+            "reviewer": "verifier",
+            "approved": bool(verification_passed and overall_score >= 50),
+            "reason": f"Verifier overall score {overall_score:.1f}.",
+        },
+        {
+            "reviewer": "citation_guard",
+            "approved": citation_coverage >= min_citation_coverage,
+            "reason": (
+                f"Citation coverage {citation_coverage:.2f} vs required {min_citation_coverage:.2f}."
+            ),
+        },
+        {
+            "reviewer": "evidence_guard",
+            "approved": len(sources) >= required_sources if required_sources else len(sources) > 0,
+            "reason": f"Collected {len(sources)} sources vs required {required_sources}.",
+        },
+        {
+            "reviewer": "freshness_guard",
+            "approved": fresh_sources >= min_fresh_sources if min_fresh_sources else True,
+            "reason": f"Fresh sources {fresh_sources} vs required {min_fresh_sources}.",
+        },
+        {
+            "reviewer": "critic_guard",
+            "approved": len(high_severity_findings) == 0 and len(uncovered_claims) == 0,
+            "reason": (
+                f"{len(high_severity_findings)} high-severity critic findings and "
+                f"{len(uncovered_claims)} uncovered claims."
+            ),
+        },
+    ]
+
+    if quorum_policy == "single_verifier":
+        active_votes = votes[:1]
+    elif quorum_policy == "two_of_three":
+        active_votes = votes[:3]
+    else:
+        active_votes = votes[:5]
+
+    approvals = sum(1 for vote in active_votes if vote["approved"])
+    required_approvals = _quorum_required_approvals(quorum_policy, len(active_votes))
+    approved = approvals >= required_approvals
+    return {
+        "approved": approved,
+        "quorum_policy": quorum_policy,
+        "required_approvals": required_approvals,
+        "approvals": approvals,
+        "total_votes": len(active_votes),
+        "dissent_count": len(active_votes) - approvals,
+        "votes": active_votes,
+        "round_number": int((task_result.get("rounds_completed") or {}).get("critique_rounds", 0) or 1),
+        "summary": (
+            f"Quorum {'reached' if approved else 'not reached'} "
+            f"({approvals}/{len(active_votes)} approvals; policy={quorum_policy})."
+        ),
+    }
+
+
 def _to_handoff_context(
     task_id: str,
     todo_id: str,
@@ -365,11 +494,16 @@ def _load_marketplace_agent(agent_id: str) -> Optional[Dict[str, Any]]:
         )
         score = reputation.reputation_score if reputation else 0.0
         meta = agent.meta or {}
+        endpoint_url = (
+            default_research_endpoint(agent_id)
+            if is_supported_builtin_research_agent(agent_id)
+            else meta.get("endpoint_url")
+        )
         return {
             "agent_id": agent.agent_id,
             "name": agent.name,
             "description": agent.description,
-            "endpoint_url": meta.get("endpoint_url"),
+            "endpoint_url": endpoint_url,
             "pricing": meta.get("pricing") or {},
             "hedera_account_id": agent.hedera_account_id,
             "support_tier": meta.get("support_tier", "experimental"),
@@ -389,7 +523,7 @@ def _check_task_cancelled(task_id: str) -> bool:
 def _strands_backend_enabled(prefer_strands_backend: bool) -> bool:
     if not prefer_strands_backend:
         return False
-    configured = str(os.getenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "1")).strip().lower()
+    configured = str(os.getenv("RESEARCH_RUN_USE_STRANDS_BACKEND", "0")).strip().lower()
     return configured not in {"0", "false", "no", "off"}
 
 
@@ -641,6 +775,18 @@ def _finalize_verification_payload(
         and dimension_scores.get("ethics", 0) >= 50
         and not research_contract["issues"]
     )
+    quorum_result = _build_strict_quorum_result(
+        task_result,
+        verification_criteria,
+        overall_score=float(overall_score),
+        verification_passed=verification_passed,
+    )
+    retry_recommended = False
+    if quorum_result:
+        retry_recommended = not bool(quorum_result.get("approved"))
+        if retry_recommended:
+            verification_passed = False
+            feedback = f"{feedback} {quorum_result.get('summary', '')}".strip()
     result = VerificationResult(
         success=True,
         verification_passed=verification_passed,
@@ -650,7 +796,11 @@ def _finalize_verification_payload(
         decision="auto_approve" if verification_passed else "review_required",
         handoff_context=context,
     )
-    return result.model_dump(mode="json")
+    payload = result.model_dump(mode="json")
+    payload["retry_recommended"] = retry_recommended
+    if quorum_result:
+        payload["quorum_result"] = quorum_result
+    return payload
 
 
 async def _run_strands_executor_step(
@@ -940,6 +1090,8 @@ async def negotiator_agent(
     task_name: Optional[str] = None,
     todo_id: Optional[str] = None,
     handoff_context: Optional[Dict[str, Any]] = None,
+    preferred_agent_id: Optional[str] = None,
+    excluded_agent_ids: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     """Select a supported marketplace agent and create a payment proposal."""
 
@@ -963,10 +1115,17 @@ async def negotiator_agent(
         },
     )
 
-    selected_agent_id = select_supported_agent_for_todo(
+    ranked_agent_ids = rank_supported_agents_for_todo(
         todo_id,
         capability_requirements,
         task_name or "",
+        preferred_agent_id=preferred_agent_id,
+        excluded_agent_ids=excluded_agent_ids or [],
+    )
+    selected_agent_id = (
+        ranked_agent_ids[0]
+        if ranked_agent_ids
+        else select_supported_agent_for_todo(todo_id, capability_requirements, task_name or "")
     )
     agent_record = _load_marketplace_agent(selected_agent_id)
     if agent_record is None:
@@ -1050,6 +1209,7 @@ async def negotiator_agent(
             "message": f"✓ Selected {agent_record.get('name')}",
             "agent_id": selected_agent_id,
             "payment_id": payment_result.get("payment_id"),
+            "candidate_agent_ids": ranked_agent_ids or [selected_agent_id],
         },
     )
     return selection.model_dump(mode="json")
@@ -1260,6 +1420,8 @@ async def execute_microtask(
     todo_list: Optional[list] = None,
     handoff_context: Optional[Dict[str, Any]] = None,
     prefer_strands_backend: bool = False,
+    preferred_agent_id: Optional[str] = None,
+    excluded_agent_ids: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     """Run the full negotiation -> payment -> execution -> verification flow."""
 
@@ -1285,6 +1447,8 @@ async def execute_microtask(
         task_name=task_name,
         todo_id=todo_id,
         handoff_context=context.model_dump(mode="json"),
+        preferred_agent_id=preferred_agent_id,
+        excluded_agent_ids=excluded_agent_ids,
     )
     if not selection.get("success"):
         await update_todo_item(task_id, todo_id, "failed", todo_list)
@@ -1383,6 +1547,9 @@ async def execute_microtask(
             "freshness_required": (execution_parameters or {}).get("freshness_required"),
             "source_requirements": (execution_parameters or {}).get("source_requirements"),
             "claim_targets": (execution_parameters or {}).get("claim_targets"),
+            "strict_mode": bool((execution_parameters or {}).get("strict_mode", False)),
+            "risk_level": (execution_parameters or {}).get("risk_level"),
+            "quorum_policy": (execution_parameters or {}).get("quorum_policy"),
         },
         verification_mode=selected_context.verification_mode,
         handoff_context=selected_context.model_dump(mode="json"),
@@ -1412,6 +1579,38 @@ async def execute_microtask(
             "auto_approved": True,
             "selected_agent": selection,
             "verification": verification,
+        }
+
+    if verification.get("retry_recommended"):
+        if payment_id:
+            await reject_and_refund(
+                payment_id,
+                verification.get("feedback", "Verifier requested retry"),
+                action_context=_build_payment_action_context(selected_context, PaymentAction.REFUND),
+            )
+        await update_todo_item(task_id, todo_id, "failed", todo_list)
+        persist_verification_state(
+            task_id,
+            pending=False,
+            verification_data=verification,
+            verification_decision={
+                "approved": False,
+                "reason": verification.get("feedback", "Retry recommended"),
+                "retry_recommended": True,
+            },
+        )
+        persist_handoff_context(task_id, None)
+        return {
+            "success": False,
+            "task_id": task_id,
+            "todo_id": todo_id,
+            "error": verification.get("feedback", "Retry recommended"),
+            "todo_status": "failed",
+            "verification_score": overall_score,
+            "selected_agent": selection,
+            "verification": verification,
+            "retry_recommended": True,
+            "agent_used": selection["agent_id"],
         }
 
     await _request_human_verification(

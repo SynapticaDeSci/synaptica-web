@@ -68,7 +68,12 @@ class ProblemFramerAgent(BaseResearchAgent):
         context = kwargs.get("context") or {}
         if context.get("node_strategy") == "plan_query":
             return await self._execute_query_plan(request, context)
-        return await super().execute(request, **kwargs)
+
+        # The supported problem framer is now a research-run planner first.
+        # Fall back to the same structured contract even when older callers do
+        # not pass an explicit node strategy, so the active runtime cannot drift
+        # back into the legacy problem-statement schema.
+        return await self._execute_query_plan(request, context)
 
     async def _execute_query_plan(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
         description = str(context.get("original_description") or request).strip()
@@ -82,6 +87,8 @@ class ProblemFramerAgent(BaseResearchAgent):
         search_queries = self._build_search_queries(description, keywords, classified_mode, depth_mode)
         claim_targets = list(context.get("claim_targets") or self._build_claim_targets(description, classified_mode))
         success_criteria = self._build_success_criteria(classified_mode)
+        legacy_scope = self._build_legacy_scope(description, classified_mode, depth_mode)
+        legacy_hypothesis = self._build_legacy_hypothesis(description, classified_mode)
 
         result = {
             "query": description,
@@ -108,6 +115,14 @@ class ProblemFramerAgent(BaseResearchAgent):
                 "Treat freshness as binding." if freshness_required else "Freshness is advisory.",
             ],
             "as_of_date": datetime.now(UTC).date().isoformat(),
+            # Retained as additive metadata for legacy helper flows that still
+            # validate against the old ProblemStatement schema.
+            "hypothesis": legacy_hypothesis,
+            "scope": legacy_scope,
+            "domain": self._build_legacy_domain(classified_mode),
+            "feasibility_score": self._estimate_feasibility_score(classified_mode, depth_mode),
+            "novelty_score": self._estimate_novelty_score(description, classified_mode),
+            "rationale": self._build_legacy_rationale(classified_mode, depth_mode, freshness_required),
         }
 
         self._update_reputation(success=True, quality_score=0.85)
@@ -176,7 +191,7 @@ class ProblemFramerAgent(BaseResearchAgent):
                     problem_data = json.loads(json_str)
                 else:
                     # Agent didn't return JSON, construct from response
-                    problem_data = self._construct_problem_from_text(agent_output, query)
+                    problem_data = self._construct_problem_from_text(agent_output, query, context=context)
             else:
                 problem_data = agent_output
 
@@ -216,7 +231,13 @@ class ProblemFramerAgent(BaseResearchAgent):
                 'error': f'Error processing problem statement: {str(e)}'
             }
 
-    def _construct_problem_from_text(self, text: str, query: str) -> Dict[str, Any]:
+    def _construct_problem_from_text(
+        self,
+        text: str,
+        query: str,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Construct problem statement from text response if JSON parsing fails.
 
@@ -227,23 +248,34 @@ class ProblemFramerAgent(BaseResearchAgent):
         Returns:
             Problem statement dictionary
         """
-        # This is a fallback method to extract information from text
-        # In production, the agent should always return proper JSON
+        context = context or {}
+        classified_mode = str(context.get("classified_mode") or "literature")
+        depth_mode = str(context.get("depth_mode") or "standard")
+        keywords = self._extract_keywords_from_text(text, query)
+        search_queries = self._build_search_queries(query, keywords, classified_mode, depth_mode)
+        claim_targets = list(context.get("claim_targets") or self._build_claim_targets(query, classified_mode))
+        success_criteria = self._build_success_criteria(classified_mode)
+
         return {
             "query": query,
             "research_question": self._extract_research_question(text) or query,
-            "hypothesis": self._extract_hypothesis(text) or f"There exists a relationship related to: {query}",
-            "scope": {
-                "included": ["To be determined"],
-                "excluded": ["To be determined"],
-                "timeframe": "Not specified",
-                "domain_boundaries": "To be defined"
-            },
-            "keywords": self._extract_keywords_from_text(text, query),
-            "domain": "Research",
-            "feasibility_score": 0.5,
-            "novelty_score": 0.5,
-            "rationale": "Extracted from text response"
+            "rewritten_research_brief": self._build_rewritten_brief(query, classified_mode, depth_mode),
+            "keywords": keywords,
+            "subquestions": self._build_subquestions(query, classified_mode),
+            "search_queries": search_queries,
+            "search_lanes": self._group_search_lanes(search_queries),
+            "success_criteria": success_criteria,
+            "claim_targets": claim_targets,
+            "key_entities": self._build_key_entities(query, keywords),
+            "excluded_assumptions": self._build_excluded_assumptions(classified_mode),
+            "source_priorities": self._build_source_priorities(classified_mode),
+            "as_of_date": datetime.now(UTC).date().isoformat(),
+            "hypothesis": self._extract_hypothesis(text) or self._build_legacy_hypothesis(query, classified_mode),
+            "scope": self._build_legacy_scope(query, classified_mode, depth_mode),
+            "domain": self._build_legacy_domain(classified_mode),
+            "feasibility_score": self._estimate_feasibility_score(classified_mode, depth_mode),
+            "novelty_score": self._estimate_novelty_score(query, classified_mode),
+            "rationale": "Recovered from unstructured problem-framing output.",
         }
 
     def _extract_research_question(self, text: str) -> Optional[str]:
@@ -310,6 +342,77 @@ class ProblemFramerAgent(BaseResearchAgent):
             if token not in keywords:
                 keywords.append(token)
         return keywords[:10] or ["research", "analysis", "evidence"]
+
+    def _build_legacy_hypothesis(self, description: str, classified_mode: str) -> str:
+        if classified_mode == "live_analysis":
+            return (
+                f"The freshest credible reporting will show directly observable developments about "
+                f"{description.strip()} while material uncertainty remains explicit."
+            )
+        if classified_mode == "hybrid":
+            return (
+                f"Current reporting and durable background research will align on the main explanation for "
+                f"{description.strip()}, with uncertainty concentrated in the newest developments."
+            )
+        return (
+            f"The strongest available literature and primary evidence will support a source-grounded answer to "
+            f"{description.strip()} while preserving important limitations."
+        )
+
+    def _build_legacy_scope(self, description: str, classified_mode: str, depth_mode: str) -> Dict[str, Any]:
+        included = [
+            "Directly relevant evidence and source-backed findings",
+            "Explicit limitations, caveats, and uncertainty",
+        ]
+        excluded = [
+            "Unsupported speculation",
+            "Claims without attributable evidence",
+        ]
+        if classified_mode in {"live_analysis", "hybrid"}:
+            included.append("Fresh reporting and primary confirmations")
+            excluded.append("Undated summaries of live developments")
+        if classified_mode == "literature":
+            included.append("Academic, review, and primary literature")
+            excluded.append("Purely anecdotal commentary")
+        return {
+            "included": included,
+            "excluded": excluded,
+            "timeframe": "Current and relevant historical context" if classified_mode != "literature" else "Relevant literature and primary evidence",
+            "domain_boundaries": f"{classified_mode.replace('_', ' ')} research planning ({depth_mode} depth)",
+        }
+
+    def _build_legacy_domain(self, classified_mode: str) -> str:
+        if classified_mode == "live_analysis":
+            return "Current Events and Source-Grounded Analysis"
+        if classified_mode == "hybrid":
+            return "Current Events with Background Research Synthesis"
+        return "Literature and Evidence Synthesis"
+
+    def _estimate_feasibility_score(self, classified_mode: str, depth_mode: str) -> float:
+        base = 0.78 if classified_mode == "literature" else 0.72
+        if classified_mode == "hybrid":
+            base = 0.74
+        if depth_mode == "deep":
+            base -= 0.06
+        return round(max(0.35, min(base, 0.95)), 2)
+
+    def _estimate_novelty_score(self, description: str, classified_mode: str) -> float:
+        base = 0.58 if classified_mode == "literature" else 0.52
+        if any(term in description.lower() for term in ("agent", "autonomous", "marketplace", "payment", "protocol")):
+            base += 0.08
+        return round(max(0.3, min(base, 0.9)), 2)
+
+    def _build_legacy_rationale(
+        self,
+        classified_mode: str,
+        depth_mode: str,
+        freshness_required: bool,
+    ) -> str:
+        freshness_clause = "Freshness is treated as binding." if freshness_required else "Freshness is advisory."
+        return (
+            f"Framed for {classified_mode.replace('_', ' ')} research with {depth_mode} depth. "
+            f"{freshness_clause} The plan prioritizes a direct answer, explicit uncertainties, and claim targets that can be validated with citations."
+        )
 
     def _build_research_question(self, description: str, classified_mode: str) -> str:
         if classified_mode == "live_analysis":

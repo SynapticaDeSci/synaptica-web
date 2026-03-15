@@ -27,7 +27,7 @@ from shared.payments.runtime import sync_verified_payment_profile
 from shared.handlers.identity_registry_handlers import get_all_domains, resolve_by_domain
 from shared.handlers.reputation_registry_handlers import get_full_reputation_info
 from shared.handlers.validation_registry_handlers import get_full_validation_info
-from shared.research.catalog import SUPPORTED_AGENT_DETAILS
+from shared.research.agent_inventory import is_supported_builtin_research_agent
 
 logger = logging.getLogger(__name__)
 
@@ -894,7 +894,7 @@ def _effective_reputation_score(agent_id: str, raw_score: float) -> float:
     """Keep curated supported agents runnable even when registry reputation is empty."""
 
     normalized = max(0.0, min(1.0, float(raw_score)))
-    if agent_id in SUPPORTED_AGENT_DETAILS:
+    if is_supported_builtin_research_agent(agent_id):
         return max(normalized, SUPPORTED_AGENT_REPUTATION_FLOOR)
     return normalized
 

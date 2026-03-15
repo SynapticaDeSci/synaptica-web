@@ -17,6 +17,7 @@ from agents.orchestrator.tools.agent_tools import (
     _evaluate_research_quality_contract,
     _extract_json_object,
     _execute_selected_agent,
+    _strands_backend_enabled,
 )
 from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
@@ -37,11 +38,14 @@ from shared.database import (
     PaymentNotification,
     PaymentReconciliation,
     PaymentStateTransition,
+    PolicyEvaluation,
     ResearchRun,
     ResearchRunEdge,
     ResearchRunNode,
     SessionLocal,
+    SwarmHandoff,
     Task,
+    VerificationDecision,
 )
 from shared.research_runs.planner import (
     ResearchMode,
@@ -62,6 +66,9 @@ def _reset_runtime_state():
     research_api_executor._agent_cache.clear()
     session = SessionLocal()
     try:
+        session.query(PolicyEvaluation).delete()
+        session.query(SwarmHandoff).delete()
+        session.query(VerificationDecision).delete()
         session.query(ClaimLink).delete()
         session.query(Claim).delete()
         session.query(EvidenceArtifact).delete()
@@ -752,6 +759,9 @@ def test_alembic_upgrade_preserves_phase0_data(tmp_path, monkeypatch):
     assert "evidence_artifacts" in inspector.get_table_names()
     assert "claims" in inspector.get_table_names()
     assert "claim_links" in inspector.get_table_names()
+    assert "verification_decisions" in inspector.get_table_names()
+    assert "swarm_handoffs" in inspector.get_table_names()
+    assert "policy_evaluations" in inspector.get_table_names()
     assert "agent_payment_profiles" in inspector.get_table_names()
     assert "payment_notifications" in inspector.get_table_names()
     assert "payment_reconciliations" in inspector.get_table_names()
@@ -789,6 +799,9 @@ def test_alembic_upgrade_is_idempotent_for_precreated_tables(tmp_path, monkeypat
     assert "evidence_artifacts" in inspector.get_table_names()
     assert "claims" in inspector.get_table_names()
     assert "claim_links" in inspector.get_table_names()
+    assert "verification_decisions" in inspector.get_table_names()
+    assert "swarm_handoffs" in inspector.get_table_names()
+    assert "policy_evaluations" in inspector.get_table_names()
     assert "agent_payment_profiles" in inspector.get_table_names()
 
 
@@ -806,9 +819,25 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     assert payload["workflow_template"] == "phase1e_literature_standard"
     assert payload["classified_mode"] == "literature"
     assert payload["depth_mode"] == "standard"
+    assert payload["policy"] == {
+        "strict_mode": False,
+        "risk_level": "medium",
+        "quorum_policy": "single_verifier",
+        "max_node_attempts": 1,
+        "reroute_on_failure": False,
+        "max_swarm_rounds": 1,
+        "escalate_on_dissent": False,
+    }
+    assert payload["trace_summary"] == {
+        "verification_decision_count": 0,
+        "swarm_handoff_count": 0,
+        "policy_evaluation_count": 0,
+        "unresolved_dissent_count": 0,
+    }
     assert payload["rounds_planned"] == {"evidence_rounds": 1, "critique_rounds": 1}
     assert len(payload["nodes"]) == 6
     assert len(payload["edges"]) == 5
+    assert payload["nodes"][0]["candidate_agent_ids"]
 
     completed = _poll_research_run(
         client,
@@ -831,6 +860,9 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     assert all(node["status"] == "completed" for node in completed["nodes"])
     assert all(node["task_id"] for node in completed["nodes"])
     assert all(node["payment_id"] for node in completed["nodes"])
+    assert completed["trace_summary"]["verification_decision_count"] >= 6
+    assert completed["trace_summary"]["swarm_handoff_count"] >= 12
+    assert completed["trace_summary"]["policy_evaluation_count"] >= 12
 
 
 def test_research_run_evidence_and_report_routes(client: TestClient):
@@ -863,6 +895,74 @@ def test_research_run_evidence_and_report_routes(client: TestClient):
     assert len(report_payload["claims"]) >= 3
     assert len(report_payload["critic_findings"]) >= 1
     assert report_payload["quality_summary"]["citation_coverage"] == 1.0
+
+
+def test_research_run_rejects_legacy_literature_corpus_results(
+    client: TestClient,
+    monkeypatch,
+):
+    original_post_agent_request = research_api_executor._post_agent_request
+
+    legacy_papers = [
+        {
+            "title": f"Legacy Paper {index}",
+            "paper_url": f"https://example.com/paper-{index}",
+            "abstract": f"Legacy abstract {index} about agent payments and verification.",
+            "venue": "ArXiv" if index <= 3 else "Semantic Scholar",
+            "publication_date": f"2025-0{min(index, 9)}-0{min(index, 9)}",
+            "relevance_score": 0.95 - (index * 0.05),
+        }
+        for index in range(1, 7)
+    ]
+
+    async def _legacy_literature_post_agent_request(endpoint, payload):
+        node_strategy = (payload.get("context") or {}).get("node_strategy")
+        if "literature-miner-001" in endpoint and node_strategy in {"gather_evidence", "curate_sources"}:
+            return {
+                "success": True,
+                "agent_id": "literature-miner-001",
+                "result": json.dumps(
+                    {
+                        "query": payload.get("request"),
+                        "papers": legacy_papers,
+                        "sources": ["ArXiv", "Semantic Scholar"],
+                        "search_date": "2026-03-15T11:05:00+00:00",
+                        "filtering_criteria": {"max_age_years": 5},
+                        "total_found": len(legacy_papers),
+                    }
+                ),
+                "metadata": {},
+            }
+        return await original_post_agent_request(endpoint, payload)
+
+    monkeypatch.setattr(
+        research_api_executor,
+        "_post_agent_request",
+        _legacy_literature_post_agent_request,
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={"description": "Review literature on autonomous agent payments in DeSci."},
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    failed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "failed",
+        timeout=10.0,
+    )
+    assert failed["status"] == "failed"
+    assert "Execution result failed contract validation" in failed["error"]
+    assert "Missing required field: coverage_summary." in failed["error"]
+    assert "Field 'sources' must be a list of objects." in failed["error"]
+
+    statuses = {node["node_id"]: node["status"] for node in failed["nodes"]}
+    assert statuses["plan_query"] == "completed"
+    assert statuses["gather_evidence"] == "failed"
+    assert statuses["curate_sources"] == "blocked"
 
 
 def test_research_run_persists_phase2_evidence_graph_records(client: TestClient):
@@ -990,6 +1090,54 @@ def test_research_run_evidence_graph_and_report_pack_routes(client: TestClient):
     }
 
 
+def test_research_run_trace_routes_return_persisted_decisions(client: TestClient):
+    response = client.post(
+        "/api/research-runs",
+        json={
+            "description": "Review literature on autonomous agent payments in DeSci.",
+            "strict_mode": True,
+            "risk_level": "high",
+            "quorum_policy": "single_verifier",
+            "max_node_attempts": 2,
+        },
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+    )
+    assert completed["status"] == "completed"
+    assert completed["policy"]["strict_mode"] is True
+    assert completed["policy"]["quorum_policy"] == "single_verifier"
+
+    verification_response = client.get(f"/api/research-runs/{research_run_id}/verification-decisions")
+    assert verification_response.status_code == 200
+    verification_payload = verification_response.json()
+    assert len(verification_payload) >= 6
+    assert verification_payload[0]["research_run_id"] == research_run_id
+    assert verification_payload[0]["policy_snapshot"]["strict_mode"] is True
+    assert verification_payload[0]["quorum_policy"] == "single_verifier"
+
+    handoff_response = client.get(f"/api/research-runs/{research_run_id}/swarm-handoffs")
+    assert handoff_response.status_code == 200
+    handoff_payload = handoff_response.json()
+    assert len(handoff_payload) >= 12
+    assert handoff_payload[0]["research_run_id"] == research_run_id
+    assert handoff_payload[0]["blackboard_delta"]["node_id"]
+
+    policy_response = client.get(f"/api/research-runs/{research_run_id}/policy-evaluations")
+    assert policy_response.status_code == 200
+    policy_payload = policy_response.json()
+    assert len(policy_payload) >= 12
+    assert {item["evaluation_type"] for item in policy_payload} >= {
+        "agent_selection",
+        "verification_gate",
+    }
+
+
 def test_phase2_claim_scoring_rewards_multi_source_supported_claims():
     scoring = _compute_phase2_claim_scoring(
         run_record=SimpleNamespace(meta={"freshness_required": False}, result={}),
@@ -1102,6 +1250,13 @@ def test_phase2_claim_scoring_summary_counts():
         "insufficient_evidence_claim_count": 1,
         "average_confidence_score": 0.65,
     }
+
+
+def test_strands_backend_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("RESEARCH_RUN_USE_STRANDS_BACKEND", raising=False)
+
+    assert _strands_backend_enabled(True) is False
+    assert _strands_backend_enabled(False) is False
 
 
 def test_research_run_uses_strands_executor_and_verifier_when_available(client: TestClient, monkeypatch):
@@ -1938,6 +2093,173 @@ def test_research_run_blocks_downstream_nodes_after_failure(client: TestClient, 
     assert statuses["gather_evidence"] == "failed"
     assert statuses["curate_sources"] == "blocked"
     assert statuses["revise_final_answer"] == "blocked"
+
+
+def test_research_run_strict_mode_retries_and_reroutes_failed_node(
+    client: TestClient,
+    monkeypatch,
+):
+    original_post_agent_request = research_api_executor._post_agent_request
+
+    def _rank_supported_agents_for_todo(
+        todo_id: str,
+        capability_requirements: str,
+        task_name: str,
+        *,
+        preferred_agent_id: str | None = None,
+        excluded_agent_ids: list[str] | None = None,
+    ) -> list[str]:
+        del capability_requirements, task_name, preferred_agent_id
+        excluded = set(excluded_agent_ids or [])
+        ranked = {
+            "plan_query": ["problem-framer-001"],
+            "gather_evidence": ["literature-miner-001", "literature-miner-002"],
+            "curate_sources": ["literature-miner-001", "literature-miner-002"],
+            "draft_synthesis": ["knowledge-synthesizer-001"],
+            "critique_and_fact_check": ["knowledge-synthesizer-001"],
+            "revise_final_answer": ["knowledge-synthesizer-001"],
+        }.get(todo_id, ["knowledge-synthesizer-001"])
+        return [agent_id for agent_id in ranked if agent_id not in excluded]
+
+    async def _post_with_retry_candidate(endpoint, payload):
+        if "literature-miner-002" in endpoint:
+            result = await original_post_agent_request(
+                endpoint.replace("literature-miner-002", "literature-miner-001"),
+                payload,
+            )
+            result["agent_id"] = "literature-miner-002"
+            return result
+        return await original_post_agent_request(endpoint, payload)
+
+    async def _strict_retry_quality_score(output, phase, agent_role, phase_validation):
+        del output, phase, phase_validation
+        if agent_role == "literature-miner-001":
+            return {
+                "overall_score": 42,
+                "dimension_scores": {
+                    "completeness": 42,
+                    "correctness": 44,
+                    "academic_rigor": 40,
+                    "clarity": 55,
+                    "innovation": 50,
+                    "ethics": 92,
+                },
+                "feedback": "Verifier requested a retry for the first literature miner.",
+            }
+        return {
+            "overall_score": 88,
+            "dimension_scores": {
+                "completeness": 88,
+                "correctness": 89,
+                "academic_rigor": 86,
+                "clarity": 90,
+                "innovation": 78,
+                "ethics": 92,
+            },
+            "feedback": f"Verified for {agent_role}",
+        }
+
+    session = SessionLocal()
+    try:
+        session.add(
+            AgentModel(
+                agent_id="literature-miner-002",
+                name="Literature Miner 002",
+                agent_type="research",
+                description="Backup evidence gatherer",
+                capabilities=["literature-mining", "evidence-gathering", "citation-collection"],
+                hedera_account_id="0.0.7005",
+                status="active",
+                meta={
+                    "support_tier": "supported",
+                    "endpoint_url": "https://unit.test/literature-miner-002",
+                    "pricing": {"rate": 8.0, "currency": "HBAR", "rate_type": "per_task"},
+                },
+            )
+        )
+        session.add(
+            AgentPaymentProfile(
+                agent_id="literature-miner-002",
+                hedera_account_id="0.0.7005",
+                status="verified",
+                verification_method="test",
+                verified_at=datetime.utcnow(),
+                meta={},
+            )
+        )
+        session.add(
+            AgentReputation(
+                agent_id="literature-miner-002",
+                total_tasks=12,
+                successful_tasks=11,
+                failed_tasks=1,
+                average_quality_score=0.92,
+                reputation_score=0.93,
+                payment_multiplier=1.0,
+                meta={},
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setattr(
+        "shared.research_runs.service.rank_supported_agents_for_todo",
+        _rank_supported_agents_for_todo,
+    )
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.rank_supported_agents_for_todo",
+        _rank_supported_agents_for_todo,
+    )
+    monkeypatch.setattr(research_api_executor, "_post_agent_request", _post_with_retry_candidate)
+    monkeypatch.setattr(
+        "agents.orchestrator.tools.agent_tools.calculate_quality_score",
+        _strict_retry_quality_score,
+    )
+
+    response = client.post(
+        "/api/research-runs",
+        json={
+            "description": "Review literature on resilient agentic evidence-gathering workflows.",
+            "strict_mode": True,
+            "quorum_policy": "single_verifier",
+            "max_node_attempts": 2,
+        },
+    )
+    assert response.status_code == 202
+    research_run_id = response.json()["id"]
+
+    completed = _poll_research_run(
+        client,
+        research_run_id,
+        lambda item: item["status"] == "completed",
+        timeout=10.0,
+    )
+    assert completed["status"] == "completed"
+
+    gather_node = next(node for node in completed["nodes"] if node["node_id"] == "gather_evidence")
+    assert gather_node["assigned_agent_id"] == "literature-miner-002"
+    assert gather_node["candidate_agent_ids"] == ["literature-miner-001", "literature-miner-002"]
+    assert len(gather_node["attempts"]) == 2
+    assert gather_node["attempts"][0]["agent_id"] == "literature-miner-001"
+    assert gather_node["attempts"][1]["agent_id"] == "literature-miner-002"
+
+    verification_response = client.get(f"/api/research-runs/{research_run_id}/verification-decisions")
+    assert verification_response.status_code == 200
+    verification_payload = [
+        item
+        for item in verification_response.json()
+        if item["node_id"] == "gather_evidence"
+    ]
+    assert [item["decision"] for item in verification_payload] == ["retry_requested", "approved"]
+
+    policy_response = client.get(f"/api/research-runs/{research_run_id}/policy-evaluations")
+    assert policy_response.status_code == 200
+    policy_payload = [
+        item for item in policy_response.json() if item["node_id"] == "gather_evidence"
+    ]
+    assert any(item["status"] == "retry" for item in policy_payload)
+    assert any(item["status"] == "passed" for item in policy_payload)
 
 
 def test_research_run_waits_for_human_review_and_resumes(client: TestClient, monkeypatch):

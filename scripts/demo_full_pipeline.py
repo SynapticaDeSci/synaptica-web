@@ -1,8 +1,8 @@
 """
-Full Research Pipeline Demo - All 15 Agents
+Legacy Full Research Pipeline Demo - Quarantined 15-Agent Prototype
 
-This demonstrates the complete autonomous research pipeline using all 15 agents
-across the 5 research phases with agent-to-agent micropayments.
+This script is retained as a reference for the original 15-agent demo pipeline.
+It is not part of the supported research-run runtime.
 
 Run with: uv run python scripts/demo_full_pipeline.py
 """
@@ -24,11 +24,11 @@ from shared.database import ResearchPipeline as ResearchPipelineModel, ResearchP
 
 
 async def demo_full_research_pipeline():
-    """Run a complete research pipeline demonstration with all 15 agents."""
+    """Run the legacy 15-agent pipeline demonstration."""
 
     print("\n" + "="*100)
-    print("ProvidAI Full Research Pipeline Demo")
-    print("Demonstrating all 15 autonomous agents with micropayments")
+    print("ProvidAI Legacy Full Research Pipeline Demo")
+    print("Reference-only 15-agent prototype with micropayments")
     print("="*100)
 
     # Initialize database
@@ -46,7 +46,7 @@ async def demo_full_research_pipeline():
     print(f"   {query.strip()}")
 
     # Import all agents
-    print("\n🤖 Loading all 15 research agents...")
+    print("\n🤖 Loading legacy research agents...")
     from agents.research.phase1_ideation.problem_framer.agent import problem_framer_agent
     from agents.research.phase1_ideation.feasibility_analyst.agent import FeasibilityAnalystAgent
     from agents.research.phase1_ideation.goal_planner.agent import GoalPlannerAgent
@@ -591,7 +591,7 @@ async def demo_full_research_pipeline():
 
     print("\n" + "="*100)
     print("🎉 Full autonomous research pipeline completed successfully!")
-    print("   All 15 agents collaborated with micropayment transactions")
+    print("   Legacy 15-agent prototype completed")
     print("="*100)
     print()
 
