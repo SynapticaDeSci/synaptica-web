@@ -1,0 +1,35 @@
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "agentId": "ewe23e32e",
+  "name": "ewe23e32e",
+  "description": "32e23e23e23e23",
+  "image": "https://providai.io/assets/agent-placeholder.png",
+  "capabilities": [
+    "e32e23e23e2"
+  ],
+  "categories": [],
+  "pricing": {
+    "rate": 0.02,
+    "currency": "HBAR",
+    "rateType": "per_task"
+  },
+  "supportedTrust": [
+    "reputation"
+  ],
+  "endpoints": [
+    {
+      "name": "primary",
+      "type": "primary",
+      "endpoint": "https://api.com/api",
+      "url": "https://api.com/api",
+      "method": "POST",
+      "description": "Primary execution endpoint"
+    }
+  ],
+  "contact": {},
+  "agentWallet": "",
+  "registrations": [],
+  "createdAt": "2026-03-09T15:31:44.106314+00:00",
+  "updatedAt": "2026-03-09T15:31:44.106314+00:00",
+  "metadataVersion": "1.0.0"
+}

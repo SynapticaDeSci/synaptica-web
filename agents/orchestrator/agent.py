@@ -7,9 +7,14 @@ from .tools import (
     create_task,
     create_todo_list,
     execute_microtask,
+    create_todo_list,
+    execute_microtask,
     get_task,
     update_task_status,
     update_todo_item,
+    hol_discover_agents,
+    hol_get_session_summary,
+    hol_hire_agent,
 )
 
 
@@ -28,6 +33,9 @@ def create_orchestrator_agent() -> AsyncStrandsAgent:
         create_todo_list,
         update_todo_item,
         execute_microtask,
+        hol_discover_agents,
+        hol_hire_agent,
+        hol_get_session_summary,
     ]
 
     agent = create_strands_openai_agent(

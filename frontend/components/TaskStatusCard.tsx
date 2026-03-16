@@ -6,6 +6,7 @@ import { useTaskStore, TaskStatus } from '@/store/taskStore'
 import { CheckCircle2, Circle, XCircle, Loader2, Pause } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { VerificationCard } from '@/components/VerificationCard'
+import { HolAgentsPanel } from '@/components/HolAgentsPanel'
 
 const statusConfig: Record<TaskStatus, { label: string; progress: number; icon: React.ReactNode }> = {
   IDLE: { label: 'Ready', progress: 0, icon: <Circle className="h-4 w-4" /> },
@@ -99,7 +100,7 @@ export function TaskStatusCard() {
       </CardHeader>
       <CardContent className="space-y-4">
 
-        {/* Task Plan and Progress Logs Side by Side */}
+        {/* Task Plan, HOL Agents, and Progress Logs */}
         {latestProgressByStep && latestProgressByStep.length > 0 && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
 
@@ -156,8 +157,9 @@ export function TaskStatusCard() {
               </div>
             )}
 
-            {/* Progress Logs Column (2/3 width on large screens) */}
-            <div className={cn("lg:col-span-3", !todoList && "lg:col-span-4")}>
+            {/* HOL Agents + Progress Logs Column (2/3 width on large screens) */}
+            <div className={cn("lg:col-span-3 space-y-4", !todoList && "lg:col-span-4")}>
+              <HolAgentsPanel />
               <h4 className="text-sm font-semibold text-slate-700 mb-3">Progress Logs:</h4>
               <div className="max-h-96 overflow-y-auto space-y-2 pr-2 scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-100">
                 {latestProgressByStep.map((log, index) => {

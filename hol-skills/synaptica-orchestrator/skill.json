@@ -1,0 +1,19 @@
+{
+  "name": "synaptica-orchestrator",
+  "version": "0.1.0",
+  "description": "Multi-phase research orchestrator that hires specialist agents via Synaptica and external agents via the HOL Universal Agentic Registry.",
+  "homepage": "https://hol.org/registry",
+  "tags": [
+    "research",
+    "multi-agent",
+    "orchestrator",
+    "hol",
+    "hedera"
+  ],
+  "categories": [
+    "research",
+    "agent-orchestration"
+  ],
+  "license": "MIT"
+}
+
