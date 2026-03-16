@@ -17,11 +17,19 @@ from shared.agents_cache import rebuild_agents_cache
 from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
 from shared.database.models import A2AEvent, Task
 from shared.payments.runtime import sync_verified_payment_profile
+from shared.research.agent_inventory import iter_supported_builtin_research_agents
 from shared.research.catalog import (
-    SUPPORTED_AGENT_DETAILS,
     build_phase0_todo_items,
     default_research_endpoint,
 )
+from shared.research_runs.deep_research import (
+    assign_citation_ids,
+    dedupe_sources,
+    filter_sources_for_curation,
+    sort_sources,
+    validate_source_requirements,
+)
+from shared.research_runs.planner import SourceRequirements, build_research_run_plan
 from shared.registry_sync import (
     RegistrySyncError,
     ensure_registry_cache,
@@ -154,10 +162,8 @@ def _upsert_supported_research_agents() -> None:
 
     session = SessionLocal()
     try:
-        for agent_id, details in SUPPORTED_AGENT_DETAILS.items():
-            if agent_id == BUILT_IN_DATA_AGENT_ID:
-                continue
-
+        for record in iter_supported_builtin_research_agents():
+            agent_id = record.agent_id
             agent = (
                 session.query(Agent)
                 .filter(Agent.agent_id == agent_id)
@@ -165,20 +171,20 @@ def _upsert_supported_research_agents() -> None:
             )
             meta = {
                 "endpoint_url": default_research_endpoint(agent_id),
-                "pricing": details["pricing"],
+                "pricing": dict(record.pricing),
                 "categories": ["Research", "DeSci"],
-                "support_tier": "supported",
+                "support_tier": record.support_tier.value,
                 "always_listed": True,
             }
 
             if agent is None:
                 agent = Agent(  # type: ignore[call-arg]
                     agent_id=agent_id,
-                    name=details["name"],
+                    name=record.name,
                     agent_type="research",
-                    description=details["description"],
-                    capabilities=details["capabilities"],
-                    hedera_account_id=details["hedera_account_id"],
+                    description=record.description,
+                    capabilities=list(record.capabilities),
+                    hedera_account_id=record.hedera_account_id,
                     status="active",
                     meta=meta,
                 )
@@ -186,11 +192,11 @@ def _upsert_supported_research_agents() -> None:
             else:
                 merged_meta = dict(agent.meta or {})
                 merged_meta.update(meta)
-                agent.name = details["name"]
+                agent.name = record.name
                 agent.agent_type = "research"
-                agent.description = details["description"]
-                agent.capabilities = details["capabilities"]
-                agent.hedera_account_id = details["hedera_account_id"]
+                agent.description = record.description
+                agent.capabilities = list(record.capabilities)
+                agent.hedera_account_id = record.hedera_account_id
                 agent.status = "active"
                 agent.meta = merged_meta
 
@@ -264,6 +270,51 @@ def update_task_progress(task_id: str, step: str, status: str, data: Optional[Di
     )
     existing.setdefault("progress", []).append(envelope.model_dump(mode="json"))
     existing["current_step"] = step
+
+
+def _build_phase0_curated_sources(
+    *,
+    gathered_evidence: Dict[str, Any],
+    execution_parameters: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Inline source curation for the three-step phase 0 workflow."""
+
+    requirements = SourceRequirements.model_validate(
+        execution_parameters.get("source_requirements") or {}
+    )
+    filtered_payload = filter_sources_for_curation(
+        dedupe_sources(gathered_evidence.get("sources") or []),
+        requirements=requirements,
+        classified_mode=str(execution_parameters.get("classified_mode") or "literature"),
+    )
+    curated_sources = sort_sources(filtered_payload["selected_sources"])
+    curated_sources, citations = assign_citation_ids(
+        curated_sources,
+        limit=requirements.total_sources,
+    )
+    validation = validate_source_requirements(curated_sources, requirements=requirements)
+    source_summary = validation["summary"]
+    freshness_summary = {
+        "required": requirements.min_fresh_sources > 0,
+        "window_days": requirements.freshness_window_days,
+        "minimum_fresh_sources": requirements.min_fresh_sources,
+        "fresh_sources": source_summary["fresh_sources"],
+        "requirements_met": validation["passed"],
+        "issues": validation["issues"],
+    }
+    return {
+        "sources": curated_sources,
+        "citations": citations,
+        "source_summary": source_summary,
+        "freshness_summary": freshness_summary,
+        "coverage_summary": dict(gathered_evidence.get("coverage_summary") or {}),
+        "uncovered_claim_targets": list(gathered_evidence.get("uncovered_claim_targets") or []),
+        "rounds_completed": dict(
+            gathered_evidence.get("rounds_completed")
+            or {"evidence_rounds": 0, "critique_rounds": 0}
+        ),
+        "filtered_sources": list(filtered_payload.get("filtered_sources") or []),
+    }
 
 
 def _extract_hol_meta(agent: Agent) -> Dict[str, Any]:
@@ -1116,6 +1167,8 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
         update_task_progress(task_id, "orchestrator_analysis", "running", {
             "message": "Preparing the phase 0 literature-review workflow"
         })
+        research_plan = build_research_run_plan(request.description)
+        node_lookup = {node.node_id: node for node in research_plan.nodes}
         todo_items = build_phase0_todo_items(request.description)
         todo_result = await create_todo_list(
             task_id,
@@ -1138,11 +1191,12 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             capability_requirements="problem framing, research question design, scope definition",
             budget_limit=request.budget_limit,
             min_reputation_score=request.min_reputation_score,
-            execution_parameters={"phase": "ideation"},
+            execution_parameters=dict(node_lookup["plan_query"].execution_parameters),
             todo_list=todo_list,
         )
         if not result_0.get("success"):
             raise RuntimeError(result_0.get("error", "Problem framing failed"))
+        query_plan = dict(result_0.get("result") or {})
 
         result_1 = await execute_microtask(
             task_id=task_id,
@@ -1153,13 +1207,18 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             budget_limit=request.budget_limit,
             min_reputation_score=request.min_reputation_score,
             execution_parameters={
-                "phase": "knowledge_retrieval",
-                "framed_question": result_0.get("result"),
+                **dict(node_lookup["gather_evidence"].execution_parameters),
+                "query_plan": query_plan,
             },
             todo_list=todo_list,
         )
         if not result_1.get("success"):
             raise RuntimeError(result_1.get("error", "Literature mining failed"))
+        gathered_evidence = dict(result_1.get("result") or {})
+        curated_sources = _build_phase0_curated_sources(
+            gathered_evidence=gathered_evidence,
+            execution_parameters=dict(node_lookup["curate_sources"].execution_parameters),
+        )
 
         result_2 = await execute_microtask(
             task_id=task_id,
@@ -1170,9 +1229,9 @@ async def run_orchestrator_task(task_id: str, request: TaskRequest):
             budget_limit=request.budget_limit,
             min_reputation_score=request.min_reputation_score,
             execution_parameters={
-                "phase": "knowledge_retrieval",
-                "framed_question": result_0.get("result"),
-                "literature_findings": result_1.get("result"),
+                **dict(node_lookup["draft_synthesis"].execution_parameters),
+                "query_plan": query_plan,
+                "curated_sources": curated_sources,
             },
             todo_list=todo_list,
         )

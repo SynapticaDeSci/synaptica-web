@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from shared.agent_utils import is_registry_managed, serialize_agent
 from shared.database import SessionLocal
 from shared.database.models import Agent, AgentReputation, AgentsCacheEntry
+from shared.research.agent_inventory import is_public_builtin_research_agent
 
 CACHE_KEY_DEFAULT = "default"
 
@@ -35,6 +36,12 @@ def build_agents_payload(session: Optional[Session] = None) -> Dict[str, Any]:
                     source.append(agent)
         else:
             source = agents
+
+        source = [
+            agent
+            for agent in source
+            if is_public_builtin_research_agent(agent.agent_id)
+        ]
 
         reputation_map: Dict[str, float] = {}
         agent_ids = [agent.agent_id for agent in source]

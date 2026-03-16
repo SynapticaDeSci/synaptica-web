@@ -133,6 +133,12 @@ export type ResearchRunNodeStatus =
 
 export type ResearchMode = 'auto' | 'literature' | 'live_analysis' | 'hybrid';
 export type DepthMode = 'standard' | 'deep';
+export type ResearchRunRiskLevel = 'low' | 'medium' | 'high';
+export type ResearchRunQuorumPolicy =
+  | 'single_verifier'
+  | 'two_of_three'
+  | 'three_of_five'
+  | 'unanimous';
 
 export interface CreateResearchRunRequest {
   description: string;
@@ -140,6 +146,10 @@ export interface CreateResearchRunRequest {
   verification_mode?: string;
   research_mode?: ResearchMode;
   depth_mode?: DepthMode;
+  strict_mode?: boolean;
+  risk_level?: ResearchRunRiskLevel;
+  quorum_policy?: ResearchRunQuorumPolicy;
+  max_node_attempts?: number;
 }
 
 export interface ResearchSourceCard {
@@ -200,6 +210,7 @@ export interface ResearchRunNodeResponse {
   description: string;
   capability_requirements: string;
   assigned_agent_id: string;
+  candidate_agent_ids: string[];
   execution_order: number;
   status: ResearchRunNodeStatus;
   task_id?: string | null;
@@ -217,6 +228,23 @@ export interface ResearchRunEdgeResponse {
   to_node_id: string;
 }
 
+export interface ResearchRunPolicy {
+  strict_mode: boolean;
+  risk_level: ResearchRunRiskLevel;
+  quorum_policy: ResearchRunQuorumPolicy;
+  max_node_attempts: number;
+  reroute_on_failure: boolean;
+  max_swarm_rounds: number;
+  escalate_on_dissent: boolean;
+}
+
+export interface ResearchRunTraceSummary {
+  verification_decision_count: number;
+  swarm_handoff_count: number;
+  policy_evaluation_count: number;
+  unresolved_dissent_count: number;
+}
+
 export interface ResearchRunResponse {
   id: string;
   title: string;
@@ -230,6 +258,8 @@ export interface ResearchRunResponse {
   classified_mode: Exclude<ResearchMode, 'auto'>;
   depth_mode: DepthMode;
   freshness_required: boolean;
+  policy: ResearchRunPolicy;
+  trace_summary: ResearchRunTraceSummary;
   source_requirements: {
     total_sources?: number;
     min_academic_or_primary?: number;
@@ -278,6 +308,136 @@ export interface ResearchRunReportResponse {
   limitations: string[];
   critic_findings: ResearchCriticFinding[];
   quality_summary: ResearchQualitySummary;
+}
+
+export interface ResearchRunArtifactResponse extends ResearchSourceCard {
+  artifact_key: string;
+  artifact_type: string;
+  origin_node_id?: string | null;
+  last_seen_node_id?: string | null;
+  order_index?: number | null;
+  normalized_url?: string | null;
+  curation_status: string;
+  freshness_metadata: Record<string, any>;
+}
+
+export interface ResearchRunPersistedClaimResponse {
+  claim_id: string;
+  claim_order: number;
+  claim: string;
+  confidence?: string | null;
+  confidence_score?: number | null;
+  contradiction_status?: string | null;
+  contradiction_reasons: string[];
+  supporting_artifact_keys: string[];
+  supporting_citation_ids: string[];
+}
+
+export interface ResearchRunClaimLinkResponse {
+  claim_id: string;
+  artifact_key: string;
+  citation_id?: string | null;
+  relation_type: string;
+  link_order?: number | null;
+}
+
+export interface ResearchRunEvidenceGraphResponse {
+  schema_version: string;
+  research_run_id: string;
+  title: string;
+  description: string;
+  status: ResearchRunStatus;
+  workflow: string;
+  artifacts: ResearchRunArtifactResponse[];
+  claims: ResearchRunPersistedClaimResponse[];
+  links: ResearchRunClaimLinkResponse[];
+  summary: {
+    artifact_count: number;
+    cited_artifact_count: number;
+    filtered_artifact_count: number;
+    claim_count: number;
+    link_count: number;
+    high_confidence_claim_count: number;
+    mixed_evidence_claim_count: number;
+    insufficient_evidence_claim_count: number;
+  };
+}
+
+export interface ResearchRunReportPackResponse {
+  schema_version: string;
+  research_run_id: string;
+  title: string;
+  description: string;
+  status: ResearchRunStatus;
+  workflow: string;
+  generated_at?: string | null;
+  rewritten_research_brief?: string | null;
+  answer_markdown?: string | null;
+  answer?: string | null;
+  claims: ResearchRunPersistedClaimResponse[];
+  citations: ResearchRunArtifactResponse[];
+  supporting_evidence: ResearchRunArtifactResponse[];
+  claim_lineage: ResearchRunClaimLinkResponse[];
+  quality_summary: Record<string, any>;
+  critic_findings: Array<Record<string, any>>;
+  limitations: any[];
+}
+
+export interface ResearchRunVerificationDecisionResponse {
+  id: number;
+  research_run_id: string;
+  node_id: string;
+  attempt_id: string;
+  task_id?: string | null;
+  payment_id?: string | null;
+  agent_id?: string | null;
+  decision: string;
+  approved: boolean;
+  decision_source: string;
+  overall_score?: number | null;
+  dimension_scores: Record<string, any>;
+  rationale?: string | null;
+  dissent_count?: number | null;
+  quorum_policy?: string | null;
+  policy_snapshot: Record<string, any>;
+  created_at?: string | null;
+  meta: Record<string, any>;
+}
+
+export interface ResearchRunSwarmHandoffResponse {
+  id: number;
+  research_run_id: string;
+  node_id: string;
+  attempt_id: string;
+  handoff_index: number;
+  from_agent_id?: string | null;
+  to_agent_id?: string | null;
+  handoff_type: string;
+  round_number: number;
+  status: string;
+  budget_remaining?: number | null;
+  verification_mode?: string | null;
+  idempotency_key?: string | null;
+  blackboard_delta: Record<string, any>;
+  decision_log: Record<string, any>;
+  created_at?: string | null;
+  meta: Record<string, any>;
+}
+
+export interface ResearchRunPolicyEvaluationResponse {
+  id: number;
+  research_run_id: string;
+  node_id: string;
+  attempt_id: string;
+  task_id?: string | null;
+  payment_id?: string | null;
+  evaluation_type: string;
+  status: string;
+  outcome?: string | null;
+  summary?: string | null;
+  details: Record<string, any>;
+  created_at?: string | null;
+  meta: Record<string, any>;
 }
 
 export interface PaymentProfileVerificationResponse {
@@ -609,6 +769,128 @@ export async function getResearchRunReport(
       .json()
       .catch(() => ({ detail: 'Research run report not found' }));
     throw new Error(error.detail || error.error || 'Research run report not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunEvidenceGraph(
+  researchRunId: string
+): Promise<ResearchRunEvidenceGraphResponse> {
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/evidence-graph`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run evidence graph not found' }));
+    throw new Error(error.detail || error.error || 'Research run evidence graph not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunReportPack(
+  researchRunId: string
+): Promise<ResearchRunReportPackResponse> {
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/report-pack`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run report pack not found' }));
+    throw new Error(error.detail || error.error || 'Research run report pack not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunVerificationDecisions(
+  researchRunId: string
+): Promise<ResearchRunVerificationDecisionResponse[]> {
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/verification-decisions`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run verification decisions not found' }));
+    throw new Error(
+      error.detail || error.error || 'Research run verification decisions not found'
+    );
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunSwarmHandoffs(
+  researchRunId: string
+): Promise<ResearchRunSwarmHandoffResponse[]> {
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/swarm-handoffs`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run swarm handoffs not found' }));
+    throw new Error(error.detail || error.error || 'Research run swarm handoffs not found');
+  }
+
+  return response.json();
+}
+
+export async function getResearchRunPolicyEvaluations(
+  researchRunId: string
+): Promise<ResearchRunPolicyEvaluationResponse[]> {
+  const response = await fetch(
+    `${BACKEND_BASE_URL}/api/research-runs/${researchRunId}/policy-evaluations`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: 'Research run policy evaluations not found' }));
+    throw new Error(error.detail || error.error || 'Research run policy evaluations not found');
   }
 
   return response.json();

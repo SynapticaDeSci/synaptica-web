@@ -1,3 +1,4 @@
+import importlib
 import asyncio
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from agents.negotiator.tools.payment_tools import create_payment_request, author
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
 from shared.hedera.utils import hedera_account_to_evm_address
 from shared.payments.service import run_idempotent_payment_action
+from shared.research.catalog import default_research_endpoint
 from shared.runtime import PaymentAction, PaymentActionContext
 from shared.database import (
     A2AEvent,
@@ -68,27 +70,128 @@ def client(monkeypatch):
 
     async def _mock_post_agent_request(endpoint, payload):
         request_text = payload.get("request", "")
-        if "problem-framer-001" in endpoint:
+        context = payload.get("context") or {}
+        node_strategy = context.get("node_strategy")
+
+        if "problem-framer-001" in endpoint or node_strategy == "plan_query":
             return {
                 "success": True,
                 "agent_id": "problem-framer-001",
                 "result": {
+                    "query": context.get("original_description", request_text),
                     "research_question": request_text,
+                    "rewritten_research_brief": f"Investigate: {request_text}",
+                    "success_criteria": ["Use evidence-grounded claims."],
+                    "claim_targets": [
+                        {
+                            "claim_id": "C1",
+                            "claim_target": "Direct answer to the research question.",
+                            "lane": "core-answer",
+                            "priority": "high",
+                        }
+                    ],
+                    "search_queries": [
+                        {
+                            "role": "academic-scout",
+                            "lane": "core-literature",
+                            "query": "autonomous agent payments literature",
+                        }
+                    ],
                     "keywords": ["desci", "payments", "literature"],
-                    "scope": "phase0",
                 },
                 "metadata": {},
             }
-        if "literature-miner-001" in endpoint:
+        if "literature-miner-001" in endpoint or node_strategy == "gather_evidence":
             return {
                 "success": True,
                 "agent_id": "literature-miner-001",
                 "result": {
-                    "papers": [
-                        {"title": "Paper A", "source": "arXiv"},
-                        {"title": "Paper B", "source": "Semantic Scholar"},
+                    "sources": [
+                        {
+                            "title": "Paper A",
+                            "url": "https://example.com/paper-a",
+                            "publisher": "arXiv",
+                            "published_at": "2025-01-15T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Evidence about agent micropayments.",
+                            "display_snippet": "Evidence about agent micropayments.",
+                            "relevance_score": 0.94,
+                            "quality_flags": [],
+                        },
+                        {
+                            "title": "Paper B",
+                            "url": "https://example.com/paper-b",
+                            "publisher": "Semantic Scholar",
+                            "published_at": "2024-09-03T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Structured review of autonomous marketplaces.",
+                            "display_snippet": "Structured review of autonomous marketplaces.",
+                            "relevance_score": 0.91,
+                            "quality_flags": [],
+                        },
+                        {
+                            "title": "Paper C",
+                            "url": "https://example.com/paper-c",
+                            "publisher": "Nature",
+                            "published_at": "2024-06-11T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Evidence on payment frictions.",
+                            "display_snippet": "Evidence on payment frictions.",
+                            "relevance_score": 0.89,
+                            "quality_flags": [],
+                        },
+                        {
+                            "title": "Paper D",
+                            "url": "https://example.com/paper-d",
+                            "publisher": "ACM",
+                            "published_at": "2023-12-21T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Operational efficiency findings.",
+                            "display_snippet": "Operational efficiency findings.",
+                            "relevance_score": 0.85,
+                            "quality_flags": [],
+                        },
+                        {
+                            "title": "Paper E",
+                            "url": "https://example.com/paper-e",
+                            "publisher": "IEEE",
+                            "published_at": "2023-05-09T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Agent marketplace trust assumptions.",
+                            "display_snippet": "Agent marketplace trust assumptions.",
+                            "relevance_score": 0.83,
+                            "quality_flags": [],
+                        },
+                        {
+                            "title": "Paper F",
+                            "url": "https://example.com/paper-f",
+                            "publisher": "ScienceDirect",
+                            "published_at": "2022-11-30T00:00:00+00:00",
+                            "source_type": "academic",
+                            "snippet": "Cost and adoption outcomes.",
+                            "display_snippet": "Cost and adoption outcomes.",
+                            "relevance_score": 0.8,
+                            "quality_flags": [],
+                        },
                     ],
-                    "sources": ["arXiv", "Semantic Scholar"],
+                    "coverage_summary": {
+                        "source_summary": {
+                            "total_sources": 6,
+                            "academic_or_primary_sources": 6,
+                            "fresh_sources": 0,
+                            "publishers": ["ACM", "IEEE", "Nature", "ScienceDirect", "Semantic Scholar", "arXiv"],
+                            "requirements_met": True,
+                        },
+                        "source_diversity": {
+                            "unique_publishers": 6,
+                            "source_types": 1,
+                        },
+                        "covered_claim_ids": ["C1"],
+                        "uncovered_claim_targets": [],
+                        "ready_for_synthesis": True,
+                    },
+                    "uncovered_claim_targets": [],
+                    "rounds_completed": {"evidence_rounds": 1, "critique_rounds": 0},
                 },
                 "metadata": {},
             }
@@ -96,8 +199,16 @@ def client(monkeypatch):
             "success": True,
             "agent_id": "knowledge-synthesizer-001",
             "result": {
-                "summary": "Synthesis complete",
-                "key_findings": ["Finding 1", "Finding 2"],
+                "answer_markdown": "## Summary\nAgent micropayments improve coordination when paired with trustworthy settlement.\n\n## Evidence\nLiterature points to lower transaction friction and better automation transparency.\n\n## Limitations\nThe evidence base is still emerging.",
+                "claims": [
+                    {
+                        "claim_id": "C1",
+                        "claim": "Agent micropayments can reduce transaction friction in autonomous marketplaces.",
+                        "supporting_citation_ids": ["S1", "S2"],
+                        "confidence": "medium",
+                    }
+                ],
+                "limitations": ["The literature is still early and not universal across domains."],
             },
             "metadata": {},
         }
@@ -516,6 +627,70 @@ def test_executor_rejects_experimental_agents(client: TestClient):
     assert "supported tier" in result["error"]
 
 
+def test_supported_builtin_agents_ignore_stale_marketplace_endpoint(client: TestClient, monkeypatch):
+    session = SessionLocal()
+    try:
+        agent = session.query(AgentModel).filter(AgentModel.agent_id == "knowledge-synthesizer-001").one()
+        meta = dict(agent.meta or {})
+        meta["endpoint_url"] = "https://stale.example.test/agents/knowledge-synthesizer-001"
+        agent.meta = meta
+        session.commit()
+    finally:
+        session.close()
+
+    research_api_executor._agent_cache.clear()
+    captured: dict[str, str] = {}
+
+    async def _capture_endpoint(endpoint, payload):
+        del payload
+        captured["endpoint"] = endpoint
+        return {
+            "success": True,
+            "agent_id": "knowledge-synthesizer-001",
+            "result": {"answer_markdown": "## Summary\n\nok", "claims": [], "limitations": []},
+            "metadata": {},
+        }
+
+    monkeypatch.setattr(research_api_executor, "_post_agent_request", _capture_endpoint)
+
+    result = asyncio.run(
+        research_api_executor.execute_research_agent(
+            agent_domain="knowledge-synthesizer-001",
+            task_description="Draft the synthesis",
+            context={"node_strategy": "draft_synthesis"},
+            metadata={"task_id": "task-synthesis-endpoint"},
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["endpoint"] == default_research_endpoint("knowledge-synthesizer-001")
+
+
+def test_problem_framer_default_execute_returns_current_plan_query_contract(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    problem_framer_module = importlib.import_module(
+        "agents.research.phase1_ideation.problem_framer.agent"
+    )
+
+    result = asyncio.run(
+        problem_framer_module.problem_framer_agent.execute(
+            "How do autonomous agent payments affect marketplace adoption?"
+        )
+    )
+
+    assert result["success"] is True
+    payload = result["result"]
+    assert payload["research_question"]
+    assert payload["rewritten_research_brief"]
+    assert payload["success_criteria"]
+    assert payload["claim_targets"]
+    assert payload["search_queries"]
+    assert payload["hypothesis"]
+    assert payload["scope"]
+    assert payload["domain"]
+
+
 def test_task_history_uses_persisted_runtime_cancelled_status(client: TestClient):
     session = SessionLocal()
     try:
@@ -586,5 +761,41 @@ def test_supported_agent_upsert_restores_reputation_floor():
             .one()
         )
         assert reputation.reputation_score >= 0.8
+    finally:
+        session.close()
+
+
+def test_supported_research_agent_server_only_loads_supported_trio(monkeypatch):
+    _reset_runtime_state()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    research_main = importlib.import_module("agents.research.main")
+    research_main.get_agent_registry.cache_clear()
+
+    with TestClient(research_main.app) as client:
+        listing = client.get("/agents")
+        assert listing.status_code == 200
+        payload = listing.json()
+        ids = [agent["agent_id"] for agent in payload["agents"]]
+        assert ids == [
+            "problem-framer-001",
+            "literature-miner-001",
+            "knowledge-synthesizer-001",
+        ]
+
+        detail = client.get("/agents/bias-detector-001")
+        assert detail.status_code == 404
+
+    session = SessionLocal()
+    try:
+        registered_ids = {
+            agent.agent_id
+            for agent in session.query(AgentModel).order_by(AgentModel.agent_id).all()
+        }
+        assert registered_ids == {
+            "knowledge-synthesizer-001",
+            "literature-miner-001",
+            "problem-framer-001",
+        }
     finally:
         session.close()

@@ -13,6 +13,8 @@ The active runtime in phase 0 is intentionally narrow and deterministic:
 
 Legacy/demo code such as `api/pipeline.py`, `agents/research/research_pipeline.py`, and the unmounted legacy task/payment route patterns is retained for reference only and is not part of the active runtime. The supported OpenAI runtime path is `shared/strands_openai_agent.py`; `shared/openai_agent.py` is legacy/demo-only.
 
+Research specialists still use Strands internally. The separate orchestrator-side Strands executor relay is opt-in for research runs via `RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY=1`; the stable default is the direct typed executor path. `RESEARCH_RUN_USE_STRANDS_BACKEND` remains as a legacy alias for local compatibility.
+
 ## Research Runs
 
 The repo now also includes an opt-in Phase 1 research-run system:
@@ -130,6 +132,9 @@ AGENT_SUBMIT_ALLOW_HTTP=0 # set to 1 to allow http:// endpoints in dev
 
 # Executor configuration
 MARKETPLACE_API_URL=http://localhost:8000
+
+# Optional research-run relay
+RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY=0
 ```
 
 ### Running Locally

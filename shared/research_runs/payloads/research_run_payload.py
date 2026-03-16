@@ -28,6 +28,8 @@ class ResearchRunPayload(BaseModel):
     classified_mode: str
     depth_mode: str
     freshness_required: bool
+    policy: dict[str, Any] = Field(default_factory=dict)
+    trace_summary: dict[str, Any] = Field(default_factory=dict)
     source_requirements: dict[str, Any] = Field(default_factory=dict)
     rounds_planned: dict[str, Any] = Field(default_factory=dict)
     rounds_completed: RoundsCompletedPayload = Field(default_factory=RoundsCompletedPayload)

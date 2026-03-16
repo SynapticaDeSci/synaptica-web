@@ -408,6 +408,15 @@ class ResearchRun(Base):
     )
     claims = relationship("Claim", back_populates="research_run", cascade="all, delete-orphan")
     claim_links = relationship("ClaimLink", back_populates="research_run", cascade="all, delete-orphan")
+    verification_decisions = relationship(
+        "VerificationDecision", back_populates="research_run", cascade="all, delete-orphan"
+    )
+    swarm_handoffs = relationship(
+        "SwarmHandoff", back_populates="research_run", cascade="all, delete-orphan"
+    )
+    policy_evaluations = relationship(
+        "PolicyEvaluation", back_populates="research_run", cascade="all, delete-orphan"
+    )
 
 
 class ResearchRunNode(Base):
@@ -588,6 +597,116 @@ class ClaimLink(Base):
     meta = Column(JSON, nullable=True)
 
     research_run = relationship("ResearchRun", back_populates="claim_links")
+
+
+class VerificationDecision(Base):
+    """Persisted verification or arbitration decision for a node attempt."""
+
+    __tablename__ = "verification_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id",
+            "attempt_id",
+            "decision_source",
+            name="uq_verification_decisions_attempt_source",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    node_id = Column(String, nullable=False)
+    attempt_id = Column(String, ForeignKey("execution_attempts.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=True)
+    agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    decision = Column(String, nullable=False)
+    approved = Column(Boolean, nullable=False, default=False)
+    decision_source = Column(String, nullable=False)
+    overall_score = Column(Float, nullable=True)
+    dimension_scores = Column(JSON, nullable=True)
+    rationale = Column(Text, nullable=True)
+    dissent_count = Column(Integer, nullable=True)
+    quorum_policy = Column(String, nullable=True)
+    policy_snapshot = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="verification_decisions")
+    attempt = relationship("ExecutionAttempt", foreign_keys=[attempt_id])
+    task = relationship("Task", foreign_keys=[task_id])
+    payment = relationship("Payment", foreign_keys=[payment_id])
+    agent = relationship("Agent", foreign_keys=[agent_id])
+
+
+class SwarmHandoff(Base):
+    """Persisted collaboration trace for a swarm-style handoff inside a node."""
+
+    __tablename__ = "swarm_handoffs"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id",
+            "attempt_id",
+            "handoff_index",
+            name="uq_swarm_handoffs_attempt_index",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    node_id = Column(String, nullable=False)
+    attempt_id = Column(String, ForeignKey("execution_attempts.id"), nullable=False)
+    handoff_index = Column(Integer, nullable=False, default=0)
+    from_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    to_agent_id = Column(String, ForeignKey("agents.agent_id"), nullable=True)
+    handoff_type = Column(String, nullable=False)
+    round_number = Column(Integer, nullable=False, default=1)
+    status = Column(String, nullable=False, default="completed")
+    budget_remaining = Column(Float, nullable=True)
+    verification_mode = Column(String, nullable=True)
+    idempotency_key = Column(String, nullable=True)
+    blackboard_delta = Column(JSON, nullable=True)
+    decision_log = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="swarm_handoffs")
+    attempt = relationship("ExecutionAttempt", foreign_keys=[attempt_id])
+    from_agent = relationship("Agent", foreign_keys=[from_agent_id])
+    to_agent = relationship("Agent", foreign_keys=[to_agent_id])
+
+
+class PolicyEvaluation(Base):
+    """Persisted policy or control-plane decision for a node attempt."""
+
+    __tablename__ = "policy_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "research_run_id",
+            "attempt_id",
+            "evaluation_type",
+            name="uq_policy_evaluations_attempt_type",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    research_run_id = Column(String, ForeignKey("research_runs.id"), nullable=False)
+    node_id = Column(String, nullable=False)
+    attempt_id = Column(String, ForeignKey("execution_attempts.id"), nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), nullable=True)
+    payment_id = Column(String, ForeignKey("payments.id"), nullable=True)
+    evaluation_type = Column(String, nullable=False)
+    status = Column(String, nullable=False)
+    outcome = Column(String, nullable=False)
+    summary = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    meta = Column(JSON, nullable=True)
+
+    research_run = relationship("ResearchRun", back_populates="policy_evaluations")
+    attempt = relationship("ExecutionAttempt", foreign_keys=[attempt_id])
+    task = relationship("Task", foreign_keys=[task_id])
+    payment = relationship("Payment", foreign_keys=[payment_id])
+
 
 class AgentReputation(Base):
     """Agent reputation tracking model."""

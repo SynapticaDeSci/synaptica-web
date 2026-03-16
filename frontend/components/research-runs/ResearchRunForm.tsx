@@ -48,6 +48,12 @@ export function ResearchRunForm({
   const [verificationMode, setVerificationMode] = useState('standard')
   const [researchMode, setResearchMode] = useState<'auto' | 'literature' | 'live_analysis' | 'hybrid'>('auto')
   const [depthMode, setDepthMode] = useState<'standard' | 'deep'>('standard')
+  const [strictMode, setStrictMode] = useState(false)
+  const [riskLevel, setRiskLevel] = useState<'low' | 'medium' | 'high'>('medium')
+  const [quorumPolicy, setQuorumPolicy] = useState<
+    'single_verifier' | 'two_of_three' | 'three_of_five' | 'unanimous'
+  >('single_verifier')
+  const [maxNodeAttempts, setMaxNodeAttempts] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -67,6 +73,15 @@ export function ResearchRunForm({
       setValidationError('Budget limit must be a positive number when provided.')
       return
     }
+    const trimmedAttempts = maxNodeAttempts.trim()
+    const parsedAttempts = trimmedAttempts ? Number.parseInt(trimmedAttempts, 10) : undefined
+    if (
+      trimmedAttempts &&
+      (parsedAttempts === undefined || !Number.isInteger(parsedAttempts) || parsedAttempts < 1 || parsedAttempts > 5)
+    ) {
+      setValidationError('Max node attempts must be a whole number between 1 and 5.')
+      return
+    }
 
     setValidationError(null)
     await onSubmit({
@@ -75,6 +90,10 @@ export function ResearchRunForm({
       verification_mode: verificationMode,
       research_mode: researchMode,
       depth_mode: depthMode,
+      strict_mode: strictMode,
+      risk_level: riskLevel,
+      quorum_policy: strictMode ? quorumPolicy : undefined,
+      max_node_attempts: parsedAttempts,
     })
   }
 
@@ -181,6 +200,77 @@ export function ResearchRunForm({
               </div>
             </div>
 
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <div className="space-y-3">
+                <label htmlFor="research-run-strict-mode" className="text-sm font-medium text-slate-700">
+                  Strict review
+                </label>
+                <select
+                  id="research-run-strict-mode"
+                  value={strictMode ? 'strict' : 'standard'}
+                  onChange={(event) => setStrictMode(event.target.value === 'strict')}
+                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
+                  disabled={isSubmitting}
+                >
+                  <option value="standard">Standard</option>
+                  <option value="strict">Strict</option>
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                <label htmlFor="research-run-risk" className="text-sm font-medium text-slate-700">
+                  Risk level
+                </label>
+                <select
+                  id="research-run-risk"
+                  value={riskLevel}
+                  onChange={(event) => setRiskLevel(event.target.value as typeof riskLevel)}
+                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
+                  disabled={isSubmitting}
+                >
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                <label htmlFor="research-run-quorum" className="text-sm font-medium text-slate-700">
+                  Quorum policy
+                </label>
+                <select
+                  id="research-run-quorum"
+                  value={quorumPolicy}
+                  onChange={(event) => setQuorumPolicy(event.target.value as typeof quorumPolicy)}
+                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={isSubmitting || !strictMode}
+                >
+                  <option value="single_verifier">Single verifier</option>
+                  <option value="two_of_three">Two of three</option>
+                  <option value="three_of_five">Three of five</option>
+                  <option value="unanimous">Unanimous</option>
+                </select>
+              </div>
+
+              <div className="space-y-3">
+                <label htmlFor="research-run-max-attempts" className="text-sm font-medium text-slate-700">
+                  Max node attempts
+                </label>
+                <Input
+                  id="research-run-max-attempts"
+                  type="number"
+                  value={maxNodeAttempts}
+                  onChange={(event) => setMaxNodeAttempts(event.target.value)}
+                  min="1"
+                  max="5"
+                  step="1"
+                  placeholder={strictMode ? '2' : '1'}
+                  className="rounded-2xl border-slate-200 px-4 py-3 text-slate-700 shadow-inner focus:border-sky-400 focus:ring-sky-300/40"
+                  disabled={isSubmitting}
+                />
+              </div>
+            </div>
+
             {(validationError || error) && (
               <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {validationError || error}
@@ -189,7 +279,7 @@ export function ResearchRunForm({
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5">
               <p className="max-w-xl text-sm text-slate-500">
-                After submission, Synaptica will classify the query, start the run immediately, and redirect you to a live detail page with node-level polling, source cards, and freshness checks.
+                After submission, Synaptica will classify the query, start the run immediately, and redirect you to a live detail page with node-level polling, graph/report-pack artifacts, and traceable verifier or swarm decisions.
               </p>
               <Button
                 type="submit"

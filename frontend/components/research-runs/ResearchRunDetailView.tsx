@@ -28,13 +28,19 @@ import {
   cancelResearchRun,
   getResearchRun,
   getResearchRunEvidence,
+  getResearchRunEvidenceGraph,
+  getResearchRunPolicyEvaluations,
   getResearchRunReport,
+  getResearchRunReportPack,
+  getResearchRunSwarmHandoffs,
+  getResearchRunVerificationDecisions,
   getPayment,
   getPaymentEvents,
   getTask,
   pauseResearchRun,
   type ResearchClaim,
   type ResearchCriticFinding,
+  type ResearchRunEvidenceGraphResponse,
   rejectVerification,
   resumeResearchRun,
   type PaymentDetailResponse,
@@ -42,8 +48,12 @@ import {
   type ResearchRunEvidenceResponse,
   type ResearchRunNodeResponse,
   type ResearchRunNodeStatus,
+  type ResearchRunPolicyEvaluationResponse,
   type ResearchRunReportResponse,
+  type ResearchRunReportPackResponse,
   type ResearchRunResponse,
+  type ResearchRunSwarmHandoffResponse,
+  type ResearchRunVerificationDecisionResponse,
   type ResearchQualitySummary,
   type ResearchSourceCard,
 } from '@/lib/api'
@@ -773,6 +783,10 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null)
   const [controlAction, setControlAction] = useState<'pause' | 'resume' | 'cancel' | null>(null)
   const [controlError, setControlError] = useState<string | null>(null)
+  const getActivePollingInterval = () => {
+    const status = queryClient.getQueryData<ResearchRunResponse>(['research-run', researchRunId])?.status
+    return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
+  }
 
   const researchRunQuery = useQuery({
     queryKey: ['research-run', researchRunId],
@@ -789,10 +803,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     queryKey: ['research-run', researchRunId, 'evidence'],
     queryFn: () => getResearchRunEvidence(researchRunId),
     retry: false,
-    refetchInterval: () => {
-      const status = queryClient.getQueryData<ResearchRunResponse>(['research-run', researchRunId])?.status
-      return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
-    },
+    refetchInterval: getActivePollingInterval,
     refetchIntervalInBackground: true,
   })
 
@@ -800,10 +811,47 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
     queryKey: ['research-run', researchRunId, 'report'],
     queryFn: () => getResearchRunReport(researchRunId),
     retry: false,
-    refetchInterval: () => {
-      const status = queryClient.getQueryData<ResearchRunResponse>(['research-run', researchRunId])?.status
-      return status && TERMINAL_RUN_STATUSES.has(status) ? false : 2000
-    },
+    refetchInterval: getActivePollingInterval,
+    refetchIntervalInBackground: true,
+  })
+
+  const evidenceGraphQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'evidence-graph'],
+    queryFn: () => getResearchRunEvidenceGraph(researchRunId),
+    retry: false,
+    refetchInterval: getActivePollingInterval,
+    refetchIntervalInBackground: true,
+  })
+
+  const reportPackQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'report-pack'],
+    queryFn: () => getResearchRunReportPack(researchRunId),
+    retry: false,
+    refetchInterval: getActivePollingInterval,
+    refetchIntervalInBackground: true,
+  })
+
+  const verificationDecisionsQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'verification-decisions'],
+    queryFn: () => getResearchRunVerificationDecisions(researchRunId),
+    retry: false,
+    refetchInterval: getActivePollingInterval,
+    refetchIntervalInBackground: true,
+  })
+
+  const swarmHandoffsQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'swarm-handoffs'],
+    queryFn: () => getResearchRunSwarmHandoffs(researchRunId),
+    retry: false,
+    refetchInterval: getActivePollingInterval,
+    refetchIntervalInBackground: true,
+  })
+
+  const policyEvaluationsQuery = useQuery({
+    queryKey: ['research-run', researchRunId, 'policy-evaluations'],
+    queryFn: () => getResearchRunPolicyEvaluations(researchRunId),
+    retry: false,
+    refetchInterval: getActivePollingInterval,
     refetchIntervalInBackground: true,
   })
 
@@ -892,13 +940,26 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
         queryClient.invalidateQueries({ queryKey: ['payment', paymentId, 'events'] }),
       ]),
     )
+  const invalidateResearchRunQueries = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence-graph'] }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report-pack'] }),
+      queryClient.invalidateQueries({
+        queryKey: ['research-run', researchRunId, 'verification-decisions'],
+      }),
+      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'swarm-handoffs'] }),
+      queryClient.invalidateQueries({
+        queryKey: ['research-run', researchRunId, 'policy-evaluations'],
+      }),
+    ])
 
   const handleApproveReview = async (taskId: string) => {
     await approveVerification(taskId)
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
+      invalidateResearchRunQueries(),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
       invalidateRelevantPaymentQueries(),
     ])
@@ -907,9 +968,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const handleRejectReview = async (taskId: string, reason?: string) => {
     await rejectVerification(taskId, reason)
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
-      queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
+      invalidateResearchRunQueries(),
       queryClient.invalidateQueries({ queryKey: ['task', taskId] }),
       invalidateRelevantPaymentQueries(),
     ])
@@ -928,9 +987,7 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
       }
 
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId] }),
-        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'evidence'] }),
-        queryClient.invalidateQueries({ queryKey: ['research-run', researchRunId, 'report'] }),
+        invalidateResearchRunQueries(),
         waitingTaskId
           ? queryClient.invalidateQueries({ queryKey: ['task', waitingTaskId] })
           : Promise.resolve(),
@@ -992,10 +1049,18 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const researchRun = researchRunQuery.data
   const fallbackRunPayload = getRunPayload(researchRun)
   const reportData: ResearchRunReportResponse | null = reportQuery.data ?? null
+  const evidenceGraphData: ResearchRunEvidenceGraphResponse | null = evidenceGraphQuery.data ?? null
+  const reportPackData: ResearchRunReportPackResponse | null = reportPackQuery.data ?? null
+  const verificationDecisions: ResearchRunVerificationDecisionResponse[] =
+    verificationDecisionsQuery.data ?? []
+  const swarmHandoffs: ResearchRunSwarmHandoffResponse[] = swarmHandoffsQuery.data ?? []
+  const policyEvaluations: ResearchRunPolicyEvaluationResponse[] = policyEvaluationsQuery.data ?? []
   const reportPayload: Record<string, any> | null =
     reportData && typeof reportData === 'object'
       ? (reportData as unknown as Record<string, any>)
-      : fallbackRunPayload
+      : reportPackData && typeof reportPackData === 'object'
+        ? (reportPackData as unknown as Record<string, any>)
+        : fallbackRunPayload
   const evidencePayload: ResearchRunEvidenceResponse | null = evidenceQuery.data ?? null
   const claimTargets = Array.isArray(evidencePayload?.claim_targets) ? evidencePayload.claim_targets : []
   const headline =
@@ -1063,6 +1128,16 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
   const selectedNodeAttempts = [...(selectedNode?.attempts ?? [])].sort(
     (left, right) => right.attempt_number - left.attempt_number,
   )
+  const selectedNodeVerificationDecisions = verificationDecisions.filter(
+    (item) => item.node_id === selectedNode?.node_id,
+  )
+  const selectedNodeSwarmHandoffs = swarmHandoffs.filter((item) => item.node_id === selectedNode?.node_id)
+  const selectedNodePolicyEvaluations = policyEvaluations.filter(
+    (item) => item.node_id === selectedNode?.node_id,
+  )
+  const recentVerificationDecisions = [...verificationDecisions].slice(-4).reverse()
+  const recentSwarmHandoffs = [...swarmHandoffs].slice(-6).reverse()
+  const recentPolicyEvaluations = [...policyEvaluations].slice(-4).reverse()
   const canPause = researchRun.status === 'running'
   const canResume = researchRun.status === 'paused'
   const canCancel = !TERMINAL_RUN_STATUSES.has(researchRun.status)
@@ -1279,6 +1354,270 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                 </div>
               </div>
 
+              <div className="grid gap-3 xl:grid-cols-[0.95fr_1.05fr]">
+                <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4">
+                  <div className="flex items-center gap-2 text-amber-100">
+                    <ShieldCheck className="h-4 w-4" />
+                    <p className="text-sm font-semibold uppercase tracking-[0.3em]">
+                      Adaptive controls
+                    </p>
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-amber-200/80">
+                        Strict mode
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.policy.strict_mode ? 'Enabled' : 'Disabled'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-amber-200/80">
+                        Risk level
+                      </p>
+                      <p className="mt-2 text-sm font-medium capitalize text-white">
+                        {formatMode(researchRun.policy.risk_level)}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-amber-200/80">
+                        Quorum policy
+                      </p>
+                      <p className="mt-2 text-sm font-medium capitalize text-white">
+                        {formatMode(researchRun.policy.quorum_policy)}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-amber-200/80">
+                        Max attempts
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.policy.max_node_attempts}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs text-amber-50">
+                    <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                      Reroute on failure: {researchRun.policy.reroute_on_failure ? 'Yes' : 'No'}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                      Max swarm rounds: {researchRun.policy.max_swarm_rounds}
+                    </span>
+                    <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                      Escalate on dissent: {researchRun.policy.escalate_on_dissent ? 'Yes' : 'No'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-fuchsia-400/20 bg-fuchsia-400/10 p-4">
+                  <div className="flex items-center gap-2 text-fuchsia-100">
+                    <DatabaseZap className="h-4 w-4" />
+                    <p className="text-sm font-semibold uppercase tracking-[0.3em]">
+                      Persisted trace summary
+                    </p>
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-fuchsia-200/80">
+                        Verification decisions
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.trace_summary.verification_decision_count}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-fuchsia-200/80">
+                        Swarm handoffs
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.trace_summary.swarm_handoff_count}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-fuchsia-200/80">
+                        Policy evaluations
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.trace_summary.policy_evaluation_count}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-fuchsia-200/80">
+                        Open dissent
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {researchRun.trace_summary.unresolved_dissent_count}
+                      </p>
+                    </div>
+                  </div>
+                  {reportPackData?.generated_at && (
+                    <p className="mt-4 text-xs text-fuchsia-100/80">
+                      Latest report pack: {formatDateTime(reportPackData.generated_at)}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {(evidenceGraphData || reportPackData) && (
+                <div className="rounded-2xl border border-violet-400/20 bg-violet-400/10 p-4">
+                  <div className="flex items-center gap-2 text-violet-100">
+                    <DatabaseZap className="h-4 w-4" />
+                    <p className="text-sm font-semibold uppercase tracking-[0.3em]">
+                      Graph and report pack
+                    </p>
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-violet-200/80">
+                        Artifacts
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {evidenceGraphData?.summary.artifact_count ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-violet-200/80">
+                        Claims
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {evidenceGraphData?.summary.claim_count ?? reportPackData?.claims.length ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-violet-200/80">
+                        Cited artifacts
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {evidenceGraphData?.summary.cited_artifact_count ?? reportPackData?.citations.length ?? 0}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-black/10 p-3">
+                      <p className="text-[11px] uppercase tracking-[0.25em] text-violet-200/80">
+                        Evidence links
+                      </p>
+                      <p className="mt-2 text-sm font-medium text-white">
+                        {evidenceGraphData?.summary.link_count ?? reportPackData?.claim_lineage.length ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-2 text-xs text-violet-50">
+                    {evidenceGraphData && (
+                      <>
+                        <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                          High-confidence claims: {evidenceGraphData.summary.high_confidence_claim_count}
+                        </span>
+                        <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                          Mixed evidence: {evidenceGraphData.summary.mixed_evidence_claim_count}
+                        </span>
+                        <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                          Insufficient evidence: {evidenceGraphData.summary.insufficient_evidence_claim_count}
+                        </span>
+                      </>
+                    )}
+                    {reportPackData?.schema_version && (
+                      <span className="rounded-full border border-white/10 bg-black/10 px-2 py-1">
+                        {reportPackData.schema_version}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {(recentVerificationDecisions.length > 0 ||
+                recentSwarmHandoffs.length > 0 ||
+                recentPolicyEvaluations.length > 0) && (
+                <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 p-4">
+                  <div className="flex items-center gap-2 text-rose-100">
+                    <Activity className="h-4 w-4" />
+                    <p className="text-sm font-semibold uppercase tracking-[0.3em]">Swarm trace</p>
+                  </div>
+
+                  {recentVerificationDecisions.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-rose-100/80">
+                        Verification decisions
+                      </p>
+                      {recentVerificationDecisions.map((decision) => (
+                        <div
+                          key={decision.id}
+                          className="rounded-2xl border border-white/10 bg-black/10 px-3 py-3 text-sm text-rose-50"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium text-white">
+                              {formatMode(decision.node_id)} · {formatMode(decision.decision)}
+                            </p>
+                            <span className="text-xs text-rose-100/70">
+                              {formatDateTime(decision.created_at)}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-xs text-rose-100/80">
+                            {[decision.agent_id, decision.quorum_policy, decision.decision_source]
+                              .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                              .map((value) => formatMode(value))
+                              .join(' • ')}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {recentSwarmHandoffs.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-rose-100/80">
+                        Blackboard handoffs
+                      </p>
+                      {recentSwarmHandoffs.map((handoff) => (
+                        <div
+                          key={handoff.id}
+                          className="rounded-2xl border border-white/10 bg-black/10 px-3 py-3 text-sm text-rose-50"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium text-white">
+                              {formatMode(handoff.handoff_type)}
+                            </p>
+                            <span className="text-xs text-rose-100/70">
+                              Round {handoff.round_number}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-xs text-rose-100/80">
+                            {[handoff.from_agent_id, handoff.to_agent_id, handoff.node_id]
+                              .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                              .map((value) => formatMode(value))
+                              .join(' → ')}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {recentPolicyEvaluations.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-[0.25em] text-rose-100/80">
+                        Policy evaluations
+                      </p>
+                      {recentPolicyEvaluations.map((evaluation) => (
+                        <div
+                          key={evaluation.id}
+                          className="rounded-2xl border border-white/10 bg-black/10 px-3 py-3 text-sm text-rose-50"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-medium text-white">
+                              {formatMode(evaluation.evaluation_type)}
+                            </p>
+                            <span className="text-xs uppercase tracking-[0.2em] text-rose-100/70">
+                              {formatMode(evaluation.status)}
+                            </span>
+                          </div>
+                          {evaluation.summary && (
+                            <p className="mt-2 text-xs text-rose-100/80">{evaluation.summary}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {(evidencePayload?.rewritten_research_brief ||
                 claimTargets.length > 0 ||
                 (evidencePayload?.search_lanes_used?.length ?? 0) > 0) && (
@@ -1469,6 +1808,17 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                 <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">Debug payloads</p>
                 <DebugSection title="Research run evidence" value={evidenceQuery.data} />
                 <DebugSection title="Research run report" value={reportQuery.data} />
+                <DebugSection title="Research run evidence graph" value={evidenceGraphQuery.data} />
+                <DebugSection title="Research run report pack" value={reportPackQuery.data} />
+                <DebugSection
+                  title="Research run verification decisions"
+                  value={verificationDecisionsQuery.data}
+                />
+                <DebugSection title="Research run swarm handoffs" value={swarmHandoffsQuery.data} />
+                <DebugSection
+                  title="Research run policy evaluations"
+                  value={policyEvaluationsQuery.data}
+                />
                 <DebugSection title="Research run result" value={researchRun.result} />
               </div>
             </CardContent>
@@ -1631,6 +1981,29 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                   </div>
                 </div>
 
+                {selectedNode.candidate_agent_ids.length > 0 && (
+                  <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.25em] text-sky-100/80">
+                      Candidate agents
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-sky-50">
+                      {selectedNode.candidate_agent_ids.map((agentId) => (
+                        <span
+                          key={agentId}
+                          className={cn(
+                            'rounded-full border px-2 py-1',
+                            agentId === selectedNode.assigned_agent_id
+                              ? 'border-sky-200/40 bg-sky-100/20 text-white'
+                              : 'border-sky-300/20 bg-sky-300/10',
+                          )}
+                        >
+                          {agentId}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {selectedNode.error && (
                   <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
                     {selectedNode.error}
@@ -1695,6 +2068,105 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                       </div>
                     )}
                   </>
+                )}
+
+                {(selectedNodeVerificationDecisions.length > 0 ||
+                  selectedNodeSwarmHandoffs.length > 0 ||
+                  selectedNodePolicyEvaluations.length > 0) && (
+                  <div className="space-y-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">
+                      Persisted node trace
+                    </p>
+
+                    {selectedNodeVerificationDecisions.length > 0 && (
+                      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs uppercase tracking-[0.25em] text-slate-400">
+                          Verification decisions
+                        </p>
+                        <div className="mt-3 space-y-2">
+                          {selectedNodeVerificationDecisions.map((decision) => (
+                            <div
+                              key={decision.id}
+                              className="rounded-2xl border border-white/10 bg-slate-950/60 p-3"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-sm font-medium text-white">
+                                  {formatMode(decision.decision)}
+                                </p>
+                                <span className="text-xs text-slate-400">
+                                  {formatDateTime(decision.created_at)}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-xs text-slate-300">
+                                {[decision.agent_id, decision.quorum_policy, decision.decision_source]
+                                  .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                                  .map((value) => formatMode(value))
+                                  .join(' • ')}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedNodeSwarmHandoffs.length > 0 && (
+                      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs uppercase tracking-[0.25em] text-slate-400">
+                          Swarm handoffs
+                        </p>
+                        <div className="mt-3 space-y-2">
+                          {selectedNodeSwarmHandoffs.map((handoff) => (
+                            <div
+                              key={handoff.id}
+                              className="rounded-2xl border border-white/10 bg-slate-950/60 p-3"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-sm font-medium text-white">
+                                  {formatMode(handoff.handoff_type)}
+                                </p>
+                                <span className="text-xs text-slate-400">
+                                  Round {handoff.round_number}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-xs text-slate-300">
+                                {[handoff.from_agent_id, handoff.to_agent_id]
+                                  .filter((value): value is string => typeof value === 'string' && value.length > 0)
+                                  .join(' → ')}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedNodePolicyEvaluations.length > 0 && (
+                      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs uppercase tracking-[0.25em] text-slate-400">
+                          Policy evaluations
+                        </p>
+                        <div className="mt-3 space-y-2">
+                          {selectedNodePolicyEvaluations.map((evaluation) => (
+                            <div
+                              key={evaluation.id}
+                              className="rounded-2xl border border-white/10 bg-slate-950/60 p-3"
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-sm font-medium text-white">
+                                  {formatMode(evaluation.evaluation_type)}
+                                </p>
+                                <span className="text-xs uppercase tracking-[0.2em] text-slate-400">
+                                  {formatMode(evaluation.status)}
+                                </span>
+                              </div>
+                              {evaluation.summary && (
+                                <p className="mt-2 text-xs text-slate-300">{evaluation.summary}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 <div className="space-y-3">

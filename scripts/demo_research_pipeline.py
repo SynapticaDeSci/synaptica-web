@@ -1,12 +1,14 @@
 """
-Demo script for the research pipeline.
+Legacy demo script for the research pipeline.
 
-This script demonstrates the full research pipeline with:
+This script demonstrates the older multi-phase demo pipeline with:
 - Problem framing
 - Literature search
 - Simulated experimentation
 - Interpretation
 - Publication
+
+It is retained as a legacy reference and is not part of the supported research-run runtime.
 
 Run with: uv run python scripts/demo_research_pipeline.py
 """
@@ -28,11 +30,11 @@ load_dotenv(override=True)
 
 
 async def demo_research_pipeline():
-    """Run a complete research pipeline demonstration."""
+    """Run the legacy demo research pipeline."""
 
     print("=" * 80)
-    print("ProvidAI Research Pipeline Demo")
-    print("Demonstrating autonomous agent-to-agent research with micropayments")
+    print("ProvidAI Legacy Research Pipeline Demo")
+    print("Reference-only multi-phase prototype with micropayments")
     print("=" * 80)
     print()
 

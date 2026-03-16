@@ -17,7 +17,7 @@ Execute microtasks using specialized research agents hosted on the Research Agen
 ### 1. list_research_agents()
 Lists all research agents available on the API server.
 Returns agent metadata including:
-- agent_id (e.g., "feasibility-analyst-001")
+- agent_id (e.g., "problem-framer-001")
 - name
 - description
 - capabilities

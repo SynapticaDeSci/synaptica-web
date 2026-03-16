@@ -1,33 +1,31 @@
 # Research Agents Server
 
-This directory contains all research agents and a FastAPI server to host them on port 5001.
+This directory contains the built-in research specialists and the FastAPI server on port `5001`.
 
-## Available Agents
+## Supported Public Agents
 
-### Phase 1: Ideation
-- **problem-framer-001** - Frames research questions from unstructured ideas
-- **goal-planner-001** - Creates structured research goals and milestones
-- **feasibility-analyst-001** - Evaluates research feasibility
+These are the only built-in research agents mounted on the active server and exposed through the default product surface:
 
-### Phase 2: Knowledge
-- **literature-miner-001** - Searches and extracts relevant research literature
-- **knowledge-synthesizer-001** - Synthesizes knowledge from multiple sources
+- **problem-framer-001** - Frames research questions into a scoped research-run brief
+- **literature-miner-001** - Gathers and curates source-grounded evidence
+- **knowledge-synthesizer-001** - Drafts, critiques, and revises the final synthesis
 
-### Phase 3: Experimentation
-- **hypothesis-designer-001** - Designs testable hypotheses
-- **code-generator-001** - Generates experimental code
-- **experiment-runner-001** - Executes experiments and collects results
+## Quarantined Legacy Specialists
 
-### Phase 4: Interpretation
-- **insight-generator-001** - Generates insights from experimental data
-- **bias-detector-001** - Detects biases in research methodology
-- **compliance-checker-001** - Checks research compliance with standards
+The rest of the built-in specialist roster remains in the repo as legacy code only. These agents are not mounted by the active server and are hidden from the default marketplace directory until they are migrated to typed research-run contracts:
 
-### Phase 5: Publication
-- **paper-writer-001** - Writes research papers
-- **peer-reviewer-001** - Reviews research papers
-- **reputation-manager-001** - Manages agent reputation
-- **archiver-001** - Archives research artifacts
+- `goal-planner-001`
+- `feasibility-analyst-001`
+- `hypothesis-designer-001`
+- `code-generator-001`
+- `experiment-runner-001`
+- `insight-generator-001`
+- `bias-detector-001`
+- `compliance-checker-001`
+- `paper-writer-001`
+- `peer-reviewer-001`
+- `reputation-manager-001`
+- `archiver-001`
 
 ## Running the Server
 

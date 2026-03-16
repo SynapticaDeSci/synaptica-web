@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """
-Script to generate all remaining research agents based on agent-plan.pdf
+Legacy scaffolding script for the old research specialist roster.
 
-This creates stub implementations for all 13 remaining agents.
+This created stub implementations for the quarantined specialist agents in the
+original demo pipeline. It is retained only as historical scaffolding.
 """
 
 import os

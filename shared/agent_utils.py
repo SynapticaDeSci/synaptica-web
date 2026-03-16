@@ -6,7 +6,8 @@ import re
 from typing import Any, Dict, Optional
 
 from shared.database.models import Agent
-from shared.research.catalog import infer_support_tier
+from shared.research.agent_inventory import is_supported_builtin_research_agent
+from shared.research.catalog import default_research_endpoint, infer_support_tier
 
 
 def _coerce_rate(value: Any) -> float:
@@ -71,6 +72,11 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
         score = _normalize_reputation_score(registry_rep.get("reputationScore"))
 
     registry_meta: Dict[str, Any] = meta.get("registry") or {}
+    endpoint_url = (
+        default_research_endpoint(agent.agent_id)
+        if is_supported_builtin_research_agent(agent.agent_id)
+        else meta.get("endpoint_url")
+    )
     hol_meta: Dict[str, Any] = meta.get("hol") or {}
 
     return {
@@ -80,7 +86,7 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
         "capabilities": agent.capabilities or [],
         "categories": meta.get("categories") or [],
         "status": agent.status or "inactive",
-        "endpoint_url": meta.get("endpoint_url"),
+        "endpoint_url": endpoint_url,
         "health_check_url": meta.get("health_check_url"),
         "pricing": _extract_pricing(meta),
         "contact_email": meta.get("contact_email"),
