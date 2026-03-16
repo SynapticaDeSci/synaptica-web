@@ -89,6 +89,9 @@ class AgentResponse(BaseModel):
     registry_last_error: Optional[str] = None
     registry_updated_at: Optional[str] = None
     support_tier: str
+    hol_uaid: Optional[str] = None
+    hol_registration_status: Optional[str] = None
+    hol_last_error: Optional[str] = None
 
 
 class AgentsListResponse(BaseModel):

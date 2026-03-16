@@ -77,6 +77,7 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
         if is_supported_builtin_research_agent(agent.agent_id)
         else meta.get("endpoint_url")
     )
+    hol_meta: Dict[str, Any] = meta.get("hol") or {}
 
     return {
         "agent_id": agent.agent_id,
@@ -104,4 +105,7 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
         "registry_updated_at": registry_meta.get("updated_at"),
         "support_tier": meta.get("support_tier")
         or infer_support_tier(agent.agent_id, agent.agent_type).value,
+        "hol_uaid": hol_meta.get("uaid"),
+        "hol_registration_status": hol_meta.get("registration_status"),
+        "hol_last_error": hol_meta.get("last_error"),
     }

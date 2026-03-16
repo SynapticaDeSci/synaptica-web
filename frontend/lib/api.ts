@@ -4,6 +4,39 @@
 
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
+function extractApiErrorMessage(payload: any, fallback: string): string {
+  if (!payload) return fallback;
+
+  const detail = payload.detail;
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail;
+  }
+
+  if (Array.isArray(detail) && detail.length > 0) {
+    const messages = detail
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const loc = Array.isArray((entry as any).loc)
+          ? (entry as any).loc.filter(Boolean).join('.')
+          : '';
+        const msg = typeof (entry as any).msg === 'string' ? (entry as any).msg : '';
+        if (!msg) return null;
+        return loc ? `${loc}: ${msg}` : msg;
+      })
+      .filter(Boolean);
+
+    if (messages.length > 0) {
+      return messages.join('; ');
+    }
+  }
+
+  if (typeof payload.error === 'string' && payload.error.trim()) {
+    return payload.error;
+  }
+
+  return fallback;
+}
+
 export interface CreateTaskRequest {
   description: string;
   capability_requirements?: string;
@@ -445,6 +478,111 @@ export interface PaymentEventsResponse {
   notifications: Array<Record<string, any>>;
   a2a_events: Array<Record<string, any>>;
   reconciliations: Array<Record<string, any>>;
+}
+
+// HOL Registry ----------------------------------------------------------------
+
+export interface HolAgentRecord {
+  uaid: string;
+  name: string;
+  description: string;
+  capabilities: string[];
+  categories: string[];
+  transports: string[];
+  pricing: {
+    rate?: number;
+    currency?: string;
+    rate_type?: string;
+    [key: string]: any;
+  };
+  registry?: string | null;
+}
+
+export type HolRegisterMode = 'quote' | 'register';
+
+export interface HolRegisterAgentRequest {
+  agent_id: string;
+  mode?: HolRegisterMode;
+}
+
+export interface HolRegisterAgentResponse {
+  success: boolean;
+  agent_id: string;
+  mode: HolRegisterMode;
+  hol_registration_status: string;
+  hol_uaid?: string | null;
+  hol_last_error?: string | null;
+  estimated_credits?: number | null;
+  broker_response?: Record<string, any>;
+}
+
+export interface HolRegisterAgentStatusResponse {
+  agent_id: string;
+  hol_registration_status: string;
+  hol_uaid?: string | null;
+  hol_last_error?: string | null;
+  updated_at?: string | null;
+}
+
+export async function searchHolAgents(
+  query: string
+): Promise<{ agents: HolAgentRecord[]; query: string }> {
+  const q = query.trim() || 'research';
+  const url = new URL(`${BACKEND_BASE_URL}/api/hol/agents/search`);
+  url.searchParams.set('q', q);
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const message = extractApiErrorMessage(payload, 'Failed to search HOL agents');
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+export async function registerAgentOnHol(
+  payload: HolRegisterAgentRequest
+): Promise<HolRegisterAgentResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/hol/register-agent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agent_id: payload.agent_id,
+      mode: payload.mode ?? 'register',
+    }),
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = extractApiErrorMessage(result, 'Failed to register agent on HOL');
+    throw new Error(message);
+  }
+
+  return result as HolRegisterAgentResponse;
+}
+
+export async function getHolRegistrationStatus(
+  agentId: string
+): Promise<HolRegisterAgentStatusResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/hol/register-agent/${agentId}/status`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = extractApiErrorMessage(result, 'Failed to fetch HOL registration status');
+    throw new Error(message);
+  }
+
+  return result as HolRegisterAgentStatusResponse;
 }
 
 /**
@@ -910,6 +1048,9 @@ export interface AgentRecord {
   hedera_account_id?: string;
   created_at?: string;
   support_tier?: 'supported' | 'experimental' | 'legacy';
+  hol_uaid?: string;
+  hol_registration_status?: string;
+  hol_last_error?: string;
 }
 
 export interface AgentsListResponse {
@@ -952,10 +1093,7 @@ export async function fetchAgents(): Promise<AgentsListResponse> {
   const payload = await response.json().catch(() => null);
 
   if (!response.ok) {
-    const message =
-      (payload && (payload as any).detail) ||
-      (payload && (payload as any).error) ||
-      'Failed to fetch agents';
+    const message = extractApiErrorMessage(payload, 'Failed to fetch agents');
     throw new Error(message);
   }
 
@@ -979,8 +1117,8 @@ export async function submitAgent(payload: AgentSubmissionPayload): Promise<Agen
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Failed to submit agent' }));
-    throw new Error(error.detail || error.error || 'Failed to submit agent');
+    const errorPayload = await response.json().catch(() => null);
+    throw new Error(extractApiErrorMessage(errorPayload, 'Failed to submit agent'));
   }
 
   return response.json();
@@ -1113,8 +1251,8 @@ export async function uploadDataset(payload: UploadDatasetPayload): Promise<Uplo
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Failed to upload dataset' }));
-    throw new Error(error.detail || error.error || 'Failed to upload dataset');
+    const errorPayload = await response.json().catch(() => null);
+    throw new Error(extractApiErrorMessage(errorPayload, 'Failed to upload dataset'));
   }
 
   return response.json();
@@ -1139,8 +1277,8 @@ export async function listDatasets(params: ListDatasetsParams = {}): Promise<Dat
   });
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Failed to list datasets' }));
-    throw new Error(error.detail || error.error || 'Failed to list datasets');
+    const errorPayload = await response.json().catch(() => null);
+    throw new Error(extractApiErrorMessage(errorPayload, 'Failed to list datasets'));
   }
 
   return response.json();

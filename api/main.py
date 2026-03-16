@@ -6,12 +6,12 @@ import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from shared.agents_cache import rebuild_agents_cache
 from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
@@ -34,6 +34,11 @@ from shared.registry_sync import (
     RegistrySyncError,
     ensure_registry_cache,
     get_registry_cache_ttl_seconds,
+)
+from shared.hol_client import (
+    HolClientError,
+    register_agent as hol_register_agent,
+    search_agents as hol_search_agents,
 )
 from shared.runtime import (
     TelemetryEnvelope,
@@ -312,6 +317,179 @@ def _build_phase0_curated_sources(
     }
 
 
+def _extract_hol_meta(agent: Agent) -> Dict[str, Any]:
+    meta = dict(agent.meta or {})
+    hol_meta = dict(meta.get("hol") or {})
+    return {
+        "uaid": hol_meta.get("uaid"),
+        "registration_status": hol_meta.get("registration_status") or "unregistered",
+        "last_error": hol_meta.get("last_error"),
+        "updated_at": hol_meta.get("updated_at"),
+    }
+
+
+def _set_hol_meta(
+    agent: Agent,
+    *,
+    status: str,
+    uaid: Optional[str] = None,
+    last_error: Optional[str] = None,
+) -> None:
+    meta = dict(agent.meta or {})
+    hol_meta = dict(meta.get("hol") or {})
+    hol_meta["registration_status"] = status
+    hol_meta["updated_at"] = datetime.utcnow().isoformat()
+    if uaid is not None:
+        hol_meta["uaid"] = uaid
+    if last_error is None and status in {"registered", "pending"}:
+        hol_meta["last_error"] = None
+    else:
+        hol_meta["last_error"] = last_error
+    meta["hol"] = hol_meta
+    agent.meta = meta
+
+
+def _is_transient_hol_error(message: str) -> bool:
+    text = (message or "").lower()
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "failed to connect to hol registry",
+        "connect error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "upstream hol registry error page",
+        "temporary",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _resolve_hol_error_status(previous_status: str, message: str) -> str:
+    normalized_prev = (previous_status or "unregistered").strip().lower()
+    if _is_transient_hol_error(message):
+        # Keep previously successful registrations as-is; otherwise reset to unregistered.
+        if normalized_prev in {"registered", "ok"}:
+            return "registered"
+        return "unregistered"
+    return "error"
+
+
+def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
+    meta = dict(agent.meta or {})
+    pricing = dict(meta.get("pricing") or {})
+    categories = meta.get("categories") or []
+    endpoint_url = str(meta.get("endpoint_url") or "").strip()
+    metadata_uri = agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
+
+    if not endpoint_url:
+        raise HTTPException(status_code=400, detail="Agent endpoint URL is required for HOL registration")
+    if not metadata_uri:
+        raise HTTPException(
+            status_code=400,
+            detail="Agent metadata URI is required for HOL registration",
+        )
+
+    category_tags: List[str] = []
+    if isinstance(categories, list):
+        for category in categories:
+            if isinstance(category, str):
+                cleaned = category.strip()
+                if cleaned:
+                    category_tags.append(cleaned)
+
+    capabilities: List[str] = []
+    if isinstance(agent.capabilities, list):
+        for capability in agent.capabilities:
+            if isinstance(capability, str):
+                cleaned = capability.strip()
+                if cleaned:
+                    capabilities.append(cleaned)
+
+    description = str(agent.description or "").strip()
+    short_description = " ".join(description.split())[:160] if description else agent.name
+    profile: Dict[str, Any] = {
+        "version": "1.0",
+        "type": 1,  # AI_AGENT (required by HOL HCS-11 validator)
+        "display_name": agent.name,
+        "description": description,
+        "short_description": short_description,
+        "url": endpoint_url,
+        "tags": category_tags,
+        "aiAgent": {
+            "capabilities": capabilities,
+            "metadata_uri": metadata_uri,
+            "pricing": pricing if isinstance(pricing, dict) else {},
+        },
+    }
+
+    health_check_url = meta.get("health_check_url")
+    if isinstance(health_check_url, str) and health_check_url.strip():
+        profile["aiAgent"]["health_check_url"] = health_check_url.strip()
+    if agent.hedera_account_id:
+        profile["owner"] = {"account_id": agent.hedera_account_id}
+
+    return {
+        # HOL /register expects this HCS-11 profile envelope.
+        "profile": profile,
+        # Keep the legacy flat shape for compatibility with any alternate broker paths.
+        "agent_id": agent.agent_id,
+        "name": agent.name,
+        "description": description,
+        "capabilities": capabilities,
+        "categories": category_tags,
+        "endpoint_url": endpoint_url,
+        "health_check_url": health_check_url,
+        "pricing": pricing if isinstance(pricing, dict) else {},
+        "metadata_uri": metadata_uri,
+        "hedera_account_id": agent.hedera_account_id,
+    }
+
+
+def _extract_hol_uaid(payload: Dict[str, Any]) -> Optional[str]:
+    for key in ("uaid", "agent_uaid", "agentUaid", "id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for section_key in ("data", "result", "registration", "agent"):
+        section = payload.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        for key in ("uaid", "agent_uaid", "agentUaid", "id"):
+            value = section.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return None
+
+
+def _extract_estimated_credits(payload: Dict[str, Any]) -> Optional[float]:
+    candidates: List[Any] = [
+        payload.get("estimated_credits"),
+        payload.get("estimatedCredits"),
+        payload.get("credits"),
+    ]
+    quote = payload.get("quote")
+    if isinstance(quote, dict):
+        candidates.extend(
+            [
+                quote.get("estimated_credits"),
+                quote.get("estimatedCredits"),
+                quote.get("credits"),
+            ]
+        )
+
+    for value in candidates:
+        try:
+            if value is None:
+                continue
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 # Pydantic models for API requests/responses
 class TaskRequest(BaseModel):
     """Request model for creating a task."""
@@ -344,6 +522,56 @@ class A2AEventResponse(BaseModel):
     timestamp: datetime
     tags: Optional[List[str]] = None
     body: Dict[str, Any]
+
+
+class HolAgentRecord(BaseModel):
+    """Normalized HOL agent representation for the frontend marketplace."""
+
+    uaid: str
+    name: str
+    description: str
+    capabilities: List[str]
+    categories: List[str]
+    transports: List[str]
+    pricing: Dict[str, Any]
+    registry: Optional[str] = None
+
+
+class HolAgentsSearchResponse(BaseModel):
+    """Response model for HOL agent search."""
+
+    agents: List[HolAgentRecord]
+    query: str
+
+
+class HolRegisterAgentRequest(BaseModel):
+    """Request payload for quoting/registering a local agent into HOL."""
+
+    agent_id: str
+    mode: Literal["quote", "register"] = "register"
+
+
+class HolRegisterAgentResponse(BaseModel):
+    """Response payload for HOL registration operations."""
+
+    success: bool
+    agent_id: str
+    mode: Literal["quote", "register"]
+    hol_registration_status: str
+    hol_uaid: Optional[str] = None
+    hol_last_error: Optional[str] = None
+    estimated_credits: Optional[float] = None
+    broker_response: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HolRegisterAgentStatusResponse(BaseModel):
+    """Current persisted HOL registration status for a local agent."""
+
+    agent_id: str
+    hol_registration_status: str
+    hol_uaid: Optional[str] = None
+    hol_last_error: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @asynccontextmanager
@@ -595,6 +823,142 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
         return responses
     finally:
         session.close()
+
+
+@app.get("/api/hol/agents/search", response_model=HolAgentsSearchResponse)
+async def hol_agents_search(
+    q: str,
+    limit: int = 12,
+) -> HolAgentsSearchResponse:
+    """
+    Search HOL Registry Broker for agents, exposed for the Agent Marketplace UI.
+
+    Currently supports a simple text query and limit. More advanced filtering
+    (by registry, transports, or capabilities) can be layered on top of this.
+    """
+    query = q.strip()
+    capped_limit = max(1, min(limit, 25))
+
+    agents = hol_search_agents(query=query, limit=capped_limit)
+
+    records: List[HolAgentRecord] = []
+    for agent in agents:
+        records.append(
+            HolAgentRecord(
+                uaid=agent.uaid,
+                name=agent.name,
+                description=agent.description,
+                capabilities=agent.capabilities,
+                categories=agent.categories,
+                transports=agent.transports,
+                pricing=agent.pricing,
+                registry=agent.registry,
+            )
+        )
+
+    return HolAgentsSearchResponse(agents=records, query=query)
+
+
+@app.post("/api/hol/register-agent", response_model=HolRegisterAgentResponse)
+async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegisterAgentResponse:
+    """Register (or quote registration for) a local marketplace agent in HOL."""
+    db = SessionLocal()
+    try:
+        agent = db.query(Agent).filter(Agent.agent_id == request.agent_id).one_or_none()
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{request.agent_id}' not found")
+
+        payload = _build_hol_registration_payload(agent)
+        current = _extract_hol_meta(agent)
+        previous_status = str(current.get("registration_status") or "unregistered")
+
+        if request.mode == "register":
+            _set_hol_meta(agent, status="pending", uaid=current.get("uaid"), last_error=None)
+            db.commit()
+            db.refresh(agent)
+
+        try:
+            broker_response = hol_register_agent(payload, mode=request.mode)
+        except HolClientError as exc:
+            if request.mode == "register":
+                next_status = _resolve_hol_error_status(previous_status, str(exc))
+                _set_hol_meta(
+                    agent,
+                    status=next_status,
+                    uaid=current.get("uaid"),
+                    last_error=str(exc),
+                )
+                db.commit()
+                db.refresh(agent)
+                try:
+                    rebuild_agents_cache()
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to rebuild agents cache after HOL registration error for %s",
+                        agent.agent_id,
+                        exc_info=True,
+                    )
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        extracted_uaid = _extract_hol_uaid(broker_response)
+        estimated_credits = _extract_estimated_credits(broker_response)
+
+        if request.mode == "register":
+            next_status = "registered" if extracted_uaid else "pending"
+            _set_hol_meta(
+                agent,
+                status=next_status,
+                uaid=extracted_uaid or current.get("uaid"),
+                last_error=None,
+            )
+            db.commit()
+            db.refresh(agent)
+
+            try:
+                rebuild_agents_cache()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to rebuild agents cache after HOL registration for %s",
+                    agent.agent_id,
+                    exc_info=True,
+                )
+
+        status_meta = _extract_hol_meta(agent)
+        return HolRegisterAgentResponse(
+            success=True,
+            agent_id=agent.agent_id,
+            mode=request.mode,
+            hol_registration_status=status_meta["registration_status"],
+            hol_uaid=status_meta["uaid"],
+            hol_last_error=status_meta["last_error"],
+            estimated_credits=estimated_credits,
+            broker_response=broker_response,
+        )
+    finally:
+        db.close()
+
+
+@app.get(
+    "/api/hol/register-agent/{agent_id}/status",
+    response_model=HolRegisterAgentStatusResponse,
+)
+async def hol_register_agent_status(agent_id: str) -> HolRegisterAgentStatusResponse:
+    """Get persisted HOL registration status for a local marketplace agent."""
+    db = SessionLocal()
+    try:
+        agent = db.query(Agent).filter(Agent.agent_id == agent_id).one_or_none()
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        hol_meta = _extract_hol_meta(agent)
+        return HolRegisterAgentStatusResponse(
+            agent_id=agent.agent_id,
+            hol_registration_status=hol_meta["registration_status"],
+            hol_uaid=hol_meta["uaid"],
+            hol_last_error=hol_meta["last_error"],
+            updated_at=hol_meta["updated_at"],
+        )
+    finally:
+        db.close()
 
 
 @app.get("/api/tasks/{task_id}")

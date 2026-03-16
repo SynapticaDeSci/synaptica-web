@@ -77,6 +77,57 @@ function parseList(value: string): string[] {
     .filter(Boolean)
 }
 
+const HEDERA_ACCOUNT_PATTERN = /^(0\.0\.\d+|0x[a-fA-F0-9]{40})$/
+
+function isHttpUrl(value: string): boolean {
+  const raw = value.trim()
+  if (!raw) return false
+  try {
+    const parsed = new URL(raw)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function isValidEmail(value: string): boolean {
+  const raw = value.trim()
+  if (!raw) return false
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(raw)
+}
+
+function validateSubmission(values: AgentFormValues): string | null {
+  const endpoint = values.endpointUrl.trim()
+  if (!endpoint) {
+    return 'Endpoint URL is required.'
+  }
+  if (!isHttpUrl(endpoint)) {
+    return 'Endpoint URL must start with http:// or https://'
+  }
+
+  const health = values.healthCheckUrl.trim()
+  if (health && !isHttpUrl(health)) {
+    return 'Health Check URL must start with http:// or https://'
+  }
+
+  const logo = values.logoUrl.trim()
+  if (logo && !isHttpUrl(logo)) {
+    return 'Logo URL must start with http:// or https://'
+  }
+
+  const email = values.contactEmail.trim()
+  if (email && !isValidEmail(email)) {
+    return 'Contact Email must be a valid email address'
+  }
+
+  const hederaAccount = values.hederaAccount.trim()
+  if (hederaAccount && !HEDERA_ACCOUNT_PATTERN.test(hederaAccount)) {
+    return 'Hedera Account must match 0.0.x or 0x followed by 40 hex characters'
+  }
+
+  return null
+}
+
 function buildPayload(values: AgentFormValues): AgentSubmissionPayload {
   const baseRate = parseFloat(values.baseRate)
   if (Number.isNaN(baseRate) || baseRate <= 0) {
@@ -152,7 +203,7 @@ export function AddAgentModal({ onSuccess }: AddAgentModalProps) {
   const canProceedStep1 = useMemo(() => {
     const baseRate = parseFloat(formValues.baseRate)
     return (
-      formValues.endpointUrl.trim().length > 0 &&
+      !validateSubmission(formValues) &&
       !Number.isNaN(baseRate) &&
       baseRate > 0
     )
@@ -165,7 +216,8 @@ export function AddAgentModal({ onSuccess }: AddAgentModalProps) {
       return
     }
     if (step === 1 && !canProceedStep1) {
-      setError('Provide a valid HTTPS endpoint and positive base rate.')
+      const validationError = validateSubmission(formValues)
+      setError(validationError || 'Provide a valid endpoint and positive base rate.')
       return
     }
     setStep((prev) => Math.min(prev + 1, 1))
@@ -180,6 +232,10 @@ export function AddAgentModal({ onSuccess }: AddAgentModalProps) {
     setError(null)
     setIsSubmitting(true)
     try {
+      const validationError = validateSubmission(formValues)
+      if (validationError) {
+        throw new Error(validationError)
+      }
       const payload = buildPayload(formValues)
       const submission = await submitAgent(payload)
       setResult(submission)
@@ -377,6 +433,7 @@ Insight synthesis"
                     Contact Email (optional)
                   </label>
                   <Input
+                    type="email"
                     placeholder="team@youragent.com"
                     value={formValues.contactEmail}
                     onChange={(event) =>
@@ -390,6 +447,7 @@ Insight synthesis"
                     Logo URL (optional)
                   </label>
                   <Input
+                    type="url"
                     placeholder="https://example.com/logo.png"
                     value={formValues.logoUrl}
                     onChange={(event) =>
@@ -408,7 +466,8 @@ Insight synthesis"
                 Endpoint & Pricing
               </h3>
               <p className="mt-2 text-sm text-slate-300">
-                Provide the HTTPS endpoint that executes your agent. Pricing is denominated in HBAR and used by the negotiator to propose payments.
+                Provide the HTTP(S) endpoint that executes your agent. Pricing is denominated in
+                HBAR and used by the negotiator to propose payments.
               </p>
             </div>
             <div className="grid gap-4">
@@ -417,6 +476,7 @@ Insight synthesis"
                   Endpoint URL
                 </label>
                 <Input
+                  type="url"
                   placeholder="https://api.youragent.com/execute"
                   value={formValues.endpointUrl}
                   onChange={(event) =>
@@ -430,6 +490,7 @@ Insight synthesis"
                   Health Check URL (optional)
                 </label>
                 <Input
+                  type="url"
                   placeholder="https://api.youragent.com/health"
                   value={formValues.healthCheckUrl}
                   onChange={(event) =>
@@ -490,7 +551,7 @@ Insight synthesis"
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button className="flex items-center gap-2 rounded-full bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-sky-400">
+        <Button className="flex w-full items-center justify-center gap-2 rounded-full bg-sky-500 px-4 py-2 text-sm font-semibold text-white shadow-lg hover:bg-sky-400">
           <Sparkles className="h-4 w-4" />
           Add Agent
         </Button>

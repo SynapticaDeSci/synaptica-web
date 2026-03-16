@@ -1,0 +1,5 @@
+{
+	"dependencies": {
+		"@hashgraphonline/standards-sdk": "^0.1.165"
+	}
+}
