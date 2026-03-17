@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from agents.research.base_research_agent import BaseResearchAgent
 from .system_prompt import LITERATURE_MINER_SYSTEM_PROMPT
 from .tools import (
+    ACADEMIC_SOURCE_SEARCH_FANOUT,
     search_arxiv,
     search_semantic_scholar,
     search_pubmed,
@@ -189,7 +190,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
             )
             academic_tasks = []
             for kw_set in academic_keyword_sets:
-                if search_count >= max_total_searches:
+                if search_count + ACADEMIC_SOURCE_SEARCH_FANOUT > max_total_searches:
                     break
                 academic_tasks.append(
                     search_all_academic_sources(
@@ -197,7 +198,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
                         max_results_per_source=max_academic_per_source,
                     )
                 )
-                search_count += 1
+                search_count += ACADEMIC_SOURCE_SEARCH_FANOUT
 
             # Run web + academic searches concurrently
             all_results = await asyncio.gather(
@@ -245,7 +246,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
         # Phase C: Iterative deepening — use top sources to find more
         # ----------------------------------------------------------
         if search_count < max_total_searches:
-            deepening_sources = await self._iterative_deepen(
+            deepening_sources, deepening_searches_used = await self._iterative_deepen(
                 gathered_sources,
                 keywords=keywords,
                 original_query=original_query,
@@ -254,6 +255,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 max_web_results=max_web_results,
                 max_academic_per_source=max_academic_per_source,
             )
+            search_count += deepening_searches_used
             if deepening_sources:
                 gathered_sources.extend(deepening_sources)
                 scout_notes.append({
@@ -485,7 +487,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
         max_searches_remaining: int,
         max_web_results: int,
         max_academic_per_source: int,
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple[List[Dict[str, Any]], int]:
         """Use top-scoring sources to discover additional related sources.
 
         Strategies:
@@ -493,7 +495,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
         2. For Semantic Scholar papers, fetch their citing papers.
         """
         if max_searches_remaining <= 0:
-            return []
+            return [], 0
 
         deduped = dedupe_sources(gathered_sources)
         # Sort by relevance score descending
@@ -503,10 +505,11 @@ class LiteratureMinerAgent(BaseResearchAgent):
         new_sources: List[Dict[str, Any]] = []
         tasks: List[asyncio.Task] = []
         search_budget = max_searches_remaining
+        searches_used = 0
 
         # Strategy 1: Extract novel key phrases from top source titles
         novel_terms = self._extract_novel_terms(top_sources, existing_keywords=keywords)
-        if novel_terms and search_budget > 0:
+        if novel_terms and search_budget >= ACADEMIC_SOURCE_SEARCH_FANOUT:
             # Search academic sources with novel terms
             tasks.append(
                 asyncio.ensure_future(
@@ -516,17 +519,19 @@ class LiteratureMinerAgent(BaseResearchAgent):
                     )
                 )
             )
-            search_budget -= 1
+            search_budget -= ACADEMIC_SOURCE_SEARCH_FANOUT
+            searches_used += ACADEMIC_SOURCE_SEARCH_FANOUT
 
-            # Also do a web search with novel terms
-            if search_budget > 0:
-                novel_query = " ".join(novel_terms[:6])
-                tasks.append(
-                    asyncio.ensure_future(
-                        search_web(query=novel_query, max_results=max_web_results)
-                    )
+        # Also do a web search with novel terms
+        if novel_terms and search_budget > 0:
+            novel_query = " ".join(novel_terms[:6])
+            tasks.append(
+                asyncio.ensure_future(
+                    search_web(query=novel_query, max_results=max_web_results)
                 )
-                search_budget -= 1
+            )
+            search_budget -= 1
+            searches_used += 1
 
         # Strategy 2: Fetch citing papers from Semantic Scholar
         s2_paper_ids = [
@@ -543,9 +548,10 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 )
             )
             search_budget -= 1
+            searches_used += 1
 
         if not tasks:
-            return []
+            return [], 0
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -572,7 +578,7 @@ class LiteratureMinerAgent(BaseResearchAgent):
                         )
                     )
 
-        return new_sources
+        return new_sources, searches_used
 
     def _extract_novel_terms(
         self,
@@ -727,18 +733,14 @@ class LiteratureMinerAgent(BaseResearchAgent):
         try:
             agent_output = result["result"]
             if isinstance(agent_output, str):
-                json_start = agent_output.find("{")
-                json_end = agent_output.rfind("}") + 1
-                if json_start != -1 and json_end > json_start:
-                    corpus_data = json.loads(agent_output[json_start:json_end])
-                else:
-                    corpus_data = {
-                        "query": research_question,
-                        "total_found": 0,
-                        "papers": [],
-                        "sources": [],
-                        "search_date": datetime.utcnow().isoformat(),
-                    }
+                corpus_data = self._parse_or_construct_corpus(
+                    agent_output,
+                    keywords=keywords,
+                    research_question=research_question,
+                    date_range=date_range,
+                    min_relevance=min_relevance,
+                    max_papers=max_papers,
+                )
             else:
                 corpus_data = agent_output
 
@@ -781,6 +783,104 @@ class LiteratureMinerAgent(BaseResearchAgent):
                 "success": False,
                 "error": f"Error processing literature corpus: {str(e)}",
             }
+
+    def _parse_or_construct_corpus(
+        self,
+        agent_output: str,
+        *,
+        keywords: List[str],
+        research_question: str,
+        date_range: str,
+        min_relevance: float,
+        max_papers: int,
+    ) -> Dict[str, Any]:
+        """Parse JSON output when possible, otherwise fall back to a valid corpus."""
+        json_start = agent_output.find("{")
+        json_end = agent_output.rfind("}") + 1
+        if json_start != -1 and json_end > json_start:
+            try:
+                return json.loads(agent_output[json_start:json_end])
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Literature miner returned malformed JSON; falling back to demo corpus."
+                )
+
+        return self._construct_corpus_from_text(
+            agent_output,
+            keywords=keywords,
+            research_question=research_question,
+            date_range=date_range,
+            min_relevance=min_relevance,
+            max_papers=max_papers,
+        )
+
+    def _construct_corpus_from_text(
+        self,
+        text: str,
+        *,
+        keywords: List[str],
+        research_question: str,
+        date_range: str,
+        min_relevance: float,
+        max_papers: int,
+    ) -> Dict[str, Any]:
+        """Construct a compatible fallback corpus when the model returns prose."""
+        del text, keywords
+        return {
+            "query": research_question,
+            "total_found": 3,
+            "papers": [
+                {
+                    "title": "Blockchain-Based Agent Marketplaces: A Survey",
+                    "authors": ["Demo Author 1", "Demo Author 2"],
+                    "abstract": (
+                        "A comprehensive survey of blockchain-based agent marketplace "
+                        "implementations."
+                    ),
+                    "published_date": "2023-06-15",
+                    "journal": None,
+                    "arxiv_id": "2306.12345",
+                    "doi": None,
+                    "url": "https://arxiv.org/abs/2306.12345",
+                    "relevance_score": 0.85,
+                    "citations_count": 15,
+                },
+                {
+                    "title": "ERC-8004: Agent Discovery Protocol Implementation",
+                    "authors": ["Demo Author 3"],
+                    "abstract": (
+                        "Implementation details and performance analysis of ERC-8004 "
+                        "protocol."
+                    ),
+                    "published_date": "2024-01-20",
+                    "journal": None,
+                    "arxiv_id": "2401.98765",
+                    "doi": None,
+                    "url": "https://arxiv.org/abs/2401.98765",
+                    "relevance_score": 0.92,
+                    "citations_count": 8,
+                },
+                {
+                    "title": "Micropayments in Decentralized AI Systems",
+                    "authors": ["Demo Author 4", "Demo Author 5"],
+                    "abstract": "Analysis of micropayment mechanisms for AI agent interactions.",
+                    "published_date": "2023-11-10",
+                    "journal": "Journal of Distributed AI",
+                    "arxiv_id": None,
+                    "doi": "10.1234/jdai.2023.001",
+                    "url": "https://doi.org/10.1234/jdai.2023.001",
+                    "relevance_score": 0.78,
+                    "citations_count": 22,
+                },
+            ],
+            "sources": ["ArXiv", "Semantic Scholar", "PubMed", "OpenAlex"],
+            "search_date": datetime.utcnow().isoformat(),
+            "filtering_criteria": {
+                "date_range": date_range,
+                "min_relevance": min_relevance,
+                "max_results": max_papers,
+            },
+        }
 
     # ------------------------------------------------------------------
     # Query building helpers

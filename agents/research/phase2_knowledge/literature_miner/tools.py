@@ -16,6 +16,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _USER_AGENT = "Mozilla/5.0 (compatible; SynapticaResearch/1.0)"
+ACADEMIC_SOURCE_SEARCH_FANOUT = 4
 
 # ---------------------------------------------------------------------------
 # ArXiv API (free, no key)
@@ -683,7 +684,9 @@ async def deduplicate_papers(papers: List[Dict[str, Any]]) -> List[Dict[str, Any
         doi = (paper.get("doi") or "").strip().lower()
         doi_key = f"doi:{doi}" if doi else ""
 
-        existing_idx = seen.get(signature) or (seen.get(doi_key) if doi_key else None)
+        existing_idx = seen.get(signature)
+        if existing_idx is None and doi_key:
+            existing_idx = seen.get(doi_key)
         if existing_idx is not None:
             existing = unique_papers[existing_idx]
             if not existing.get("doi") and paper.get("doi"):

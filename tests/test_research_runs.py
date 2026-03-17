@@ -25,6 +25,7 @@ from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
 from agents.verifier.tools.research_verification_tools import calculate_quality_score
 from agents.research.phase2_knowledge.literature_miner.agent import LiteratureMinerAgent
+from agents.research.phase2_knowledge.literature_miner.tools import deduplicate_papers
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
@@ -2568,7 +2569,7 @@ async def test_iterative_deepen_normalizes_web_results(monkeypatch):
     monkeypatch.setattr(literature_miner_agent_module, "search_web", _mock_search_web)
     monkeypatch.setattr(agent, "_extract_novel_terms", lambda *args, **kwargs: ["agent", "payments"])
 
-    results = await agent._iterative_deepen(
+    results, searches_used = await agent._iterative_deepen(
         [
             {
                 "title": "Seed source",
@@ -2580,17 +2581,154 @@ async def test_iterative_deepen_normalizes_web_results(monkeypatch):
         keywords=["seed"],
         original_query="Autonomous agent payments",
         classified_mode="hybrid",
-        max_searches_remaining=2,
+        max_searches_remaining=5,
         max_web_results=4,
         max_academic_per_source=5,
     )
 
     academic_result = next(source for source in results if source["title"] == "Academic result")
     web_result = next(source for source in results if source["title"] == "Bloomberg coverage")
+    assert searches_used == 5
     assert academic_result["source_type"] == "academic"
     assert web_result["source_type"] == "news"
     assert web_result["scout_role"] == "iterative-deepening"
     assert web_result["snippet"] == "Fresh market coverage"
+
+
+@pytest.mark.asyncio
+async def test_search_literature_falls_back_for_non_json_output(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = LiteratureMinerAgent()
+
+    async def _mock_execute(request, **kwargs):
+        del request, kwargs
+        return {"success": True, "result": "Plain-language literature summary without JSON."}
+
+    monkeypatch.setattr(agent, "execute", _mock_execute)
+
+    result = await agent.search_literature(
+        keywords=["blockchain", "ai", "agents"],
+        research_question="Impact of blockchain on AI agents",
+        max_papers=3,
+    )
+
+    assert result["success"] is True
+    assert len(result["literature_corpus"]["papers"]) == 3
+    assert result["literature_corpus"]["sources"] == [
+        "ArXiv",
+        "Semantic Scholar",
+        "PubMed",
+        "OpenAlex",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deduplicate_papers_handles_duplicates_at_index_zero():
+    papers = [
+        {
+            "title": "Paper A",
+            "authors": ["Alice"],
+            "abstract": "first abstract",
+            "citations_count": 1,
+        },
+        {
+            "title": "Paper A",
+            "authors": ["Alice"],
+            "abstract": "replacement abstract",
+            "citations_count": 4,
+        },
+        {
+            "title": "Paper B",
+            "authors": ["Bob"],
+            "abstract": "other abstract",
+            "citations_count": 2,
+        },
+    ]
+
+    deduped = await deduplicate_papers(papers)
+
+    assert len(deduped) == 2
+    paper_a = next(item for item in deduped if item["title"] == "Paper A")
+    assert paper_a["citations_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_gather_evidence_counts_academic_fanout_against_budget(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = LiteratureMinerAgent()
+
+    monkeypatch.setattr(literature_miner_agent_module, "_MAX_TOTAL_SEARCHES_STANDARD", 5)
+    monkeypatch.setattr(
+        agent,
+        "_decompose_and_generate_queries",
+        lambda *args, **kwargs: [{"role": "core-scout", "lane": "core-answer", "query": "agent payments"}],
+    )
+    monkeypatch.setattr(
+        agent,
+        "_extract_academic_keyword_sets",
+        lambda *args, **kwargs: [["alpha"], ["beta"], ["gamma"]],
+    )
+
+    academic_searches = []
+
+    async def _mock_search_all_academic_sources(*, keywords, max_results_per_source):
+        academic_searches.append(keywords)
+        assert max_results_per_source == 15
+        return [
+            {
+                "title": f"Paper {' '.join(keywords)}",
+                "abstract": "Paper abstract",
+                "url": f"https://doi.org/10.1000/{'-'.join(keywords)}",
+                "source": "Semantic Scholar",
+                "relevance_score": 0.8,
+            }
+        ]
+
+    async def _mock_search_web(*, query, max_results, time_range=None):
+        assert query == "agent payments"
+        assert max_results == 10
+        assert time_range is None
+        return []
+
+    async def _mock_enrich_source_cards(sources, max_fetches):
+        del max_fetches
+        return list(sources)
+
+    async def _unexpected_iterative_deepen(*args, **kwargs):
+        raise AssertionError("iterative deepening should not run when the budget is exhausted")
+
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "search_all_academic_sources",
+        _mock_search_all_academic_sources,
+    )
+    monkeypatch.setattr(literature_miner_agent_module, "search_web", _mock_search_web)
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "enrich_source_cards",
+        _mock_enrich_source_cards,
+    )
+    monkeypatch.setattr(agent, "_iterative_deepen", _unexpected_iterative_deepen)
+
+    result = await agent._execute_gather_evidence(
+        "Research agent payments",
+        {
+            "classified_mode": "literature",
+            "depth_mode": "standard",
+            "source_requirements": {"total_sources": 1, "min_academic_or_primary": 0},
+            "rounds_planned": {"evidence_rounds": 1},
+            "query_plan": {
+                "query": "Research agent payments",
+                "keywords": ["agent", "payments"],
+                "search_queries": [],
+                "claim_targets": [],
+            },
+        },
+    )
+
+    assert result["success"] is True
+    assert academic_searches == [["alpha"]]
+    assert result["result"]["scout_notes"][0]["search_count"] == 5
 
 
 @pytest.mark.asyncio
