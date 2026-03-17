@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from api.main import app
 from agents.executor.tools import research_api_executor
+from agents.research.phase2_knowledge.literature_miner import agent as literature_miner_agent_module
 from agents.orchestrator.tools.agent_tools import (
     _evaluate_research_quality_contract,
     _extract_json_object,
@@ -2510,6 +2511,88 @@ def test_build_research_run_profile_accepts_string_modes():
     assert profile.freshness_required is True
 
 
+def test_decompose_queries_uses_dynamic_years_for_recent_modes():
+    agent = LiteratureMinerAgent()
+
+    queries = agent._decompose_and_generate_queries(
+        "What is the latest status of autonomous agent payments in DeSci?",
+        keywords=["autonomous agents", "payments", "DeSci"],
+        search_queries=[],
+        classified_mode="hybrid",
+    )
+
+    latest_query = next(query for query in queries if query["role"] == "latest-scout")
+    current_year = datetime.now().year
+    assert latest_query["query"] == (
+        "What is the latest status of autonomous agent payments in DeSci? "
+        f"latest {current_year} {current_year + 1}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_iterative_deepen_normalizes_web_results(monkeypatch):
+    agent = LiteratureMinerAgent()
+
+    async def _mock_search_all_academic_sources(*, keywords, max_results_per_source):
+        assert keywords == ["agent", "payments"]
+        assert max_results_per_source == 5
+        return [
+            {
+                "title": "Academic result",
+                "abstract": "Paper abstract",
+                "url": "https://doi.org/10.1000/xyz123",
+                "source": "Semantic Scholar",
+                "relevance_score": 0.8,
+            }
+        ]
+
+    async def _mock_search_web(*, query, max_results, time_range=None):
+        assert query == "agent payments"
+        assert max_results == 4
+        assert time_range is None
+        return [
+            {
+                "title": "Bloomberg coverage",
+                "url": "https://www.bloomberg.com/news/articles/test-story",
+                "content": "Fresh market coverage",
+                "score": 0.5,
+                "source": "Bloomberg",
+            }
+        ]
+
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "search_all_academic_sources",
+        _mock_search_all_academic_sources,
+    )
+    monkeypatch.setattr(literature_miner_agent_module, "search_web", _mock_search_web)
+    monkeypatch.setattr(agent, "_extract_novel_terms", lambda *args, **kwargs: ["agent", "payments"])
+
+    results = await agent._iterative_deepen(
+        [
+            {
+                "title": "Seed source",
+                "url": "https://example.com/seed",
+                "snippet": "seed evidence",
+                "relevance_score": 0.9,
+            }
+        ],
+        keywords=["seed"],
+        original_query="Autonomous agent payments",
+        classified_mode="hybrid",
+        max_searches_remaining=2,
+        max_web_results=4,
+        max_academic_per_source=5,
+    )
+
+    academic_result = next(source for source in results if source["title"] == "Academic result")
+    web_result = next(source for source in results if source["title"] == "Bloomberg coverage")
+    assert academic_result["source_type"] == "academic"
+    assert web_result["source_type"] == "news"
+    assert web_result["scout_role"] == "iterative-deepening"
+    assert web_result["snippet"] == "Fresh market coverage"
+
+
 @pytest.mark.asyncio
 async def test_hybrid_source_curation_fails_when_requirements_are_not_met(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -2579,7 +2662,7 @@ def test_deep_research_run_tracks_extra_rounds(client: TestClient):
     )
     assert completed["rounds_completed"] == {"evidence_rounds": 4, "critique_rounds": 2}
     gather_node = next(node for node in completed["nodes"] if node["node_id"] == "gather_evidence")
-    assert gather_node["result"]["rounds_completed"]["evidence_rounds"] >= 2
+    assert gather_node["result"]["rounds_completed"]["evidence_rounds"] == 4
 
 
 def test_live_analysis_fails_when_fresh_evidence_is_missing(client: TestClient, monkeypatch):

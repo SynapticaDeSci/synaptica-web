@@ -399,11 +399,12 @@ class LiteratureMinerAgent(BaseResearchAgent):
 
         # 7. Fresh/recent developments for live and hybrid modes
         if classified_mode in {"live_analysis", "hybrid"}:
+            current_year = datetime.now().year
             queries.extend([
                 {
                     "role": "latest-scout",
                     "lane": "breaking-developments",
-                    "query": f"{original_query} latest 2024 2025",
+                    "query": f"{original_query} latest {current_year} {current_year + 1}",
                     "time_range": "m",
                 },
                 {
@@ -552,27 +553,24 @@ class LiteratureMinerAgent(BaseResearchAgent):
             if isinstance(result, Exception):
                 logger.warning("Iterative deepening error: %s", result)
                 continue
-            if isinstance(result, list):
-                # Academic papers or citation results
-                for paper in result:
-                    source_card = _academic_paper_to_source_card(paper, round_number=99)
+            if not isinstance(result, list):
+                continue
+            for item in result:
+                if not isinstance(item, dict):
+                    continue
+                if _looks_like_academic_paper(item):
+                    source_card = _academic_paper_to_source_card(item, round_number=99)
                     if source_card:
                         new_sources.append(source_card)
-            elif isinstance(result, dict) and "results" not in result:
-                # search_all_academic_sources returns a list, not a dict
-                pass
-            else:
-                # Web search results (list of dicts with url/title/content)
-                items = result if isinstance(result, list) else []
-                for item in items:
-                    if item.get("url") and item.get("title"):
-                        new_sources.append(
-                            normalize_source_card(
-                                item,
-                                scout_role="iterative-deepening",
-                                round_number=99,
-                            )
+                    continue
+                if item.get("url") and item.get("title"):
+                    new_sources.append(
+                        normalize_source_card(
+                            item,
+                            scout_role="iterative-deepening",
+                            round_number=99,
                         )
+                    )
 
         return new_sources
 
@@ -959,6 +957,21 @@ def _academic_paper_to_source_card(
         "round_number": round_number,
         "s2_paper_id": paper.get("s2_paper_id"),
     }
+
+
+def _looks_like_academic_paper(item: Dict[str, Any]) -> bool:
+    """Heuristically distinguish academic-paper payloads from web-search results."""
+    academic_fields = (
+        "abstract",
+        "authors",
+        "journal",
+        "doi",
+        "arxiv_id",
+        "pmid",
+        "s2_paper_id",
+        "citations_count",
+    )
+    return any(item.get(field) for field in academic_fields)
 
 
 async def _empty_list():
