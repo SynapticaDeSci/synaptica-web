@@ -219,41 +219,42 @@ def _build_source_requirements(
 ) -> SourceRequirements:
     if classified_mode == ResearchMode.LITERATURE:
         if depth_mode == DepthMode.DEEP:
-            return SourceRequirements(total_sources=12, min_academic_or_primary=6)
-        return SourceRequirements(total_sources=6, min_academic_or_primary=3)
+            return SourceRequirements(total_sources=30, min_academic_or_primary=15)
+        return SourceRequirements(total_sources=15, min_academic_or_primary=8)
 
     if classified_mode == ResearchMode.LIVE_ANALYSIS:
         if depth_mode == DepthMode.DEEP:
             return SourceRequirements(
-                total_sources=12,
-                min_fresh_sources=5,
+                total_sources=20,
+                min_fresh_sources=8,
                 freshness_window_days=7,
             )
         return SourceRequirements(
-            total_sources=8,
-            min_fresh_sources=3,
+            total_sources=12,
+            min_fresh_sources=5,
             freshness_window_days=7,
         )
 
+    # HYBRID / AUTO
     if depth_mode == DepthMode.DEEP:
         return SourceRequirements(
-            total_sources=14,
-            min_academic_or_primary=5,
-            min_fresh_sources=4,
+            total_sources=30,
+            min_academic_or_primary=10,
+            min_fresh_sources=5,
             freshness_window_days=7,
         )
     return SourceRequirements(
-        total_sources=10,
-        min_academic_or_primary=3,
-        min_fresh_sources=2,
+        total_sources=15,
+        min_academic_or_primary=5,
+        min_fresh_sources=3,
         freshness_window_days=7,
     )
 
 
 def _build_rounds_plan(depth_mode: DepthMode) -> RoundsPlan:
     if depth_mode == DepthMode.DEEP:
-        return RoundsPlan(evidence_rounds=2, critique_rounds=2)
-    return RoundsPlan(evidence_rounds=1, critique_rounds=1)
+        return RoundsPlan(evidence_rounds=4, critique_rounds=2)
+    return RoundsPlan(evidence_rounds=2, critique_rounds=1)
 
 
 def _build_success_criteria(classified_mode: ResearchMode) -> List[str]:

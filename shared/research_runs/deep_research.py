@@ -27,8 +27,22 @@ _ACADEMIC_DOMAINS = (
     "acm.org",
     "jstor.org",
     "pubmed.ncbi.nlm.nih.gov",
+    "ncbi.nlm.nih.gov",
+    "pmc.ncbi.nlm.nih.gov",
     "biorxiv.org",
     "medrxiv.org",
+    "openalex.org",
+    "semanticscholar.org",
+    "plos.org",
+    "frontiersin.org",
+    "mdpi.com",
+    "wiley.com",
+    "cell.com",
+    "science.org",
+    "pnas.org",
+    "acs.org",
+    "rsc.org",
+    "tandfonline.com",
 )
 
 _PRIMARY_HINTS = (
@@ -646,7 +660,7 @@ def validate_source_requirements(
 async def search_web(
     *,
     query: str,
-    max_results: int = 8,
+    max_results: int = 15,
     time_range: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Search the web using Tavily when configured, otherwise fall back to DDG HTML."""
