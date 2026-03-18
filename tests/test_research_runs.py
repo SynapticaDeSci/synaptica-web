@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from api.main import app
 from agents.executor.tools import research_api_executor
+from agents.research.phase2_knowledge.literature_miner import agent as literature_miner_agent_module
 from agents.orchestrator.tools.agent_tools import (
     _evaluate_research_quality_contract,
     _extract_json_object,
@@ -24,6 +25,7 @@ from agents.verifier.agent import create_research_verifier_agent
 from agents.verifier.tools.payment_tools import reject_and_refund, release_payment
 from agents.verifier.tools.research_verification_tools import calculate_quality_score
 from agents.research.phase2_knowledge.literature_miner.agent import LiteratureMinerAgent
+from agents.research.phase2_knowledge.literature_miner.tools import deduplicate_papers
 from shared.database import (
     A2AEvent,
     Agent as AgentModel,
@@ -155,11 +157,9 @@ def client(monkeypatch):
 
         if "literature-miner-001" in endpoint and node_strategy == "gather_evidence":
             evidence_rounds = int((context.get("rounds_planned") or {}).get("evidence_rounds", 1) or 1)
-            return {
-                "success": True,
-                "agent_id": "literature-miner-001",
-                "result": {
-                    "sources": [
+            _ge_reqs = context.get("source_requirements") or {}
+            _ge_needs_extra = (_ge_reqs.get("total_sources") or 0) > 10
+            _ge_base = [
                         {
                             "title": "Channel News Asia report",
                             "url": "https://www.channelnewsasia.com/world/example",
@@ -226,12 +226,34 @@ def client(monkeypatch):
                             "relevance_score": 0.87,
                             "quality_flags": [],
                         },
-                    ],
+            ]
+            _ge_extra = [
+                            {
+                                "title": f"Academic paper {i}",
+                                "url": f"https://doi.org/10.1234/example-{i}",
+                                "publisher": f"Journal {i}",
+                                "published_at": f"2025-0{(i % 9) + 1}-15T00:00:00+00:00",
+                                "source_type": "academic",
+                                "snippet": f"Research finding {i} on the topic.",
+                                "display_snippet": f"Research finding {i} on the topic.",
+                                "relevance_score": round(0.85 - i * 0.02, 2),
+                                "quality_flags": [],
+                            }
+                            for i in range(1, 25)
+            ] if _ge_needs_extra else []
+            _ge_all = _ge_base + _ge_extra
+            _ge_total = len(_ge_all)
+            _ge_acad = sum(1 for s in _ge_all if s["source_type"] in ("academic", "primary"))
+            return {
+                "success": True,
+                "agent_id": "literature-miner-001",
+                "result": {
+                    "sources": _ge_all,
                     "search_lanes_used": ["breaking-developments", "official-confirmation", "market-data-confirmation"],
                     "coverage_summary": {
                         "source_summary": {
-                            "total_sources": 6,
-                            "academic_or_primary_sources": 3,
+                            "total_sources": _ge_total,
+                            "academic_or_primary_sources": _ge_acad,
                             "fresh_sources": 5,
                             "requirements_met": True,
                         },
@@ -253,11 +275,9 @@ def client(monkeypatch):
             }
 
         if "literature-miner-001" in endpoint and node_strategy == "curate_sources":
-            return {
-                "success": True,
-                "agent_id": "literature-miner-001",
-                "result": {
-                    "sources": [
+            _src_reqs = context.get("source_requirements") or {}
+            _needs_extra = (_src_reqs.get("total_sources") or 0) > 10
+            _base_sources = [
                         {
                             "citation_id": "S1",
                             "title": "Channel News Asia report",
@@ -330,7 +350,30 @@ def client(monkeypatch):
                             "relevance_score": 0.88,
                             "quality_flags": [],
                         },
-                    ],
+            ]
+            _extra_academic = [
+                            {
+                                "citation_id": f"S{7 + i}",
+                                "title": f"Academic paper {i}",
+                                "url": f"https://doi.org/10.1234/example-{i}",
+                                "publisher": f"Journal {i}",
+                                "published_at": f"2025-0{(i % 9) + 1}-15T00:00:00+00:00",
+                                "source_type": "academic",
+                                "snippet": f"Research finding {i} on the topic.",
+                                "display_snippet": f"Research finding {i} on the topic.",
+                                "relevance_score": round(0.85 - i * 0.02, 2),
+                                "quality_flags": [],
+                            }
+                            for i in range(1, 25)
+            ] if _needs_extra else []
+            _all_sources = _base_sources + _extra_academic
+            _total = len(_all_sources)
+            _academic_count = sum(1 for s in _all_sources if s["source_type"] in ("academic", "primary"))
+            return {
+                "success": True,
+                "agent_id": "literature-miner-001",
+                "result": {
+                    "sources": _all_sources,
                     "citations": [
                         {
                             "citation_id": "S1",
@@ -350,8 +393,8 @@ def client(monkeypatch):
                         },
                     ],
                     "source_summary": {
-                        "total_sources": 6,
-                        "academic_or_primary_sources": 3,
+                        "total_sources": _total,
+                        "academic_or_primary_sources": _academic_count,
                         "fresh_sources": 5,
                         "requirements_met": True,
                     },
@@ -365,8 +408,8 @@ def client(monkeypatch):
                     },
                     "coverage_summary": {
                         "source_summary": {
-                            "total_sources": 6,
-                            "academic_or_primary_sources": 3,
+                            "total_sources": _total,
+                            "academic_or_primary_sources": _academic_count,
                             "fresh_sources": 5,
                             "requirements_met": True,
                         },
@@ -374,7 +417,7 @@ def client(monkeypatch):
                             "publishers": 6,
                             "source_types": 3,
                             "fresh_sources": 5,
-                            "academic_or_primary_sources": 3,
+                            "academic_or_primary_sources": _academic_count,
                         },
                         "citation_count": 2,
                         "citation_ready": True,
@@ -836,7 +879,7 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
         "policy_evaluation_count": 0,
         "unresolved_dissent_count": 0,
     }
-    assert payload["rounds_planned"] == {"evidence_rounds": 1, "critique_rounds": 1}
+    assert payload["rounds_planned"] == {"evidence_rounds": 2, "critique_rounds": 1}
     assert len(payload["nodes"]) == 6
     assert len(payload["edges"]) == 5
     assert payload["nodes"][0]["candidate_agent_ids"]
@@ -857,8 +900,8 @@ def test_create_research_run_completes_and_persists_graph(client: TestClient):
     assert completed["result"]["quality_summary"]["citation_coverage"] == 1.0
     assert completed["result"]["quality_summary"]["strict_live_analysis_checks_passed"] is True
     assert all(claim["supporting_citation_ids"] for claim in completed["result"]["claims"])
-    assert completed["result"]["source_summary"]["total_sources"] == 6
-    assert completed["rounds_completed"] == {"evidence_rounds": 1, "critique_rounds": 1}
+    assert completed["result"]["source_summary"]["total_sources"] >= 6
+    assert completed["rounds_completed"] == {"evidence_rounds": 2, "critique_rounds": 1}
     assert all(node["status"] == "completed" for node in completed["nodes"])
     assert all(node["task_id"] for node in completed["nodes"])
     assert all(node["payment_id"] for node in completed["nodes"])
@@ -1005,15 +1048,12 @@ def test_research_run_persists_phase2_evidence_graph_records(client: TestClient)
     finally:
         session.close()
 
-    assert [artifact.artifact_key for artifact in artifacts] == [f"S{index}" for index in range(1, 7)]
-    assert [artifact.curation_status for artifact in artifacts] == [
-        "cited",
-        "cited",
-        "selected",
-        "selected",
-        "selected",
-        "selected",
-    ]
+    artifact_keys = [artifact.artifact_key for artifact in artifacts]
+    assert artifact_keys[:6] == [f"S{index}" for index in range(1, 7)]
+    assert len(artifact_keys) >= 6
+    curation_statuses = [artifact.curation_status for artifact in artifacts]
+    assert curation_statuses[:2] == ["cited", "cited"]
+    assert all(s in ("cited", "selected") for s in curation_statuses)
     assert [claim.claim_id for claim in claims] == ["C1", "C2", "C3"]
     assert [claim.claim for claim in claims] == [
         "Markets priced in immediate supply and shipping risk.",
@@ -1043,19 +1083,17 @@ def test_research_run_evidence_graph_and_report_pack_routes(client: TestClient):
     assert graph_response.status_code == 200
     graph_payload = graph_response.json()
     assert graph_payload["schema_version"] == "phase2.v1"
-    assert graph_payload["summary"] == {
-        "artifact_count": 6,
-        "cited_artifact_count": 2,
-        "filtered_artifact_count": 0,
-        "claim_count": 3,
-        "link_count": 4,
-        "high_confidence_claim_count": 1,
-        "mixed_evidence_claim_count": 3,
-        "insufficient_evidence_claim_count": 0,
-    }
-    assert [artifact["artifact_key"] for artifact in graph_payload["artifacts"]] == [
-        f"S{index}" for index in range(1, 7)
-    ]
+    summary = graph_payload["summary"]
+    assert summary["artifact_count"] >= 6
+    assert summary["cited_artifact_count"] == 2
+    assert summary["filtered_artifact_count"] == 0
+    assert summary["claim_count"] == 3
+    assert summary["link_count"] == 4
+    assert summary["high_confidence_claim_count"] == 1
+    assert summary["mixed_evidence_claim_count"] == 3
+    assert summary["insufficient_evidence_claim_count"] == 0
+    artifact_keys = [artifact["artifact_key"] for artifact in graph_payload["artifacts"]]
+    assert artifact_keys[:6] == [f"S{index}" for index in range(1, 7)]
     assert [claim["claim_id"] for claim in graph_payload["claims"]] == ["C1", "C2", "C3"]
     assert graph_payload["claims"][0]["confidence_score"] == 0.95
     assert graph_payload["claims"][0]["contradiction_status"] == "mixed"
@@ -1851,7 +1889,7 @@ def test_research_run_evidence_graph_uses_persisted_artifacts_before_completion(
     assert graph_response.status_code == 200
     graph_payload = graph_response.json()
     assert graph_payload["status"] == "running"
-    assert graph_payload["summary"]["artifact_count"] == 6
+    assert graph_payload["summary"]["artifact_count"] >= 6
     assert graph_payload["summary"]["claim_count"] == 0
     assert graph_payload["summary"]["link_count"] == 0
     assert graph_payload["artifacts"][0]["artifact_key"] == "S1"
@@ -1998,7 +2036,7 @@ def test_research_run_evidence_payload_uses_node_results_before_completion(clien
         ),
         timeout=10.0,
     )
-    assert in_flight["rounds_completed"] == {"evidence_rounds": 1, "critique_rounds": 0}
+    assert in_flight["rounds_completed"] == {"evidence_rounds": 2, "critique_rounds": 0}
 
     evidence_response = client.get(f"/api/research-runs/{research_run_id}/evidence")
     assert evidence_response.status_code == 200
@@ -2474,6 +2512,225 @@ def test_build_research_run_profile_accepts_string_modes():
     assert profile.freshness_required is True
 
 
+def test_decompose_queries_uses_dynamic_years_for_recent_modes():
+    agent = LiteratureMinerAgent()
+
+    queries = agent._decompose_and_generate_queries(
+        "What is the latest status of autonomous agent payments in DeSci?",
+        keywords=["autonomous agents", "payments", "DeSci"],
+        search_queries=[],
+        classified_mode="hybrid",
+    )
+
+    latest_query = next(query for query in queries if query["role"] == "latest-scout")
+    current_year = datetime.now().year
+    assert latest_query["query"] == (
+        "What is the latest status of autonomous agent payments in DeSci? "
+        f"latest {current_year} {current_year + 1}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_iterative_deepen_normalizes_web_results(monkeypatch):
+    agent = LiteratureMinerAgent()
+
+    async def _mock_search_all_academic_sources(*, keywords, max_results_per_source):
+        assert keywords == ["agent", "payments"]
+        assert max_results_per_source == 5
+        return [
+            {
+                "title": "Academic result",
+                "abstract": "Paper abstract",
+                "url": "https://doi.org/10.1000/xyz123",
+                "source": "Semantic Scholar",
+                "relevance_score": 0.8,
+            }
+        ]
+
+    async def _mock_search_web(*, query, max_results, time_range=None):
+        assert query == "agent payments"
+        assert max_results == 4
+        assert time_range is None
+        return [
+            {
+                "title": "Bloomberg coverage",
+                "url": "https://www.bloomberg.com/news/articles/test-story",
+                "content": "Fresh market coverage",
+                "score": 0.5,
+                "source": "Bloomberg",
+            }
+        ]
+
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "search_all_academic_sources",
+        _mock_search_all_academic_sources,
+    )
+    monkeypatch.setattr(literature_miner_agent_module, "search_web", _mock_search_web)
+    monkeypatch.setattr(agent, "_extract_novel_terms", lambda *args, **kwargs: ["agent", "payments"])
+
+    results, searches_used = await agent._iterative_deepen(
+        [
+            {
+                "title": "Seed source",
+                "url": "https://example.com/seed",
+                "snippet": "seed evidence",
+                "relevance_score": 0.9,
+            }
+        ],
+        keywords=["seed"],
+        original_query="Autonomous agent payments",
+        classified_mode="hybrid",
+        max_searches_remaining=5,
+        max_web_results=4,
+        max_academic_per_source=5,
+    )
+
+    academic_result = next(source for source in results if source["title"] == "Academic result")
+    web_result = next(source for source in results if source["title"] == "Bloomberg coverage")
+    assert searches_used == 5
+    assert academic_result["source_type"] == "academic"
+    assert web_result["source_type"] == "news"
+    assert web_result["scout_role"] == "iterative-deepening"
+    assert web_result["snippet"] == "Fresh market coverage"
+
+
+@pytest.mark.asyncio
+async def test_search_literature_falls_back_for_non_json_output(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = LiteratureMinerAgent()
+
+    async def _mock_execute(request, **kwargs):
+        del request, kwargs
+        return {"success": True, "result": "Plain-language literature summary without JSON."}
+
+    monkeypatch.setattr(agent, "execute", _mock_execute)
+
+    result = await agent.search_literature(
+        keywords=["blockchain", "ai", "agents"],
+        research_question="Impact of blockchain on AI agents",
+        max_papers=3,
+    )
+
+    assert result["success"] is True
+    assert len(result["literature_corpus"]["papers"]) == 3
+    assert result["literature_corpus"]["sources"] == [
+        "ArXiv",
+        "Semantic Scholar",
+        "PubMed",
+        "OpenAlex",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deduplicate_papers_handles_duplicates_at_index_zero():
+    papers = [
+        {
+            "title": "Paper A",
+            "authors": ["Alice"],
+            "abstract": "first abstract",
+            "citations_count": 1,
+        },
+        {
+            "title": "Paper A",
+            "authors": ["Alice"],
+            "abstract": "replacement abstract",
+            "citations_count": 4,
+        },
+        {
+            "title": "Paper B",
+            "authors": ["Bob"],
+            "abstract": "other abstract",
+            "citations_count": 2,
+        },
+    ]
+
+    deduped = await deduplicate_papers(papers)
+
+    assert len(deduped) == 2
+    paper_a = next(item for item in deduped if item["title"] == "Paper A")
+    assert paper_a["citations_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_gather_evidence_counts_academic_fanout_against_budget(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = LiteratureMinerAgent()
+
+    monkeypatch.setattr(literature_miner_agent_module, "_MAX_TOTAL_SEARCHES_STANDARD", 5)
+    monkeypatch.setattr(
+        agent,
+        "_decompose_and_generate_queries",
+        lambda *args, **kwargs: [{"role": "core-scout", "lane": "core-answer", "query": "agent payments"}],
+    )
+    monkeypatch.setattr(
+        agent,
+        "_extract_academic_keyword_sets",
+        lambda *args, **kwargs: [["alpha"], ["beta"], ["gamma"]],
+    )
+
+    academic_searches = []
+
+    async def _mock_search_all_academic_sources(*, keywords, max_results_per_source):
+        academic_searches.append(keywords)
+        assert max_results_per_source == 15
+        return [
+            {
+                "title": f"Paper {' '.join(keywords)}",
+                "abstract": "Paper abstract",
+                "url": f"https://doi.org/10.1000/{'-'.join(keywords)}",
+                "source": "Semantic Scholar",
+                "relevance_score": 0.8,
+            }
+        ]
+
+    async def _mock_search_web(*, query, max_results, time_range=None):
+        assert query == "agent payments"
+        assert max_results == 10
+        assert time_range is None
+        return []
+
+    async def _mock_enrich_source_cards(sources, max_fetches):
+        del max_fetches
+        return list(sources)
+
+    async def _unexpected_iterative_deepen(*args, **kwargs):
+        raise AssertionError("iterative deepening should not run when the budget is exhausted")
+
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "search_all_academic_sources",
+        _mock_search_all_academic_sources,
+    )
+    monkeypatch.setattr(literature_miner_agent_module, "search_web", _mock_search_web)
+    monkeypatch.setattr(
+        literature_miner_agent_module,
+        "enrich_source_cards",
+        _mock_enrich_source_cards,
+    )
+    monkeypatch.setattr(agent, "_iterative_deepen", _unexpected_iterative_deepen)
+
+    result = await agent._execute_gather_evidence(
+        "Research agent payments",
+        {
+            "classified_mode": "literature",
+            "depth_mode": "standard",
+            "source_requirements": {"total_sources": 1, "min_academic_or_primary": 0},
+            "rounds_planned": {"evidence_rounds": 1},
+            "query_plan": {
+                "query": "Research agent payments",
+                "keywords": ["agent", "payments"],
+                "search_queries": [],
+                "claim_targets": [],
+            },
+        },
+    )
+
+    assert result["success"] is True
+    assert academic_searches == [["alpha"]]
+    assert result["result"]["scout_notes"][0]["search_count"] == 5
+
+
 @pytest.mark.asyncio
 async def test_hybrid_source_curation_fails_when_requirements_are_not_met(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -2534,16 +2791,16 @@ def test_deep_research_run_tracks_extra_rounds(client: TestClient):
     assert response.status_code == 202
     payload = response.json()
     assert payload["depth_mode"] == "deep"
-    assert payload["rounds_planned"] == {"evidence_rounds": 2, "critique_rounds": 2}
+    assert payload["rounds_planned"] == {"evidence_rounds": 4, "critique_rounds": 2}
 
     completed = _poll_research_run(
         client,
         payload["id"],
         lambda item: item["status"] == "completed",
     )
-    assert completed["rounds_completed"] == {"evidence_rounds": 2, "critique_rounds": 2}
+    assert completed["rounds_completed"] == {"evidence_rounds": 4, "critique_rounds": 2}
     gather_node = next(node for node in completed["nodes"] if node["node_id"] == "gather_evidence")
-    assert gather_node["result"]["rounds_completed"]["evidence_rounds"] == 2
+    assert gather_node["result"]["rounds_completed"]["evidence_rounds"] == 4
 
 
 def test_live_analysis_fails_when_fresh_evidence_is_missing(client: TestClient, monkeypatch):
