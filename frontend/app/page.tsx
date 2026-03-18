@@ -1,21 +1,21 @@
 'use client'
 
 import { useState } from 'react'
-import Image from 'next/image'
-import Link from 'next/link'
+import { useMutation } from '@tanstack/react-query'
 import { HederaInfo } from '@/components/HederaInfo'
-import { TaskForm } from '@/components/TaskForm'
+import { Sidebar } from '@/components/Sidebar'
+import { ResearchInput } from '@/components/ResearchInput'
 import { TaskStatusCard } from '@/components/TaskStatusCard'
 import { TaskResults } from '@/components/TaskResults'
-import { Tabs } from '@/components/Tabs'
 import { Transactions } from '@/components/Transactions'
 import { Marketplace } from '@/components/Marketplace'
 import { DataVault } from '@/components/DataVault'
+import { ResearchRunDetailView } from '@/components/research-runs/ResearchRunDetailView'
 import { useTaskStore } from '@/store/taskStore'
 import type { TaskStatus } from '@/store/taskStore'
 import type { LucideIcon } from 'lucide-react'
 import { Sparkles, ShieldCheck, Coins, ArrowRight, Cpu, Layers } from 'lucide-react'
-import { createTask } from '@/lib/api'
+import { createTask, createResearchRun } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 
 const statusMessages: Record<TaskStatus, string> = {
@@ -100,7 +100,16 @@ export default function Home() {
   } = useTaskStore()
 
   const [isProcessing, setIsProcessing] = useState(false)
-  const [activeTab, setActiveTab] = useState('console')
+  const [activeTab, setActiveTab] = useState('research')
+  const [activeResearchRunId, setActiveResearchRunId] = useState<string | null>(null)
+
+  const createResearchRunMutation = useMutation({
+    mutationFn: createResearchRun,
+    onSuccess: (researchRun) => {
+      reset()
+      setActiveResearchRunId(researchRun.id)
+    },
+  })
 
   const handleScrollToConsole = () => {
     const consoleSection = document.getElementById('task-console')
@@ -120,7 +129,8 @@ export default function Home() {
       setIsProcessing(true)
       setStatus('PLANNING')
       setError(null)
-      setResult(null) // Clear previous result when starting a new task
+      setResult(null)
+      setActiveResearchRunId(null)
 
       addExecutionLog({
         timestamp: new Date().toLocaleTimeString(),
@@ -287,121 +297,102 @@ export default function Home() {
           ? 'bg-emerald-400'
           : 'bg-sky-400 animate-pulse'
 
-  return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
-      <div className="relative">
-        <main className="mx-auto flex max-w-6xl flex-col gap-20 px-6 pb-24 pt-12 lg:pt-16">
-          <header className="flex flex-col gap-12">
-            <nav className="flex flex-wrap items-center justify-between gap-6">
-              <div className="flex items-center gap-4">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/10 p-2 shadow-lg shadow-sky-500/20">
-                  <Image
-                    src="/images/synaptica-logo.png"
-                    alt="Synaptica Logo"
-                    width={48}
-                    height={48}
-                    className="h-full w-full object-contain"
-                  />
-                </div>
-                <div>
-                  <p className="text-xl font-semibold text-white">Synaptica</p>
-                  <p className="text-sm text-slate-300">AI research assistant powered by specialized agents and microtransactions</p>
-                </div>
-              </div>
+  const researchContent = (
+    <>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-xs uppercase tracking-[0.4em] text-slate-400">Live research status</span>
+        <span className="flex items-center gap-2 text-sm text-slate-300">
+          <span className={`inline-flex h-2.5 w-2.5 rounded-full ${statusIndicatorClass}`} />
+          {statusMessages[status]}
+        </span>
+      </div>
+
+      <div className="space-y-6">
+        <div className="rounded-2xl border border-white/15 bg-white/95 p-1 text-slate-900 shadow-[0_30px_80px_-45px_rgba(59,130,246,0.7)]">
+          <ResearchInput
+            onSubmitStandard={handleStartTask}
+            isStandardProcessing={isProcessing}
+            standardStatus={status}
+            onSubmitDeep={async (request) => {
+              await createResearchRunMutation.mutateAsync(request)
+            }}
+            isDeepSubmitting={createResearchRunMutation.isPending}
+            deepError={createResearchRunMutation.error instanceof Error ? createResearchRunMutation.error.message : null}
+          />
+        </div>
+
+        {!['IDLE', 'FAILED', 'CANCELLED', 'COMPLETE'].includes(status) && (
+          <div className="rounded-2xl border border-white/15 bg-white/95 p-1 text-slate-900 shadow-[0_30px_80px_-45px_rgba(59,130,246,0.7)]">
+            <TaskStatusCard />
+          </div>
+        )}
+
+        {(status === 'COMPLETE' || status === 'FAILED' || status === 'CANCELLED') && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-white/15 bg-white/95 p-1 text-slate-900 shadow-[0_30px_80px_-45px_rgba(59,130,246,0.7)]">
+              <TaskResults />
+            </div>
+            <Button
+              onClick={reset}
+              variant="outline"
+              className="w-full border-slate-200 bg-white/10 text-white transition hover:bg-white/20"
+            >
+              Start new research
+            </Button>
+          </div>
+        )}
+
+        {activeResearchRunId && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs uppercase tracking-[0.4em] text-slate-400">Research run active</span>
               <Button
-                asChild
                 variant="outline"
                 className="border-white/15 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+                onClick={() => setActiveResearchRunId(null)}
               >
-                <Link href="/research-runs">Open Deep Research</Link>
+                New research run
               </Button>
-            </nav>
-
-            <div className="w-full">
-              <div id="task-console" className="relative">
-                <div className="absolute inset-0 rounded-[28px] bg-gradient-to-br from-sky-500/15 via-transparent to-purple-600/20 blur-2xl" />
-                <div className="relative overflow-hidden rounded-[28px] border border-white/20 bg-slate-900/75 p-6 shadow-[0_45px_90px_-50px_rgba(56,189,248,0.9)] backdrop-blur-xl">
-                  <Tabs
-                    activeTab={activeTab}
-                    onTabChange={setActiveTab}
-                    tabs={[
-                      {
-                        id: 'console',
-                        label: 'Research Console',
-                        content: (
-                          <>
-                            <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-                              <span className="text-xs uppercase tracking-[0.4em] text-slate-400">Live research status</span>
-                              <span className="flex items-center gap-2 text-sm text-slate-300">
-                                <span className={`inline-flex h-2.5 w-2.5 rounded-full ${statusIndicatorClass}`} />
-                                {statusMessages[status]}
-                              </span>
-                            </div>
-
-                            <div className="space-y-6">
-                              <div className="rounded-2xl border border-white/15 bg-white/95 p-1 text-slate-900 shadow-[0_30px_80px_-45px_rgba(59,130,246,0.7)]">
-                                {(status === 'IDLE' || status === 'FAILED' || status === 'CANCELLED') ? (
-                                  <TaskForm onSubmit={handleStartTask} />
-                                ) : (
-                                  <TaskStatusCard />
-                                )}
-                              </div>
-
-                              {(status === 'COMPLETE' || status === 'FAILED' || status === 'CANCELLED') && (
-                                <div className="space-y-4">
-                                  <div className="rounded-2xl border border-white/15 bg-white/95 p-1 text-slate-900 shadow-[0_30px_80px_-45px_rgba(59,130,246,0.7)]">
-                                    <TaskResults />
-                                  </div>
-                                  <Button
-                                    onClick={reset}
-                                    variant="outline"
-                                    className="w-full border-slate-200 bg-white/10 text-white transition hover:bg-white/20"
-                                  >
-                                    Start new research
-                                  </Button>
-                                </div>
-                              )}
-
-                              {description && (
-                                <div className="rounded-2xl border border-white/15 bg-white/5 p-5 text-slate-200">
-                                  <div className="text-xs uppercase tracking-[0.3em] text-slate-400">Research query</div>
-                                  <p className="mt-2 text-sm leading-relaxed text-slate-100">
-                                    {description}
-                                  </p>
-                                </div>
-                              )}
-                            </div>
-                          </>
-                        ),
-                      },
-                      {
-                        id: 'transactions',
-                        label: 'Transaction History',
-                        content: <Transactions />,
-                      },
-                      {
-                        id: 'marketplace',
-                        label: 'Agent Marketplace',
-                        content: <Marketplace />,
-                      },
-                      {
-                        id: 'data-vault',
-                        label: 'Data Vault',
-                        content: <DataVault />,
-                      },
-                    ]}
-                  />
-                </div>
-              </div>
             </div>
-          </header>
+            <ResearchRunDetailView researchRunId={activeResearchRunId} />
+          </div>
+        )}
 
-        </main>
-
-        <footer className="border-t border-white/10 py-8 text-center text-sm text-slate-400">
-          ProvidAI | Powered by Hedera, ERC-8004 reputation, and x402 settlement.
-        </footer>
+        {description && (
+          <div className="rounded-2xl border border-white/15 bg-white/5 p-5 text-slate-200">
+            <div className="text-xs uppercase tracking-[0.3em] text-slate-400">Research query</div>
+            <p className="mt-2 text-sm leading-relaxed text-slate-100">{description}</p>
+          </div>
+        )}
       </div>
+    </>
+  )
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        onNewResearch={() => {
+          reset()
+          setActiveResearchRunId(null)
+          setActiveTab('research')
+        }}
+      />
+
+      <main className="flex flex-1 flex-col overflow-y-auto">
+        <div className="mx-auto w-full max-w-5xl px-6 py-8">
+          <div className="relative">
+            <div className="absolute inset-0 rounded-[28px] bg-gradient-to-br from-sky-500/15 via-transparent to-purple-600/20 blur-2xl" />
+            <div className="relative overflow-hidden rounded-[28px] border border-white/20 bg-slate-900/75 p-6 shadow-[0_45px_90px_-50px_rgba(56,189,248,0.9)] backdrop-blur-xl">
+              {activeTab === 'research'     && researchContent}
+              {activeTab === 'transactions' && <Transactions />}
+              {activeTab === 'marketplace'  && <Marketplace />}
+              {activeTab === 'data-vault'   && <DataVault />}
+            </div>
+          </div>
+        </div>
+      </main>
     </div>
   )
 }
