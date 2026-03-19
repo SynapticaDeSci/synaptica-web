@@ -2,8 +2,12 @@
 
 import { useEffect, useState } from 'react'
 import Image from 'next/image'
-import { Database, Microscope, Plus, Receipt, Store, Zap } from 'lucide-react'
+import { useSearchParams } from 'next/navigation'
+import { ChevronUp, Database, Microscope, Plus, Receipt, Store, Zap } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { useCreditsStore } from '@/store/creditsStore'
+import { BuyCreditsModal } from './BuyCreditsModal'
+import { UserMenuPopup } from './UserMenuPopup'
 
 interface SidebarProps {
   activeTab: string
@@ -35,8 +39,31 @@ function formatDate(value: string) {
   }
 }
 
+const MAX_CREDITS = 1000
+
 export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps) {
   const [history, setHistory] = useState<HistoryItem[]>([])
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [buyModalOpen, setBuyModalOpen] = useState(false)
+
+  const { balance, fetchCredits } = useCreditsStore()
+  const searchParams = useSearchParams()
+
+  // Fetch credits on mount
+  useEffect(() => {
+    fetchCredits()
+  }, [fetchCredits])
+
+  // Re-fetch after successful Stripe redirect
+  useEffect(() => {
+    if (searchParams.get('payment') === 'success') {
+      fetchCredits()
+      // Clean the URL without a full page reload
+      const url = new URL(window.location.href)
+      url.searchParams.delete('payment')
+      window.history.replaceState({}, '', url.toString())
+    }
+  }, [searchParams, fetchCredits])
 
   useEffect(() => {
     const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
@@ -45,6 +72,8 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
       .then((data) => setHistory((Array.isArray(data) ? data : []).slice(0, 8)))
       .catch((err) => console.error('Failed to fetch research history:', err))
   }, [])
+
+  const creditsPct = Math.min(100, (balance / MAX_CREDITS) * 100)
 
   return (
     <aside className="flex h-screen w-[220px] shrink-0 flex-col border-r border-white/10 bg-slate-900">
@@ -119,38 +148,51 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
         )}
       </div>
 
-      {/* Credits */}
-      <div className="border-t border-white/10 px-3 py-3">
-        <div className="rounded-lg bg-white/5 p-3">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-yellow-400">
-            <Zap className="h-3.5 w-3.5 shrink-0" />
-            0 credits
-          </div>
-          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-            <div className="h-full w-0 rounded-full bg-sky-500" />
-          </div>
-          <p className="mt-1 text-[10px] text-slate-500">0 / 1000 credits used</p>
-          <button
-            type="button"
-            className="mt-2 w-full rounded-md bg-white/10 py-1.5 text-xs text-white transition hover:bg-white/20"
-          >
-            Buy Credits
-          </button>
+      {/* Credits indicator */}
+      <div className="border-t border-white/10 px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <Zap className="h-3.5 w-3.5 text-yellow-400" />
+          <span className="text-xs font-semibold text-yellow-400">{balance} credits</span>
+        </div>
+        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
+          <div
+            className="h-full rounded-full bg-sky-500 transition-all duration-500"
+            style={{ width: `${creditsPct}%` }}
+          />
         </div>
       </div>
 
-      {/* User profile */}
-      <div className="border-t border-white/10 px-3 py-3">
-        <div className="flex items-center gap-2">
+      {/* User profile — click to open popup */}
+      <div className="relative border-t border-white/10 px-3 py-3">
+        {menuOpen && (
+          <UserMenuPopup
+            balance={balance}
+            onClose={() => setMenuOpen(false)}
+            onBuyCredits={() => setBuyModalOpen(true)}
+          />
+        )}
+
+        <button
+          type="button"
+          onClick={() => setMenuOpen((prev) => !prev)}
+          className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left transition hover:bg-white/5"
+        >
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-500/20 text-xs font-semibold text-sky-300">
-            D
+            J
           </div>
-          <div className="min-w-0">
-            <p className="truncate text-xs font-medium text-white">Demo User</p>
-            <p className="text-[10px] text-slate-500">Research Plan</p>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-xs font-medium text-white">Jackie Tan</p>
+            <p className="text-[10px] text-slate-500">Free Trial Plan</p>
           </div>
-        </div>
+          <ChevronUp
+            className={`h-3.5 w-3.5 shrink-0 text-slate-500 transition-transform duration-200 ${
+              menuOpen ? '' : 'rotate-180'
+            }`}
+          />
+        </button>
       </div>
+
+      <BuyCreditsModal open={buyModalOpen} onOpenChange={setBuyModalOpen} />
     </aside>
   )
 }

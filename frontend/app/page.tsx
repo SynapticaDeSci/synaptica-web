@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { Suspense, useState } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { HederaInfo } from '@/components/HederaInfo'
 import { Sidebar } from '@/components/Sidebar'
@@ -13,6 +13,7 @@ import { DataVault } from '@/components/DataVault'
 import { ResearchRunDetailView } from '@/components/research-runs/ResearchRunDetailView'
 import { useTaskStore } from '@/store/taskStore'
 import type { TaskStatus } from '@/store/taskStore'
+import { useCreditsStore } from '@/store/creditsStore'
 import type { LucideIcon } from 'lucide-react'
 import { Sparkles, ShieldCheck, Coins, ArrowRight, Cpu, Layers } from 'lucide-react'
 import { createTask, createResearchRun } from '@/lib/api'
@@ -99,6 +100,7 @@ export default function Home() {
     reset,
   } = useTaskStore()
 
+  const { deductCredits } = useCreditsStore()
   const [isProcessing, setIsProcessing] = useState(false)
   const [activeTab, setActiveTab] = useState('research')
   const [activeResearchRunId, setActiveResearchRunId] = useState<string | null>(null)
@@ -151,6 +153,7 @@ export default function Home() {
       }
 
       setTaskId(response.task_id)
+      deductCredits(1)
       addExecutionLog({
         timestamp: new Date().toLocaleTimeString(),
         message: `Task created: ${response.task_id}. Orchestrator running in background...`,
@@ -370,15 +373,17 @@ export default function Home() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-950 text-slate-100">
-      <Sidebar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        onNewResearch={() => {
-          reset()
-          setActiveResearchRunId(null)
-          setActiveTab('research')
-        }}
-      />
+      <Suspense fallback={null}>
+        <Sidebar
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          onNewResearch={() => {
+            reset()
+            setActiveResearchRunId(null)
+            setActiveTab('research')
+          }}
+        />
+      </Suspense>
 
       <main className="flex flex-1 flex-col overflow-y-auto">
         <div className="mx-auto w-full max-w-5xl px-6 py-8">
