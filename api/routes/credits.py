@@ -220,6 +220,30 @@ async def stripe_webhook(
     return {"received": True}
 
 
+# ── POST /deduct ──────────────────────────────────────────────────────────────
+
+class DeductRequest(BaseModel):
+    user_id: str = DEFAULT_USER_ID
+    amount: int = 1
+
+
+class DeductResponse(BaseModel):
+    user_id: str
+    balance: int
+
+
+@router.post("/deduct", response_model=DeductResponse)
+def deduct_credits(body: DeductRequest, db: Session = Depends(get_db)) -> DeductResponse:
+    row = db.query(UserCredits).filter(UserCredits.user_id == body.user_id).one_or_none()
+    if row is None:
+        row = UserCredits(user_id=body.user_id, balance=DEFAULT_CREDITS)
+        db.add(row)
+    row.balance = max(0, row.balance - body.amount)
+    db.commit()
+    db.refresh(row)
+    return DeductResponse(user_id=row.user_id, balance=row.balance)
+
+
 # ── Hedera transfer ───────────────────────────────────────────────────────────
 
 async def _transfer_hbar(user_id: str, credits: int) -> str:

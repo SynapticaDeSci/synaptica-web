@@ -22,6 +22,26 @@ export async function GET(request: NextRequest) {
   }
 }
 
+// PATCH /api/credits  { user_id, amount }  →  POST /api/credits/deduct (FastAPI)
+export async function PATCH(request: NextRequest) {
+  try {
+    const body = await request.json()
+    const res = await fetch(`${BACKEND_URL}/api/credits/deduct`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const data = await res.json()
+    if (!res.ok) {
+      return NextResponse.json({ error: data.detail || 'Failed to deduct credits' }, { status: res.status })
+    }
+    return NextResponse.json(data)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}
+
 // POST /api/credits  { credits, user_id }  →  POST /api/credits/checkout (FastAPI)
 export async function POST(request: NextRequest) {
   try {

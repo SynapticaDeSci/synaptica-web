@@ -153,7 +153,7 @@ export default function Home() {
       }
 
       setTaskId(response.task_id)
-      deductCredits(1)
+      await deductCredits(1)
       addExecutionLog({
         timestamp: new Date().toLocaleTimeString(),
         message: `Task created: ${response.task_id}. Orchestrator running in background...`,

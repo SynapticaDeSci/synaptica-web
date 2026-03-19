@@ -5,7 +5,7 @@ interface CreditsState {
   isLoading: boolean
   error: string | null
   fetchCredits: () => Promise<void>
-  deductCredits: (amount: number) => void
+  deductCredits: (amount: number) => Promise<void>
 }
 
 export const useCreditsStore = create<CreditsState>((set) => ({
@@ -28,7 +28,18 @@ export const useCreditsStore = create<CreditsState>((set) => ({
     }
   },
 
-  deductCredits: (amount: number) => {
+  deductCredits: async (amount: number) => {
     set((state) => ({ balance: Math.max(0, state.balance - amount) }))
+    try {
+      const res = await fetch('/api/credits', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: 'default', amount }),
+      })
+      const data = await res.json()
+      if (res.ok) set({ balance: data.balance })
+    } catch {
+      // optimistic value stays; will sync on next fetchCredits
+    }
   },
 }))
