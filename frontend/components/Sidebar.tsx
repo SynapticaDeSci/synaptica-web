@@ -43,7 +43,7 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
     fetch(`${apiUrl}/api/tasks/history`)
       .then((r) => r.json())
       .then((data) => setHistory((Array.isArray(data) ? data : []).slice(0, 8)))
-      .catch(() => {})
+      .catch((err) => console.error('Failed to fetch research history:', err))
   }, [])
 
   return (
