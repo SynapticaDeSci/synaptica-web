@@ -56,6 +56,7 @@ from .routes import agents as agents_routes
 from .routes import data_agent as data_agent_routes
 from .routes import payments as payments_routes
 from .routes import research_runs as research_runs_routes
+from .routes import credits as credits_routes
 
 # Load environment variables
 load_dotenv()
@@ -662,6 +663,7 @@ app.include_router(agents_routes.router, prefix="/api/agents", tags=["agents"])
 app.include_router(data_agent_routes.router, prefix="/api/data-agent", tags=["data-agent"])
 app.include_router(payments_routes.router, prefix="/api/payments", tags=["payments"])
 app.include_router(research_runs_routes.router, prefix="/api/research-runs", tags=["research-runs"])
+app.include_router(credits_routes.router, prefix="/api/credits", tags=["credits"])
 
 
 @app.get("/")
