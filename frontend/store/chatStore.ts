@@ -5,7 +5,7 @@ export type ChatPhase = 'chatting' | 'plan_ready' | 'executing' | 'complete';
 export interface ResearchPlan {
   title: string;
   description: string;
-  budget_estimate: number;
+  budget_estimate?: number;
   plan_steps: string[];
 }
 

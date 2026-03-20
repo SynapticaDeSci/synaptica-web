@@ -8,7 +8,9 @@ import ReactMarkdown from 'react-markdown'
 import { Bot, Plus, Send, User } from 'lucide-react'
 
 import { useChatStore, type ReportContext, type ResearchPlan } from '@/store/chatStore'
+import { useCreditsStore } from '@/store/creditsStore'
 import { createResearchRun } from '@/lib/api'
+import { BuyCreditsModal } from '@/components/BuyCreditsModal'
 import { ResearchPlanCard } from './ResearchPlanCard'
 import { ResearchProgressInline } from './ResearchProgressInline'
 
@@ -27,6 +29,8 @@ export function ChatContainer() {
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState('')
+  const [showBuyCredits, setShowBuyCredits] = useState(false)
+  const fetchCredits = useCreditsStore((s) => s.fetchCredits)
 
   // Keep a ref so the transport body closure always reads the latest value
   const reportContextRef = useRef<ReportContext | null>(reportContext)
@@ -60,17 +64,24 @@ export function ChatContainer() {
   const launchMutation = useMutation({
     mutationFn: createResearchRun,
     onSuccess: (run) => {
+      // Refresh sidebar balance (backend already deducted credits)
+      fetchCredits()
       setActiveResearchRunId(run.id)
     },
-    onError: (err) => {
+    onError: (err: unknown) => {
+      // If 402 insufficient credits, open buy modal
+      const msg = err instanceof Error ? err.message : ''
+      if (msg.includes('insufficient_credits') || msg.includes('402')) {
+        setShowBuyCredits(true)
+      }
       console.error('Failed to launch research run:', err)
     },
   })
 
-  const handleApprove = (plan: ResearchPlan) => {
+  const handleApprove = (plan: ResearchPlan, creditBudget: number | null) => {
     launchMutation.mutate({
       description: plan.description,
-      budget_limit: plan.budget_estimate,
+      credit_budget: creditBudget ?? undefined,
     })
   }
 
@@ -176,6 +187,7 @@ export function ChatContainer() {
                     plan={researchPlan}
                     onApprove={handleApprove}
                     onRefine={handleRefine}
+                    onBuyCredits={() => setShowBuyCredits(true)}
                     isLaunching={launchMutation.isPending}
                     launchError={
                       launchMutation.error instanceof Error
@@ -252,6 +264,7 @@ export function ChatContainer() {
           </form>
         </div>
       )}
+      <BuyCreditsModal open={showBuyCredits} onOpenChange={setShowBuyCredits} />
     </div>
   )
 }

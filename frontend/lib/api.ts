@@ -133,6 +133,7 @@ export type ResearchRunNodeStatus =
 
 export interface CreateResearchRunRequest {
   description: string;
+  credit_budget?: number;
   budget_limit?: number;
   verification_mode?: string;
   max_node_attempts?: number;
@@ -239,6 +240,7 @@ export interface ResearchRunResponse {
   workflow_template: string;
   workflow: string;
   budget_limit?: number | null;
+  credit_budget?: number | null;
   verification_mode: string;
   research_mode: string;
   classified_mode: string;
@@ -613,7 +615,12 @@ export async function createResearchRun(
     const error = await response
       .json()
       .catch(() => ({ detail: 'Failed to create research run' }));
-    throw new Error(error.detail || error.error || 'Failed to create research run');
+    const detail = error.detail;
+    // Structured error from backend (e.g. {error: "insufficient_credits", ...})
+    if (typeof detail === 'object' && detail?.error) {
+      throw new Error(detail.error);
+    }
+    throw new Error(typeof detail === 'string' ? detail : error.error || 'Failed to create research run');
   }
 
   return response.json();

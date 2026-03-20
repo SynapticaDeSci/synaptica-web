@@ -23,6 +23,7 @@ class ResearchRunPayload(BaseModel):
     workflow_template: str
     workflow: str
     budget_limit: Optional[float] = None
+    credit_budget: Optional[int] = None
     verification_mode: str
     research_mode: str
     classified_mode: str

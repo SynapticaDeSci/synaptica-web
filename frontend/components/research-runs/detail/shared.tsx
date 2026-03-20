@@ -50,6 +50,14 @@ export function formatBudget(value?: number | null) {
   }).format(value)
 }
 
+export function formatCreditBudget(creditBudget?: number | null, budgetLimitFallback?: number | null) {
+  if (typeof creditBudget === 'number') return `${creditBudget} credits`
+  if (creditBudget === null) return 'No limit'
+  // Legacy runs: credit_budget is undefined, fall back to USD display
+  if (typeof budgetLimitFallback === 'number') return formatBudget(budgetLimitFallback)
+  return 'No limit'
+}
+
 export function stringifyValue(value: unknown) {
   if (value == null) return null
   if (typeof value === 'string') return value

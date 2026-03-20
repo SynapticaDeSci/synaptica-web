@@ -56,7 +56,8 @@ const planningTools = {
         ),
       budget_estimate: z
         .number()
-        .describe('Estimated budget in USD'),
+        .optional()
+        .describe('Suggested credit budget (optional, user can adjust)'),
       plan_steps: z
         .array(z.string())
         .describe(

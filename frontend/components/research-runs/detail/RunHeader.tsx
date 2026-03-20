@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import type { ResearchRunResponse } from '@/lib/api'
 
 import { ResearchRunStatusBadge } from '../ResearchRunStatusBadge'
-import { formatBudget, formatDateTime, TERMINAL_RUN_STATUSES } from './shared'
+import { formatBudget, formatCreditBudget, formatDateTime, TERMINAL_RUN_STATUSES } from './shared'
 
 export function RunHeader({
   researchRun,
@@ -89,8 +89,8 @@ export function RunHeader({
 
       <div className="flex flex-wrap items-center gap-2">
         <ResearchRunStatusBadge status={researchRun.status} />
-        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
-          {formatBudget(researchRun.budget_limit)}
+        <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/20 bg-amber-400/10 px-3 py-1 text-xs text-amber-200">
+          ⚡ {formatCreditBudget(researchRun.credit_budget, researchRun.budget_limit)}
         </span>
         <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
           {formatDateTime(researchRun.created_at)}

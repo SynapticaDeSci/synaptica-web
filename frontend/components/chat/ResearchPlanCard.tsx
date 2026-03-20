@@ -6,15 +6,17 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardList,
-  DollarSign,
   MessageSquare,
+  Zap,
 } from 'lucide-react'
 import type { ResearchPlan } from '@/store/chatStore'
+import { useCreditsStore } from '@/store/creditsStore'
 
 interface ResearchPlanCardProps {
   plan: ResearchPlan
-  onApprove: (plan: ResearchPlan) => void
+  onApprove: (plan: ResearchPlan, creditBudget: number | null) => void
   onRefine: () => void
+  onBuyCredits: () => void
   isLaunching: boolean
   launchError: string | null
 }
@@ -23,18 +25,20 @@ export function ResearchPlanCard({
   plan,
   onApprove,
   onRefine,
+  onBuyCredits,
   isLaunching,
   launchError,
 }: ResearchPlanCardProps) {
   const [showSettings, setShowSettings] = useState(false)
-  const [editBudget, setEditBudget] = useState(plan.budget_estimate.toString())
+  const [noLimit, setNoLimit] = useState(false)
+  const [editBudget, setEditBudget] = useState('40')
+  const balance = useCreditsStore((s) => s.balance)
+
+  const creditBudget = noLimit ? null : (parseInt(editBudget, 10) || 0)
+  const insufficientCredits = creditBudget !== null && creditBudget > balance
 
   const handleApprove = () => {
-    const budget = parseFloat(editBudget)
-    onApprove({
-      ...plan,
-      budget_estimate: isNaN(budget) ? plan.budget_estimate : budget,
-    })
+    onApprove(plan, creditBudget)
   }
 
   return (
@@ -76,11 +80,14 @@ export function ResearchPlanCard({
         </ol>
       </div>
 
-      {/* Budget badge */}
-      <div className="flex flex-wrap gap-2 border-b border-white/5 px-5 py-3">
-        <span className="inline-flex items-center gap-1.5 rounded-full bg-white/5 px-3 py-1 text-xs text-slate-300">
-          <DollarSign className="h-3 w-3 text-slate-400" />
-          ~${plan.budget_estimate}
+      {/* Credit budget badge + balance */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/5 px-5 py-3">
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-3 py-1 text-xs text-amber-200">
+          <Zap className="h-3 w-3" />
+          {noLimit ? 'No limit' : `${creditBudget} credits`}
+        </span>
+        <span className="text-xs text-slate-500">
+          You have {balance} credits
         </span>
       </div>
 
@@ -100,20 +107,48 @@ export function ResearchPlanCard({
         </button>
         {showSettings && (
           <div className="space-y-3 px-5 pb-4">
-            <div className="space-y-1">
-              <label className="text-xs font-medium text-slate-400">Budget (USD)</label>
-              <input
-                type="number"
-                value={editBudget}
-                onChange={(e) => setEditBudget(e.target.value)}
-                min="1"
-                step="1"
-                className="w-full max-w-[160px] rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-sky-400/50"
-              />
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-400">Credit budget</label>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  value={editBudget}
+                  onChange={(e) => setEditBudget(e.target.value)}
+                  min="1"
+                  step="1"
+                  disabled={noLimit}
+                  className="w-full max-w-[140px] rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none focus:border-sky-400/50 disabled:opacity-40"
+                />
+                <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={noLimit}
+                    onChange={(e) => setNoLimit(e.target.checked)}
+                    className="rounded border-white/20 bg-white/5 text-sky-500 focus:ring-sky-500/30"
+                  />
+                  No limit
+                </label>
+              </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Insufficient credits warning */}
+      {insufficientCredits && (
+        <div className="flex items-center justify-between border-b border-amber-500/20 bg-amber-500/5 px-5 py-3">
+          <span className="text-sm text-amber-300">
+            Not enough credits ({balance} available, {creditBudget} needed)
+          </span>
+          <button
+            type="button"
+            onClick={onBuyCredits}
+            className="rounded-full bg-amber-500/20 px-3 py-1 text-xs font-medium text-amber-200 transition hover:bg-amber-500/30"
+          >
+            Buy credits
+          </button>
+        </div>
+      )}
 
       {/* Error */}
       {launchError && (
@@ -127,7 +162,7 @@ export function ResearchPlanCard({
         <button
           type="button"
           onClick={handleApprove}
-          disabled={isLaunching}
+          disabled={isLaunching || insufficientCredits}
           className="flex items-center gap-2 rounded-full bg-gradient-to-r from-sky-500 via-cyan-500 to-teal-500 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-sky-500/25 transition hover:opacity-90 disabled:opacity-50"
         >
           {isLaunching ? 'Launching...' : 'Approve & Start Research'}

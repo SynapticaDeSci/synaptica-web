@@ -84,6 +84,7 @@ class ResearchRunResponse(BaseModel):
     workflow_template: str
     workflow: str
     budget_limit: Optional[float] = None
+    credit_budget: Optional[int] = None
     verification_mode: str
     research_mode: str
     classified_mode: str
@@ -303,7 +304,8 @@ class ResearchRunCreateRequest(BaseModel):
     """Payload for creating a research run."""
 
     description: str = Field(..., min_length=1)
-    budget_limit: Optional[float] = Field(default=None, ge=0)
+    credit_budget: Optional[int] = Field(default=None, ge=1, description="Credit spending cap (null = no cap)")
+    budget_limit: Optional[float] = Field(default=None, ge=0, description="Deprecated USD budget (ignored if credit_budget is set)")
     verification_mode: str = "standard"
     max_node_attempts: Optional[int] = Field(default=None, ge=1, le=5)
 
@@ -328,9 +330,43 @@ def _ensure_research_run_job(research_run_id: str) -> None:
 async def create_research_run_route(request: ResearchRunCreateRequest) -> ResearchRunResponse:
     """Create and immediately start a research run."""
 
+    import os
+    from shared.database import SessionLocal as _CreditSession
+    from shared.database import UserCredits
+
+    credit_budget = request.credit_budget
+    hbar_per_credit = float(os.environ.get("HBAR_PER_CREDIT", "0.5"))
+
+    # Reserve credits if a budget cap is set
+    if credit_budget is not None:
+        db = _CreditSession()
+        try:
+            row = db.query(UserCredits).filter(UserCredits.user_id == "default").one_or_none()
+            balance = row.balance if row else 0
+            if balance < credit_budget:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail={
+                        "error": "insufficient_credits",
+                        "required": credit_budget,
+                        "balance": balance,
+                    },
+                )
+            if row is None:
+                row = UserCredits(user_id="default", balance=0)
+                db.add(row)
+            row.balance -= credit_budget
+            db.commit()
+        finally:
+            db.close()
+
+    # Derive HBAR budget_limit from credit_budget for pipeline compat
+    derived_budget = credit_budget * hbar_per_credit if credit_budget is not None else request.budget_limit
+
     research_run_id = create_research_run(
         description=request.description,
-        budget_limit=request.budget_limit,
+        budget_limit=derived_budget,
+        credit_budget=credit_budget,
         verification_mode=request.verification_mode,
         max_node_attempts=request.max_node_attempts,
     )

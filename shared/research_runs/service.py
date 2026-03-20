@@ -632,6 +632,7 @@ def create_research_run(
     *,
     description: str,
     budget_limit: Optional[float],
+    credit_budget: Optional[int] = None,
     verification_mode: str,
     max_node_attempts: Optional[int] = None,
 ) -> str:
@@ -676,6 +677,7 @@ def create_research_run(
                     "last_attempt_id": None,
                     "blackboard_keys": [],
                 },
+                "credit_budget": credit_budget,
                 "trace_summary": _trace_summary(),
                 PHASE2_GRAPH_SCHEMA_META_KEY: PHASE2_GRAPH_SCHEMA_VERSION,
                 "control_state": RUN_CONTROL_ACTIVE,
@@ -3109,6 +3111,7 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         workflow_template=record.workflow_template,
         workflow=meta.get("workflow", SUPPORTED_RESEARCH_RUN_WORKFLOW),
         budget_limit=record.budget_limit,
+        credit_budget=meta.get("credit_budget"),
         verification_mode=record.verification_mode,
         research_mode=meta.get("research_mode", ResearchMode.AUTO.value),
         classified_mode=meta.get("classified_mode", ResearchMode.LITERATURE.value),
