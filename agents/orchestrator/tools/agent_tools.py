@@ -1650,6 +1650,41 @@ async def execute_microtask(
             "agent_used": selection["agent_id"],
         }
 
+    policy_max_attempts = int(
+        (execution_parameters or {}).get("max_node_attempts") or 1
+    )
+    if policy_max_attempts > 1:
+        if payment_id:
+            await reject_and_refund(
+                payment_id,
+                verification.get("feedback", "Verification failed, auto-retrying"),
+                action_context=_build_payment_action_context(selected_context, PaymentAction.REFUND),
+            )
+        await update_todo_item(task_id, todo_id, "failed", todo_list)
+        persist_verification_state(
+            task_id,
+            pending=False,
+            verification_data=verification,
+            verification_decision={
+                "approved": False,
+                "reason": verification.get("feedback", "Auto-retry on failed verification"),
+                "retry_recommended": True,
+            },
+        )
+        persist_handoff_context(task_id, None)
+        return {
+            "success": False,
+            "task_id": task_id,
+            "todo_id": todo_id,
+            "error": verification.get("feedback", "Auto-retry on failed verification"),
+            "todo_status": "failed",
+            "verification_score": overall_score,
+            "selected_agent": selection,
+            "verification": verification,
+            "retry_recommended": True,
+            "agent_used": selection["agent_id"],
+        }
+
     await _request_human_verification(
         task_id=task_id,
         todo_id=todo_id,

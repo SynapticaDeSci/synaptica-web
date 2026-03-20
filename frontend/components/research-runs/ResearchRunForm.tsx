@@ -18,7 +18,7 @@ interface ResearchRunFormProps {
 const fixedSteps = [
   {
     title: 'Query planning',
-    description: 'Classifies the brief, sets freshness rules, and expands the investigation plan.',
+    description: 'Auto-classifies the brief, sets freshness rules, and expands the investigation plan.',
     icon: Sparkles,
   },
   {
@@ -28,7 +28,7 @@ const fixedSteps = [
   },
   {
     title: 'Source curation',
-    description: 'Deduplicates evidence, checks freshness, and enforces source thresholds before synthesis.',
+    description: 'Deduplicates evidence, checks freshness, and assesses source quality before synthesis.',
     icon: ShieldCheck,
   },
   {
@@ -45,15 +45,6 @@ export function ResearchRunForm({
 }: ResearchRunFormProps) {
   const [description, setDescription] = useState('')
   const [budgetLimit, setBudgetLimit] = useState('25')
-  const [verificationMode, setVerificationMode] = useState('standard')
-  const [researchMode, setResearchMode] = useState<'auto' | 'literature' | 'live_analysis' | 'hybrid'>('auto')
-  const [depthMode, setDepthMode] = useState<'standard' | 'deep'>('standard')
-  const [strictMode, setStrictMode] = useState(false)
-  const [riskLevel, setRiskLevel] = useState<'low' | 'medium' | 'high'>('medium')
-  const [quorumPolicy, setQuorumPolicy] = useState<
-    'single_verifier' | 'two_of_three' | 'three_of_five' | 'unanimous'
-  >('single_verifier')
-  const [maxNodeAttempts, setMaxNodeAttempts] = useState('')
   const [validationError, setValidationError] = useState<string | null>(null)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -73,27 +64,11 @@ export function ResearchRunForm({
       setValidationError('Budget limit must be a positive number when provided.')
       return
     }
-    const trimmedAttempts = maxNodeAttempts.trim()
-    const parsedAttempts = trimmedAttempts ? Number.parseInt(trimmedAttempts, 10) : undefined
-    if (
-      trimmedAttempts &&
-      (parsedAttempts === undefined || !Number.isInteger(parsedAttempts) || parsedAttempts < 1 || parsedAttempts > 5)
-    ) {
-      setValidationError('Max node attempts must be a whole number between 1 and 5.')
-      return
-    }
 
     setValidationError(null)
     await onSubmit({
       description: description.trim(),
       budget_limit: parsedBudget,
-      verification_mode: verificationMode,
-      research_mode: researchMode,
-      depth_mode: depthMode,
-      strict_mode: strictMode,
-      risk_level: riskLevel,
-      quorum_policy: strictMode ? quorumPolicy : undefined,
-      max_node_attempts: parsedAttempts,
     })
   }
 
@@ -105,9 +80,9 @@ export function ResearchRunForm({
             Deep research run
           </span>
           <div className="space-y-2">
-            <CardTitle className="text-3xl text-slate-950">Launch a freshness-aware research run</CardTitle>
+            <CardTitle className="text-3xl text-slate-950">Launch a research run</CardTitle>
             <CardDescription className="text-base leading-relaxed text-slate-500">
-              This beta flow plans the run dynamically, gathers fresher evidence, and adds critique/revision rounds before the final answer.
+              Describe your research question. The platform will automatically determine the best approach, gather evidence, and produce a citation-backed answer.
             </CardDescription>
           </div>
         </CardHeader>
@@ -132,7 +107,7 @@ export function ResearchRunForm({
               </p>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-3">
                 <label htmlFor="research-run-budget" className="text-sm font-medium text-slate-700">
                   Budget limit (USD)
@@ -148,127 +123,6 @@ export function ResearchRunForm({
                   disabled={isSubmitting}
                 />
               </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-verification" className="text-sm font-medium text-slate-700">
-                  Verification mode
-                </label>
-                <select
-                  id="research-run-verification"
-                  value={verificationMode}
-                  onChange={(event) => setVerificationMode(event.target.value)}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                >
-                  <option value="standard">Standard</option>
-                  <option value="enhanced">Enhanced</option>
-                </select>
-              </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-mode" className="text-sm font-medium text-slate-700">
-                  Research mode
-                </label>
-                <select
-                  id="research-run-mode"
-                  value={researchMode}
-                  onChange={(event) => setResearchMode(event.target.value as typeof researchMode)}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                >
-                  <option value="auto">Auto-detect</option>
-                  <option value="literature">Literature</option>
-                  <option value="live_analysis">Live analysis</option>
-                  <option value="hybrid">Hybrid</option>
-                </select>
-              </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-depth" className="text-sm font-medium text-slate-700">
-                  Depth mode
-                </label>
-                <select
-                  id="research-run-depth"
-                  value={depthMode}
-                  onChange={(event) => setDepthMode(event.target.value as typeof depthMode)}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                >
-                  <option value="standard">Standard</option>
-                  <option value="deep">Deep</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <div className="space-y-3">
-                <label htmlFor="research-run-strict-mode" className="text-sm font-medium text-slate-700">
-                  Strict review
-                </label>
-                <select
-                  id="research-run-strict-mode"
-                  value={strictMode ? 'strict' : 'standard'}
-                  onChange={(event) => setStrictMode(event.target.value === 'strict')}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                >
-                  <option value="standard">Standard</option>
-                  <option value="strict">Strict</option>
-                </select>
-              </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-risk" className="text-sm font-medium text-slate-700">
-                  Risk level
-                </label>
-                <select
-                  id="research-run-risk"
-                  value={riskLevel}
-                  onChange={(event) => setRiskLevel(event.target.value as typeof riskLevel)}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-              </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-quorum" className="text-sm font-medium text-slate-700">
-                  Quorum policy
-                </label>
-                <select
-                  id="research-run-quorum"
-                  value={quorumPolicy}
-                  onChange={(event) => setQuorumPolicy(event.target.value as typeof quorumPolicy)}
-                  className="flex h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 shadow-inner outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-300/40 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={isSubmitting || !strictMode}
-                >
-                  <option value="single_verifier">Single verifier</option>
-                  <option value="two_of_three">Two of three</option>
-                  <option value="three_of_five">Three of five</option>
-                  <option value="unanimous">Unanimous</option>
-                </select>
-              </div>
-
-              <div className="space-y-3">
-                <label htmlFor="research-run-max-attempts" className="text-sm font-medium text-slate-700">
-                  Max node attempts
-                </label>
-                <Input
-                  id="research-run-max-attempts"
-                  type="number"
-                  value={maxNodeAttempts}
-                  onChange={(event) => setMaxNodeAttempts(event.target.value)}
-                  min="1"
-                  max="5"
-                  step="1"
-                  placeholder={strictMode ? '2' : '1'}
-                  className="rounded-2xl border-slate-200 px-4 py-3 text-slate-700 shadow-inner focus:border-sky-400 focus:ring-sky-300/40"
-                  disabled={isSubmitting}
-                />
-              </div>
             </div>
 
             {(validationError || error) && (
@@ -279,7 +133,7 @@ export function ResearchRunForm({
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5">
               <p className="max-w-xl text-sm text-slate-500">
-                After submission, Synaptica will classify the query, start the run immediately, and redirect you to a live detail page with node-level polling, graph/report-pack artifacts, and traceable verifier or swarm decisions.
+                Synaptica will auto-detect the best research approach, gather evidence, and produce a citation-backed answer.
               </p>
               <Button
                 type="submit"
@@ -297,11 +151,11 @@ export function ResearchRunForm({
       <Card className="rounded-[28px] border border-white/15 bg-slate-900/70 text-slate-100 shadow-[0_40px_100px_-60px_rgba(16,185,129,0.5)] backdrop-blur-xl">
         <CardHeader className="space-y-3">
           <span className="inline-flex w-fit items-center rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.35em] text-emerald-200">
-            Phase 1C backbone
+            How it works
           </span>
-          <CardTitle className="text-2xl text-white">What runs today</CardTitle>
+          <CardTitle className="text-2xl text-white">Automated research pipeline</CardTitle>
           <CardDescription className="text-slate-300">
-            The run still persists as a graph-backed workflow, but it now adds freshness-aware evidence gathering and a bounded critique/revision loop.
+            Your query runs through a graph-backed workflow with freshness-aware evidence gathering and a bounded critique/revision loop.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

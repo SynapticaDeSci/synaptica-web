@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -100,6 +100,8 @@ class ResearchRunResponse(BaseModel):
     completed_at: Optional[str] = None
     result: Optional[Any] = None
     error: Optional[str] = None
+    quality_tier: Optional[str] = None
+    quality_warnings: List[str] = Field(default_factory=list)
     nodes: List[ResearchRunNodeResponse]
     edges: List[ResearchRunEdgeResponse]
 
@@ -118,6 +120,8 @@ class ResearchRunEvidenceResponse(BaseModel):
     source_summary: Dict[str, Any] = Field(default_factory=dict)
     freshness_summary: Dict[str, Any] = Field(default_factory=dict)
     search_lanes_used: List[str] = Field(default_factory=list)
+    quality_tier: Optional[str] = None
+    quality_warnings: List[str] = Field(default_factory=list)
 
 
 class ResearchRunReportResponse(BaseModel):
@@ -301,13 +305,6 @@ class ResearchRunCreateRequest(BaseModel):
     description: str = Field(..., min_length=1)
     budget_limit: Optional[float] = Field(default=None, ge=0)
     verification_mode: str = "standard"
-    research_mode: Literal["auto", "literature", "live_analysis", "hybrid"] = "auto"
-    depth_mode: Literal["standard", "deep"] = "standard"
-    strict_mode: bool = False
-    risk_level: Literal["low", "medium", "high"] = "medium"
-    quorum_policy: Optional[
-        Literal["single_verifier", "two_of_three", "three_of_five", "unanimous"]
-    ] = None
     max_node_attempts: Optional[int] = Field(default=None, ge=1, le=5)
 
 
@@ -335,11 +332,6 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
         description=request.description,
         budget_limit=request.budget_limit,
         verification_mode=request.verification_mode,
-        research_mode=request.research_mode,
-        depth_mode=request.depth_mode,
-        strict_mode=request.strict_mode,
-        risk_level=request.risk_level,
-        quorum_policy=request.quorum_policy,
         max_node_attempts=request.max_node_attempts,
     )
     _ensure_research_run_job(research_run_id)
@@ -351,6 +343,44 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
             detail="Research run was created but could not be loaded",
         )
     return ResearchRunResponse.model_validate(payload)
+
+
+class ResearchRunHistoryItem(BaseModel):
+    """Lightweight research-run summary for sidebar history."""
+
+    id: str
+    title: str
+    status: str
+    created_at: str
+
+
+@router.get("/history", response_model=List[ResearchRunHistoryItem])
+async def get_research_run_history(limit: int = 20) -> List[ResearchRunHistoryItem]:
+    """Return recent research runs for the sidebar history list."""
+
+    from shared.database import SessionLocal
+    from shared.database.models import ResearchRun
+
+    session = SessionLocal()
+    try:
+        capped_limit = max(1, min(limit, 100))
+        runs = (
+            session.query(ResearchRun)
+            .order_by(ResearchRun.created_at.desc())
+            .limit(capped_limit)
+            .all()
+        )
+        return [
+            ResearchRunHistoryItem(
+                id=run.id,
+                title=run.title,
+                status=run.status.value if hasattr(run.status, "value") else str(run.status),
+                created_at=run.created_at.isoformat() if run.created_at else "",
+            )
+            for run in runs
+        ]
+    finally:
+        session.close()
 
 
 @router.get("/{research_run_id}", response_model=ResearchRunResponse)

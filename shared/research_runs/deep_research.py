@@ -657,6 +657,30 @@ def validate_source_requirements(
     }
 
 
+def assess_source_quality_tier(
+    sources: Iterable[Dict[str, Any]],
+    *,
+    requirements: SourceRequirements,
+) -> Dict[str, Any]:
+    """Assess source quality as green/yellow/red tier. Never hard-fails."""
+    validation = validate_source_requirements(sources, requirements=requirements)
+    summary = validation["summary"]
+    if validation["passed"]:
+        return {"tier": "green", "warnings": [], "summary": summary}
+    if summary["total_sources"] >= 5:
+        return {"tier": "yellow", "warnings": validation["issues"], "summary": summary}
+    if summary["total_sources"] >= 1:
+        warnings = validation["issues"] + [
+            "Results may be significantly limited due to sparse evidence."
+        ]
+        return {"tier": "red", "warnings": warnings, "summary": summary}
+    return {
+        "tier": "red",
+        "warnings": ["No sources found."],
+        "summary": summary,
+    }
+
+
 async def search_web(
     *,
     query: str,

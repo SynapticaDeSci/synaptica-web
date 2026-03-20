@@ -131,24 +131,10 @@ export type ResearchRunNodeStatus =
   | 'blocked'
   | 'cancelled';
 
-export type ResearchMode = 'auto' | 'literature' | 'live_analysis' | 'hybrid';
-export type DepthMode = 'standard' | 'deep';
-export type ResearchRunRiskLevel = 'low' | 'medium' | 'high';
-export type ResearchRunQuorumPolicy =
-  | 'single_verifier'
-  | 'two_of_three'
-  | 'three_of_five'
-  | 'unanimous';
-
 export interface CreateResearchRunRequest {
   description: string;
   budget_limit?: number;
   verification_mode?: string;
-  research_mode?: ResearchMode;
-  depth_mode?: DepthMode;
-  strict_mode?: boolean;
-  risk_level?: ResearchRunRiskLevel;
-  quorum_policy?: ResearchRunQuorumPolicy;
   max_node_attempts?: number;
 }
 
@@ -230,8 +216,8 @@ export interface ResearchRunEdgeResponse {
 
 export interface ResearchRunPolicy {
   strict_mode: boolean;
-  risk_level: ResearchRunRiskLevel;
-  quorum_policy: ResearchRunQuorumPolicy;
+  risk_level: string;
+  quorum_policy: string;
   max_node_attempts: number;
   reroute_on_failure: boolean;
   max_swarm_rounds: number;
@@ -254,9 +240,9 @@ export interface ResearchRunResponse {
   workflow: string;
   budget_limit?: number | null;
   verification_mode: string;
-  research_mode: ResearchMode;
-  classified_mode: Exclude<ResearchMode, 'auto'>;
-  depth_mode: DepthMode;
+  research_mode: string;
+  classified_mode: string;
+  depth_mode: string;
   freshness_required: boolean;
   policy: ResearchRunPolicy;
   trace_summary: ResearchRunTraceSummary;
@@ -280,6 +266,8 @@ export interface ResearchRunResponse {
   completed_at?: string | null;
   result?: any;
   error?: string | null;
+  quality_tier?: string | null;
+  quality_warnings?: string[];
   nodes: ResearchRunNodeResponse[];
   edges: ResearchRunEdgeResponse[];
 }
@@ -296,6 +284,8 @@ export interface ResearchRunEvidenceResponse {
   source_summary: Record<string, any>;
   freshness_summary: Record<string, any>;
   search_lanes_used: string[];
+  quality_tier?: string | null;
+  quality_warnings?: string[];
 }
 
 export interface ResearchRunReportResponse {

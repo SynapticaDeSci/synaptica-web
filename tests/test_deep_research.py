@@ -1,6 +1,7 @@
 import pytest
 
 from shared.research_runs.deep_research import (
+    assess_source_quality_tier,
     assign_citation_ids,
     build_source_summary,
     clean_source_snippet,
@@ -242,3 +243,51 @@ async def test_enrich_source_cards_skips_non_html_responses(monkeypatch):
 
     assert enriched[0]["publisher"] == "Unknown"
     assert enriched[0].get("published_at") is None
+
+
+def _make_sources(count: int, source_type: str = "news", fresh: bool = False) -> list:
+    from datetime import datetime, timezone, timedelta
+    published = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat() if fresh else "2020-01-01T00:00:00+00:00"
+    return [
+        {
+            "title": f"Source {i}",
+            "url": f"https://example.com/{i}",
+            "publisher": f"Publisher {i}",
+            "published_at": published,
+            "source_type": source_type,
+            "snippet": f"Content for source {i}",
+            "quality_flags": [],
+        }
+        for i in range(count)
+    ]
+
+
+def test_assess_source_quality_tier_green():
+    requirements = SourceRequirements(total_sources=5, min_academic_or_primary=2)
+    sources = _make_sources(3, source_type="academic") + _make_sources(3, source_type="news")
+    result = assess_source_quality_tier(sources, requirements=requirements)
+    assert result["tier"] == "green"
+    assert result["warnings"] == []
+
+
+def test_assess_source_quality_tier_yellow():
+    requirements = SourceRequirements(total_sources=15, min_academic_or_primary=5)
+    sources = _make_sources(6, source_type="news")
+    result = assess_source_quality_tier(sources, requirements=requirements)
+    assert result["tier"] == "yellow"
+    assert len(result["warnings"]) > 0
+
+
+def test_assess_source_quality_tier_red():
+    requirements = SourceRequirements(total_sources=15, min_academic_or_primary=5)
+    sources = _make_sources(2, source_type="news")
+    result = assess_source_quality_tier(sources, requirements=requirements)
+    assert result["tier"] == "red"
+    assert any("limited" in w.lower() for w in result["warnings"])
+
+
+def test_assess_source_quality_tier_red_no_sources():
+    requirements = SourceRequirements(total_sources=10)
+    result = assess_source_quality_tier([], requirements=requirements)
+    assert result["tier"] == "red"
+    assert any("no sources" in w.lower() for w in result["warnings"])

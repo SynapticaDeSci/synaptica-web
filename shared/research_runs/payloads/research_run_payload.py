@@ -39,5 +39,7 @@ class ResearchRunPayload(BaseModel):
     completed_at: Optional[str] = None
     result: Any = None
     error: Optional[str] = None
+    quality_tier: Optional[str] = None
+    quality_warnings: list[str] = Field(default_factory=list)
     nodes: list[ResearchRunNodePayload] = Field(default_factory=list)
     edges: list[ResearchRunEdgePayload] = Field(default_factory=list)

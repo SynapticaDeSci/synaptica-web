@@ -193,43 +193,30 @@ def _normalize_quorum_policy(
 
 def _build_run_policy(
     *,
-    strict_mode: bool = False,
-    risk_level: Any = DEFAULT_RISK_LEVEL,
-    quorum_policy: Any = None,
     max_node_attempts: Any = None,
-    depth_mode: str = DepthMode.STANDARD.value,
 ) -> Dict[str, Any]:
-    normalized_risk = _normalize_risk_level(risk_level)
-    normalized_quorum = _normalize_quorum_policy(
-        quorum_policy,
-        strict_mode=bool(strict_mode),
-        risk_level=normalized_risk,
-    )
     if max_node_attempts in {None, ""}:
-        attempts = STRICT_DEFAULT_MAX_NODE_ATTEMPTS if strict_mode else DEFAULT_MAX_NODE_ATTEMPTS
+        attempts = DEFAULT_MAX_NODE_ATTEMPTS
     else:
         attempts = max(1, min(int(max_node_attempts), 5))
 
-    max_swarm_rounds = 2 if str(depth_mode) == DepthMode.DEEP.value else 1
     return {
-        "strict_mode": bool(strict_mode),
-        "risk_level": normalized_risk,
-        "quorum_policy": normalized_quorum,
+        "strict_mode": False,
+        "risk_level": DEFAULT_RISK_LEVEL,
+        "quorum_policy": _normalize_quorum_policy(None, strict_mode=False, risk_level=DEFAULT_RISK_LEVEL),
         "max_node_attempts": attempts,
         "reroute_on_failure": attempts > 1,
-        "max_swarm_rounds": max_swarm_rounds,
-        "escalate_on_dissent": bool(strict_mode),
+        "max_swarm_rounds": 2,
+        "escalate_on_dissent": False,
     }
 
 
 def _get_run_policy(meta: Dict[str, Any]) -> Dict[str, Any]:
     stored = dict(meta.get("policy") or {})
+    if stored:
+        return stored
     return _build_run_policy(
-        strict_mode=bool(stored.get("strict_mode", False)),
-        risk_level=stored.get("risk_level", meta.get("risk_level", DEFAULT_RISK_LEVEL)),
-        quorum_policy=stored.get("quorum_policy", meta.get("quorum_policy")),
-        max_node_attempts=stored.get("max_node_attempts", meta.get("max_node_attempts")),
-        depth_mode=str(meta.get("depth_mode", DepthMode.STANDARD.value)),
+        max_node_attempts=meta.get("max_node_attempts"),
     )
 
 
@@ -646,27 +633,18 @@ def create_research_run(
     description: str,
     budget_limit: Optional[float],
     verification_mode: str,
-    research_mode: str = ResearchMode.AUTO.value,
-    depth_mode: str = DepthMode.STANDARD.value,
-    strict_mode: bool = False,
-    risk_level: str = DEFAULT_RISK_LEVEL,
-    quorum_policy: Optional[str] = None,
     max_node_attempts: Optional[int] = None,
 ) -> str:
     """Persist a research run plus its template graph."""
 
     plan = build_research_run_plan(
         description,
-        research_mode=ResearchMode(research_mode),
-        depth_mode=DepthMode(depth_mode),
+        research_mode=ResearchMode.AUTO,
+        depth_mode=DepthMode.DEEP,
     )
     research_run_id = str(uuid.uuid4())
     policy = _build_run_policy(
-        strict_mode=strict_mode,
-        risk_level=risk_level,
-        quorum_policy=quorum_policy,
         max_node_attempts=max_node_attempts,
-        depth_mode=depth_mode,
     )
 
     db = SessionLocal()
@@ -947,6 +925,8 @@ def get_research_run_evidence_payload(research_run_id: str) -> Optional[Dict[str
         source_summary=(curated_sources or {}).get("source_summary") or {},
         freshness_summary=(curated_sources or {}).get("freshness_summary") or {},
         search_lanes_used=(evidence or {}).get("search_lanes_used") or [],
+        quality_tier=(curated_sources or {}).get("quality_tier"),
+        quality_warnings=list((curated_sources or {}).get("quality_warnings") or []),
     )
     return evidence_payload.model_dump(mode="json")
 
@@ -3097,6 +3077,7 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
     control_state = _get_control_state(meta)
     nodes_payload_dicts = [item.model_dump(mode="json") for item in nodes_payload]
     evidence_result = _get_node_result_from_payload({"nodes": nodes_payload_dicts}, "gather_evidence")
+    curate_result = _get_node_result_from_payload({"nodes": nodes_payload_dicts}, "curate_sources")
     critique_result = _get_node_result_from_payload(
         {"nodes": nodes_payload_dicts}, "critique_and_fact_check"
     )
@@ -3149,6 +3130,8 @@ def get_research_run_payload(research_run_id: str) -> Optional[Dict[str, Any]]:
         completed_at=record.completed_at.isoformat() if record.completed_at else None,
         result=record.result,
         error=record.error,
+        quality_tier=(curate_result or {}).get("quality_tier"),
+        quality_warnings=list((curate_result or {}).get("quality_warnings") or []),
         nodes=nodes_payload,
         edges=[
             ResearchRunEdgePayload(
