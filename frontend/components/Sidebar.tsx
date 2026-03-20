@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Image from 'next/image'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { ChevronUp, Database, Microscope, Plus, Receipt, Store, Zap } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useCreditsStore } from '@/store/creditsStore'
@@ -23,7 +23,9 @@ const NAV_ITEMS: Array<{ id: string; label: string; icon: LucideIcon }> = [
 ]
 
 interface HistoryItem {
-  research_query: string
+  id: string
+  title: string
+  status: string
   created_at: string
 }
 
@@ -46,6 +48,7 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
   const [menuOpen, setMenuOpen] = useState(false)
   const [buyModalOpen, setBuyModalOpen] = useState(false)
 
+  const router = useRouter()
   const { balance, fetchCredits } = useCreditsStore()
   const searchParams = useSearchParams()
 
@@ -65,13 +68,20 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
     }
   }, [searchParams, fetchCredits])
 
-  useEffect(() => {
+  const fetchHistory = useCallback(() => {
     const apiUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
-    fetch(`${apiUrl}/api/tasks/history`)
+    fetch(`${apiUrl}/api/research-runs/history`)
       .then((r) => r.json())
-      .then((data) => setHistory((Array.isArray(data) ? data : []).slice(0, 8)))
+      .then((data) => setHistory((Array.isArray(data) ? data : []).slice(0, 20)))
       .catch((err) => console.error('Failed to fetch research history:', err))
   }, [])
+
+  // Fetch on mount + poll every 10s to pick up new runs
+  useEffect(() => {
+    fetchHistory()
+    const id = setInterval(fetchHistory, 10_000)
+    return () => clearInterval(id)
+  }, [fetchHistory])
 
   const creditsPct = Math.min(100, (balance / MAX_CREDITS) * 100)
 
@@ -134,17 +144,29 @@ export function Sidebar({ activeTab, onTabChange, onNewResearch }: SidebarProps)
         {history.length === 0 ? (
           <p className="text-[11px] text-slate-600">No research yet</p>
         ) : (
-          history.map((item, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => onTabChange('research')}
-              className="mb-1 w-full rounded-lg px-2 py-2 text-left transition hover:bg-white/5"
-            >
-              <p className="truncate text-[11px] text-slate-300">{stripQueryPrefix(item.research_query)}</p>
-              <p className="mt-0.5 text-[10px] text-slate-600">{formatDate(item.created_at)}</p>
-            </button>
-          ))
+          history.map((item) => {
+            const statusColor =
+              item.status === 'COMPLETED' ? 'bg-emerald-400'
+              : item.status === 'FAILED' ? 'bg-red-400'
+              : item.status === 'CANCELLED' ? 'bg-rose-400'
+              : 'bg-sky-400 animate-pulse'
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => router.push(`/research-runs/${item.id}`)}
+                className="mb-1 w-full rounded-lg px-2 py-2 text-left transition hover:bg-white/5"
+              >
+                <div className="flex items-start gap-2">
+                  <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${statusColor}`} />
+                  <div className="min-w-0">
+                    <p className="truncate text-[11px] text-slate-300">{stripQueryPrefix(item.title)}</p>
+                    <p className="mt-0.5 text-[10px] text-slate-600">{formatDate(item.created_at)}</p>
+                  </div>
+                </div>
+              </button>
+            )
+          })
         )}
       </div>
 

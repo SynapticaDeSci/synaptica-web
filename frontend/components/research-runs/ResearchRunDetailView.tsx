@@ -1681,9 +1681,30 @@ export function ResearchRunDetailView({ researchRunId }: { researchRunId: string
                 </div>
               )}
 
-              {researchRun.error?.includes('insufficient_fresh_evidence') && (
+              {researchRun.quality_tier === 'yellow' && (
                 <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
-                  The run stopped because it could not collect enough fresh evidence for a time-sensitive query.
+                  <p className="font-semibold">Evidence quality: Moderate</p>
+                  {researchRun.quality_warnings && researchRun.quality_warnings.length > 0 && (
+                    <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-amber-200/80">
+                      {researchRun.quality_warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {researchRun.quality_tier === 'red' && (
+                <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
+                  <p className="font-semibold">Limited evidence available</p>
+                  <p className="mt-1 text-red-200/80">Results should be interpreted with caution.</p>
+                  {researchRun.quality_warnings && researchRun.quality_warnings.length > 0 && (
+                    <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-red-200/80">
+                      {researchRun.quality_warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 

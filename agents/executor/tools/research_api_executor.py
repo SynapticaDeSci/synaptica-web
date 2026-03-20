@@ -127,7 +127,7 @@ async def _post_agent_request(endpoint: str, payload: Dict[str, Any]) -> Dict[st
     """Send a POST request to the agent endpoint and return parsed JSON data."""
     logger.debug("[_post_agent_request] POST %s", endpoint)
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(endpoint, json=payload)
         response.raise_for_status()
 
@@ -407,7 +407,7 @@ async def execute_research_agent(
         return {
             "success": False,
             "agent_id": agent_domain,
-            "error": "Agent execution timed out (120s limit). The task may be too complex or the endpoint is overloaded.",
+            "error": "Agent execution timed out (300s limit). The task may be too complex or the endpoint is overloaded.",
         }
 
     except httpx.HTTPError as exc:

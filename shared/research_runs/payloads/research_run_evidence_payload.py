@@ -23,3 +23,5 @@ class ResearchRunEvidencePayload(BaseModel):
     source_summary: dict[str, Any] = Field(default_factory=dict)
     freshness_summary: dict[str, Any] = Field(default_factory=dict)
     search_lanes_used: list[Any] = Field(default_factory=list)
+    quality_tier: str | None = None
+    quality_warnings: list[str] = Field(default_factory=list)

@@ -28,6 +28,7 @@ from .tools import (
 from agents.research.tools.tavily_search import tavily_search, tavily_research_search
 from shared.research.validators import validate_literature_corpus
 from shared.research_runs.deep_research import (
+    assess_source_quality_tier,
     assign_citation_ids,
     build_citation_cards,
     build_source_summary,
@@ -642,28 +643,9 @@ class LiteratureMinerAgent(BaseResearchAgent):
             "issues": validation["issues"],
         }
 
-        if classified_mode in {"live_analysis", "hybrid"} and not scenario_requested and not validation["passed"]:
-            self._update_reputation(success=False, quality_score=0.0)
-            return {
-                "success": False,
-                "agent_id": self.agent_id,
-                "error": (
-                    "insufficient_fresh_evidence"
-                    if classified_mode == "live_analysis"
-                    else "insufficient_curated_evidence"
-                ),
-                "details": {
-                    "issues": validation["issues"],
-                    "source_summary": source_summary,
-                    "freshness_summary": freshness_summary,
-                },
-                "metadata": {
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "model": self.model,
-                },
-            }
-
-        self._update_reputation(success=True, quality_score=0.88)
+        quality = assess_source_quality_tier(curated_sources, requirements=requirements)
+        rep_score = {"green": 0.88, "yellow": 0.6, "red": 0.3}.get(quality["tier"], 0.5)
+        self._update_reputation(success=True, quality_score=rep_score)
         return {
             "success": True,
             "agent_id": self.agent_id,
@@ -680,6 +662,8 @@ class LiteratureMinerAgent(BaseResearchAgent):
                     gathered.get("rounds_completed")
                     or {"evidence_rounds": 0, "critique_rounds": 0}
                 ),
+                "quality_tier": quality["tier"],
+                "quality_warnings": quality["warnings"],
             },
             "metadata": {
                 "timestamp": datetime.utcnow().isoformat(),

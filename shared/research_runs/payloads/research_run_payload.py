@@ -23,6 +23,7 @@ class ResearchRunPayload(BaseModel):
     workflow_template: str
     workflow: str
     budget_limit: Optional[float] = None
+    credit_budget: Optional[int] = None
     verification_mode: str
     research_mode: str
     classified_mode: str
@@ -39,5 +40,7 @@ class ResearchRunPayload(BaseModel):
     completed_at: Optional[str] = None
     result: Any = None
     error: Optional[str] = None
+    quality_tier: Optional[str] = None
+    quality_warnings: list[str] = Field(default_factory=list)
     nodes: list[ResearchRunNodePayload] = Field(default_factory=list)
     edges: list[ResearchRunEdgePayload] = Field(default_factory=list)
