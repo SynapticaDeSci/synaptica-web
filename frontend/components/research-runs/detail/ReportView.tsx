@@ -18,8 +18,8 @@ import {
   formatMode,
   getCitationId,
   citationSourceKey,
-  markdownComponents,
-  QualitySummaryPanel,
+  createMarkdownComponents,
+  QualityBanner,
 } from './shared'
 
 export function ReportView({
@@ -49,53 +49,28 @@ export function ReportView({
 }) {
   return (
     <div className="space-y-4">
-      {qualityTier === 'yellow' && (
-        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
-          <p className="font-semibold">Evidence quality: Moderate</p>
-          {qualityWarnings.length > 0 && (
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-amber-200/80">
-              {qualityWarnings.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
-      {qualityTier === 'red' && (
-        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-100">
-          <p className="font-semibold">Limited evidence available</p>
-          <p className="mt-1 text-red-200/80">Results should be interpreted with caution.</p>
-          {qualityWarnings.length > 0 && (
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-red-200/80">
-              {qualityWarnings.map((w, i) => (
-                <li key={i}>{w}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
-      <QualitySummaryPanel
+      <QualityBanner
+        qualityTier={qualityTier}
         qualitySummary={qualitySummary}
         sourceSummary={sourceSummary}
         freshnessSummary={freshnessSummary}
+        totalSources={citedSources.length}
       />
 
       {linkedHeadline && (
         <div className="prose prose-invert prose-sm max-w-none prose-headings:text-white prose-p:text-slate-100 prose-strong:text-white prose-a:text-sky-200 prose-li:text-slate-100 prose-blockquote:border-sky-400/30 prose-blockquote:text-slate-200 prose-code:text-emerald-100">
-          <ReactMarkdown components={markdownComponents}>
+          <ReactMarkdown components={createMarkdownComponents(citationLookup)}>
             {linkedHeadline}
           </ReactMarkdown>
         </div>
       )}
 
       {citedSources.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
-            Cited sources
-          </p>
-          <div className="grid gap-2">
+        <details id="cited-sources-details" className="rounded-2xl border border-white/10 bg-white/5 p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
+            Cited sources ({citedSources.length})
+          </summary>
+          <div className="mt-3 grid gap-2">
             {citedSources.map((citation) => {
               const citationId = getCitationId(citation)
 
@@ -112,7 +87,7 @@ export function ReportView({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         {citationId && (
-                          <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100">
+                          <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90">
                             {citationId}
                           </span>
                         )}
@@ -134,7 +109,7 @@ export function ReportView({
               )
             })}
           </div>
-        </div>
+        </details>
       )}
 
       <ClaimCards claims={claims} citationLookup={citationLookup} />

@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ExternalLink,
 } from 'lucide-react'
+import * as HoverCard from '@radix-ui/react-hover-card'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 
@@ -523,14 +524,18 @@ export function PaymentActivityPanel({
   )
 }
 
-export function QualitySummaryPanel({
+export function QualityBanner({
+  qualityTier,
   qualitySummary,
   sourceSummary,
   freshnessSummary,
+  totalSources,
 }: {
+  qualityTier?: string | null
   qualitySummary: ResearchQualitySummary | null
   sourceSummary: Record<string, any> | null
   freshnessSummary: Record<string, any> | null
+  totalSources: number
 }) {
   const verificationNotes = normalizeStringList(qualitySummary?.verification_notes)
   const citationCoverage = formatCoverage(qualitySummary?.citation_coverage)
@@ -542,100 +547,111 @@ export function QualitySummaryPanel({
         ? qualitySummary.uncovered_claims.length
         : null
 
-  if (!qualitySummary && !sourceSummary && !freshnessSummary) {
-    return null
-  }
+  const hasDetails = qualitySummary || sourceSummary || freshnessSummary
+
+  /* Choose the user-facing headline */
+  const isRed = qualityTier === 'red'
+  const isYellow = qualityTier === 'yellow'
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs font-semibold uppercase tracking-[0.25em] text-slate-300">
-          Quality summary
-        </p>
-        {typeof qualitySummary?.strict_live_analysis_checks_passed === 'boolean' && (
-          <span
-            className={cn(
-              'rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em]',
-              qualitySummary.strict_live_analysis_checks_passed
-                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
-                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
-            )}
-          >
-            {qualitySummary.strict_live_analysis_checks_passed ? 'Strict checks passed' : 'Needs review'}
-          </span>
-        )}
-      </div>
+    <div className="space-y-2">
+      {/* Simple user-facing banner */}
+      {isRed ? (
+        <div className="flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+          <span className="text-base">⚠</span>
+          <p>Limited evidence — interpret results with caution.</p>
+        </div>
+      ) : isYellow ? (
+        <div className="flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <span className="text-base">⚠</span>
+          <p>Moderate evidence quality — some findings may need further verification.</p>
+        </div>
+      ) : totalSources > 0 ? (
+        <div className="flex items-center gap-2 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+          <span className="text-base">✓</span>
+          <p>{totalSources} sources cited</p>
+        </div>
+      ) : null}
 
-      <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-200">
-        {citationCoverage && (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-            Citation coverage: {citationCoverage}
-          </span>
-        )}
-        {typeof uncoveredClaims === 'number' && (
-          <span
-            className={cn(
-              'rounded-full border px-2 py-1',
-              uncoveredClaims === 0
-                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
-                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
-            )}
-          >
-            Uncovered claims: {uncoveredClaims}
-          </span>
-        )}
-        {sourceDiversity && (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-            {sourceDiversity}
-          </span>
-        )}
-        {typeof sourceSummary?.total_sources === 'number' && (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-            Sources: {sourceSummary.total_sources}
-          </span>
-        )}
-        {typeof sourceSummary?.fresh_sources === 'number' && (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-            Fresh: {sourceSummary.fresh_sources}
-          </span>
-        )}
-        {typeof sourceSummary?.academic_or_primary_sources === 'number' && (
-          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
-            Primary/Academic: {sourceSummary.academic_or_primary_sources}
-          </span>
-        )}
-        {freshnessSummary?.required && (
-          <span
-            className={cn(
-              'rounded-full border px-2 py-1',
-              freshnessSummary.requirements_met
-                ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
-                : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
-            )}
-          >
-            Freshness {freshnessSummary.requirements_met ? 'met' : 'warning'}
-          </span>
-        )}
-      </div>
+      {/* Collapsible details for power users */}
+      {hasDetails && (
+        <details className="rounded-2xl border border-white/10 bg-white/5 p-4">
+          <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-[0.25em] text-slate-400">
+            Quality details
+          </summary>
 
-      {verificationNotes.length > 0 && (
-        <ul className="mt-3 space-y-2 text-sm text-slate-200">
-          {verificationNotes.map((note) => (
-            <li key={note} className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
-              {note}
-            </li>
-          ))}
-        </ul>
-      )}
+          <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-200">
+            {citationCoverage && (
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Citation coverage: {citationCoverage}
+              </span>
+            )}
+            {typeof uncoveredClaims === 'number' && (
+              <span
+                className={cn(
+                  'rounded-full border px-2 py-1',
+                  uncoveredClaims === 0
+                    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                    : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+                )}
+              >
+                Uncovered claims: {uncoveredClaims}
+              </span>
+            )}
+            {sourceDiversity && (
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                {sourceDiversity}
+              </span>
+            )}
+            {typeof sourceSummary?.total_sources === 'number' && (
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Sources: {sourceSummary.total_sources}
+              </span>
+            )}
+            {typeof sourceSummary?.fresh_sources === 'number' && (
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Fresh: {sourceSummary.fresh_sources}
+              </span>
+            )}
+            {typeof sourceSummary?.academic_or_primary_sources === 'number' && (
+              <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1">
+                Primary/Academic: {sourceSummary.academic_or_primary_sources}
+              </span>
+            )}
+            {freshnessSummary?.required && (
+              <span
+                className={cn(
+                  'rounded-full border px-2 py-1',
+                  freshnessSummary.requirements_met
+                    ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100'
+                    : 'border-amber-400/20 bg-amber-400/10 text-amber-100',
+                )}
+              >
+                Freshness {freshnessSummary.requirements_met ? 'met' : 'warning'}
+              </span>
+            )}
+          </div>
 
-      {Array.isArray(freshnessSummary?.issues) && freshnessSummary.issues.length > 0 && (
-        <ul className="mt-3 space-y-2 text-sm text-amber-100">
-          {freshnessSummary.issues.map((issue: string) => (
-            <li key={issue} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
-              {issue}
-            </li>
-          ))}
-        </ul>
+          {verificationNotes.length > 0 && (
+            <ul className="mt-3 space-y-2 text-sm text-slate-200">
+              {verificationNotes.map((note) => (
+                <li key={note} className="rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2">
+                  {note}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {Array.isArray(freshnessSummary?.issues) && freshnessSummary.issues.length > 0 && (
+            <ul className="mt-3 space-y-2 text-sm text-amber-100">
+              {freshnessSummary.issues.map((issue: string) => (
+                <li key={issue} className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                  {issue}
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
       )}
     </div>
   )
@@ -681,7 +697,7 @@ export function ClaimCards({
               </div>
 
               {citationRefs.length > 0 && (
-                <div className="mt-3 flex flex-wrap gap-2">
+                <div className="mt-2 flex flex-wrap gap-1.5">
                   {citationRefs.map((reference) => {
                     const linkedCitation = citationLookup.get(reference)
                     const citId = linkedCitation ? getCitationId(linkedCitation) : null
@@ -691,7 +707,7 @@ export function ClaimCards({
                         <a
                           key={`${claim.claim}-${reference}`}
                           href={`#${citationAnchorId(citId)}`}
-                          className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-emerald-100 transition hover:bg-emerald-400/20"
+                          className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90 transition hover:bg-emerald-400/20"
                           title={linkedCitation.title}
                         >
                           {citId}
@@ -702,7 +718,7 @@ export function ClaimCards({
                     return (
                       <span
                         key={`${claim.claim}-${reference}`}
-                        className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[11px] text-emerald-50/90"
+                        className="rounded-full border border-white/10 bg-white/5 px-1.5 py-px text-[10px] text-emerald-50/90"
                       >
                         {reference}
                       </span>
@@ -718,23 +734,85 @@ export function ClaimCards({
   )
 }
 
-export const markdownComponents: Components = {
-  a: ({ href, children, ...props }) => {
-    const isInlineCitation = typeof href === 'string' && href.startsWith('#citation-')
+/** Factory: builds react-markdown components with hover-card citations */
+export function createMarkdownComponents(
+  citationLookup: Map<string, ResearchSourceCard>,
+): Components {
+  return {
+    a: ({ href, children, ...props }) => {
+      const isInlineCitation = typeof href === 'string' && href.startsWith('#citation-')
 
-    return (
-      <a
-        {...props}
-        href={href}
-        target={isInlineCitation ? undefined : '_blank'}
-        rel={isInlineCitation ? undefined : 'noreferrer'}
-        className={cn(
-          isInlineCitation &&
-            'rounded-full border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-100 no-underline transition hover:bg-emerald-400/20',
-        )}
-      >
-        {children}
-      </a>
-    )
-  },
+      if (!isInlineCitation) {
+        return (
+          <a {...props} href={href} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        )
+      }
+
+      /* Resolve the source from the lookup */
+      const anchorId = href?.replace('#', '') ?? ''
+      const source = [...citationLookup.values()].find((s) => {
+        const cid = getCitationId(s)
+        return cid ? citationAnchorId(cid) === anchorId : false
+      })
+
+      const pill = (
+        <span
+          className="mx-0.5 inline-flex cursor-pointer rounded-full border border-emerald-400/20 bg-emerald-400/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-emerald-200/90 no-underline transition hover:bg-emerald-400/20"
+          onClick={(e) => {
+            /* Expand the cited-sources details & scroll to the anchor */
+            const details = document.getElementById('cited-sources-details') as HTMLDetailsElement | null
+            if (details) details.open = true
+            const target = document.getElementById(anchorId)
+            if (target) {
+              e.preventDefault()
+              setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50)
+            }
+          }}
+        >
+          {children}
+        </span>
+      )
+
+      if (!source) return pill
+
+      return (
+        <HoverCard.Root openDelay={200} closeDelay={100}>
+          <HoverCard.Trigger asChild>{pill}</HoverCard.Trigger>
+          <HoverCard.Portal>
+            <HoverCard.Content
+              side="top"
+              sideOffset={6}
+              className="z-50 w-80 rounded-xl border border-white/15 bg-slate-900 p-3 text-sm shadow-xl animate-in fade-in-0 zoom-in-95"
+            >
+              <p className="font-medium text-white leading-snug">{source.title}</p>
+              <p className="mt-1.5 text-xs text-slate-400">
+                {[
+                  source.publisher,
+                  source.source_type ? formatMode(source.source_type) : null,
+                  source.published_at ? formatDateTime(source.published_at) : null,
+                ]
+                  .filter(Boolean)
+                  .join(' \u00b7 ')}
+              </p>
+              <a
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-2 flex items-center gap-1.5 text-xs text-sky-300 hover:text-sky-200 transition"
+              >
+                <ExternalLink className="h-3 w-3" />
+                <span className="truncate">{new URL(source.url).hostname}</span>
+              </a>
+              <HoverCard.Arrow className="fill-slate-900" />
+            </HoverCard.Content>
+          </HoverCard.Portal>
+        </HoverCard.Root>
+      )
+    },
+  }
 }
+
+/** @deprecated Use createMarkdownComponents(citationLookup) instead */
+export const markdownComponents: Components = createMarkdownComponents(new Map())
