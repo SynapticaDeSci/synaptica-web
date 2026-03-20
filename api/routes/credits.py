@@ -9,7 +9,7 @@ from typing import Dict, Optional
 
 import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from shared.database import SessionLocal, UserCredits, StripeTransaction
@@ -224,7 +224,7 @@ async def stripe_webhook(
 
 class DeductRequest(BaseModel):
     user_id: str = DEFAULT_USER_ID
-    amount: int = 1
+    amount: int = Field(default=1, ge=1)
 
 
 class DeductResponse(BaseModel):
