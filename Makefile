@@ -10,7 +10,7 @@ RESEARCH_PORT ?= 5001
 MOCK_AGENT_HOST ?= 0.0.0.0
 MOCK_AGENT_PORT ?= 6123
 
-.PHONY: help sync db-init test lint lint-python format format-check typecheck check check-all smoke smoke-api smoke-research api research mock-agent frontend-install frontend-dev frontend-lint registry-sync
+.PHONY: help sync db-init test lint lint-python format format-check typecheck check check-all smoke smoke-api smoke-research api research mock-agent frontend-install frontend-dev frontend-lint registry-sync stripe-webhook
 
 help:
 	@printf "Available targets:\n"
@@ -32,6 +32,7 @@ help:
 	@printf "  make frontend-dev     Start the Next.js frontend\n"
 	@printf "  make frontend-lint    Run frontend lint checks\n"
 	@printf "  make registry-sync    Force a registry sync\n"
+	@printf "  make stripe-webhook   Start the Stripe webhook listener (requires stripe CLI)\n"
 
 sync:
 	$(UV) sync
@@ -88,3 +89,6 @@ frontend-dev:
 
 registry-sync:
 	$(UV) run python scripts/sync_agents_from_registry.py --force
+
+stripe-webhook:
+	stripe listen --forward-to localhost:$(API_PORT)/api/credits/webhook

@@ -153,6 +153,9 @@ make api
 # Terminal 3: Sample Research Agents
 make research
 # Runs at http://localhost:5001
+
+# Terminal 4: Stripe webhook listener (requires Stripe CLI — run `stripe login` first)
+make stripe-webhook
 ```
 
 Visit http://localhost:3000 to use the platform.

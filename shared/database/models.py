@@ -768,3 +768,34 @@ class AgentsCacheEntry(Base):
     synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserCredits(Base):
+    """User credit balance."""
+
+    __tablename__ = "user_credits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, unique=True, index=True)
+    balance = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StripeTransaction(Base):
+    """Records every Stripe checkout that results in credited balance."""
+
+    __tablename__ = "stripe_transactions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, index=True)
+    stripe_session_id = Column(String, nullable=False, unique=True)
+    stripe_payment_intent_id = Column(String, nullable=True)
+    credits_granted = Column(Integer, nullable=False)
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String, nullable=False, default="usd")
+    hedera_tx_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    meta = Column(JSON, nullable=True)
