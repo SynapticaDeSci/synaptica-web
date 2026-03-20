@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
+from shared.database import SessionLocal
+from shared.database import UserCredits
+from shared.database.models import ResearchRun
 from shared.research_runs import (
     ResearchRunExecutor,
     ResearchRunPhase2UnavailableError,
@@ -330,17 +334,12 @@ def _ensure_research_run_job(research_run_id: str) -> None:
 async def create_research_run_route(request: ResearchRunCreateRequest) -> ResearchRunResponse:
     """Create and immediately start a research run."""
 
-    import os
-    from shared.database import SessionLocal as _CreditSession
-    from shared.database import UserCredits
-
     credit_budget = request.credit_budget
     hbar_per_credit = float(os.environ.get("HBAR_PER_CREDIT", "0.5"))
 
     # Reserve credits if a budget cap is set
     if credit_budget is not None:
-        db = _CreditSession()
-        try:
+        with SessionLocal() as db:
             row = db.query(UserCredits).filter(UserCredits.user_id == "default").one_or_none()
             balance = row.balance if row else 0
             if balance < credit_budget:
@@ -357,8 +356,6 @@ async def create_research_run_route(request: ResearchRunCreateRequest) -> Resear
                 db.add(row)
             row.balance -= credit_budget
             db.commit()
-        finally:
-            db.close()
 
     # Derive HBAR budget_limit from credit_budget for pipeline compat
     derived_budget = credit_budget * hbar_per_credit if credit_budget is not None else request.budget_limit
@@ -394,12 +391,8 @@ class ResearchRunHistoryItem(BaseModel):
 async def get_research_run_history(limit: int = 20) -> List[ResearchRunHistoryItem]:
     """Return recent research runs for the sidebar history list."""
 
-    from shared.database import SessionLocal
-    from shared.database.models import ResearchRun
-
-    session = SessionLocal()
-    try:
-        capped_limit = max(1, min(limit, 100))
+    capped_limit = max(1, min(limit, 100))
+    with SessionLocal() as session:
         runs = (
             session.query(ResearchRun)
             .order_by(ResearchRun.created_at.desc())
@@ -415,8 +408,6 @@ async def get_research_run_history(limit: int = 20) -> List[ResearchRunHistoryIt
             )
             for run in runs
         ]
-    finally:
-        session.close()
 
 
 @router.get("/{research_run_id}", response_model=ResearchRunResponse)

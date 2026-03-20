@@ -64,6 +64,7 @@ _EXECUTION_CONTRACT_DICT_FIELDS = {
 }
 _EXECUTION_CONTRACT_STRING_FIELDS = {"answer", "answer_markdown"}
 _MAX_EXECUTION_RESULT_NORMALIZATION_DEPTH = 8
+_AUTO_RETRY_REASON = "Auto-retry on failed verification"
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -1667,7 +1668,7 @@ async def execute_microtask(
             verification_data=verification,
             verification_decision={
                 "approved": False,
-                "reason": verification.get("feedback", "Auto-retry on failed verification"),
+                "reason": verification.get("feedback", _AUTO_RETRY_REASON),
                 "retry_recommended": True,
             },
         )
@@ -1676,7 +1677,7 @@ async def execute_microtask(
             "success": False,
             "task_id": task_id,
             "todo_id": todo_id,
-            "error": verification.get("feedback", "Auto-retry on failed verification"),
+            "error": verification.get("feedback", _AUTO_RETRY_REASON),
             "todo_status": "failed",
             "verification_score": overall_score,
             "selected_agent": selection,
