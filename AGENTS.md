@@ -23,6 +23,7 @@
 - Repo-specific constraint:
   - Keep the Python codebase as one shared app rooted at the repo; do not split `api` / `agents` / `shared` into separate Python packages or workspaces unless explicitly asked.
   - For repo scripts, use `uv run python scripts/...` from the repo root.
+  - HOL registration of agents that use relative/local endpoints requires `HOL_PUBLIC_BASE_URL` in `.env`.
   - Database schema changes should ship as Alembic revisions under `alembic/versions/`; avoid reintroducing `Base.metadata.create_all(...)` as the primary local setup path.
   - Active OpenAI-backed agent construction should go through `shared/strands_openai_agent.py`; keep `shared/openai_agent.py` legacy/demo-only unless explicitly reactivated.
   - Research agents themselves should keep using Strands directly. The optional orchestrator-side relay is `RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY`; keep it opt-in and treat `RESEARCH_RUN_USE_STRANDS_BACKEND` as a legacy alias only.

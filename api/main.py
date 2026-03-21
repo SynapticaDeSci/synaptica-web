@@ -1,12 +1,14 @@
 """FastAPI main application - Orchestrator Agent Entry Point."""
 
 import asyncio
+import ipaddress
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -39,6 +41,13 @@ from shared.hol_client import (
     HolClientError,
     register_agent as hol_register_agent,
     search_agents as hol_search_agents,
+)
+from shared.metadata import (
+    AgentMetadataPayload,
+    PinataCredentialsError,
+    PinataUploadError,
+    build_agent_metadata_payload,
+    publish_agent_metadata,
 )
 from shared.runtime import (
     TelemetryEnvelope,
@@ -376,15 +385,180 @@ def _resolve_hol_error_status(previous_status: str, message: str) -> str:
     return "error"
 
 
-def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
+def _coerce_pricing_rate(value: Any) -> float:
+    try:
+        if value is None:
+            return 0.0
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_public_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        return False
+    if hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return False
+    if hostname.endswith(".local") or hostname.endswith(".internal"):
+        return False
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        # Basic guard against obvious non-public host labels.
+        return "." in hostname
+
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_hol_endpoint_url(
+    endpoint_url: Optional[str],
+    *,
+    endpoint_url_override: Optional[str] = None,
+) -> str:
+    raw_value = (endpoint_url_override or endpoint_url or "").strip()
+    if not raw_value:
+        raise HTTPException(status_code=400, detail="Agent endpoint URL is required for HOL registration")
+
+    if _is_public_http_url(raw_value):
+        return raw_value
+
+    public_base_url = (os.getenv("HOL_PUBLIC_BASE_URL") or "").strip()
+    if not public_base_url:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Agent endpoint URL is not publicly reachable. "
+                "Set HOL_PUBLIC_BASE_URL or provide endpoint_url_override."
+            ),
+        )
+    if not _is_public_http_url(public_base_url):
+        raise HTTPException(
+            status_code=400,
+            detail="HOL_PUBLIC_BASE_URL must be a public http(s) URL.",
+        )
+
+    parsed = urlparse(raw_value)
+    if parsed.scheme in {"http", "https"}:
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+    else:
+        path = raw_value if raw_value.startswith("/") else f"/{raw_value}"
+
+    normalized_base = public_base_url.rstrip("/") + "/"
+    resolved = urljoin(normalized_base, path.lstrip("/"))
+    if not _is_public_http_url(resolved):
+        raise HTTPException(
+            status_code=400,
+            detail="Resolved HOL endpoint URL is not publicly reachable.",
+        )
+    return resolved
+
+
+def _resolve_optional_hol_url(value: Any, *, base_url: str) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    cleaned = value.strip()
+    if _is_public_http_url(cleaned):
+        return cleaned
+    normalized_base = base_url.rstrip("/") + "/"
+    candidate = urljoin(normalized_base, cleaned.lstrip("/"))
+    if _is_public_http_url(candidate):
+        return candidate
+    return None
+
+
+async def _ensure_data_agent_metadata_for_hol(agent: Agent, *, db: Any) -> None:
+    if agent.agent_type != "data":
+        return
+
+    meta = dict(agent.meta or {})
+    existing_metadata_uri = agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
+    if existing_metadata_uri:
+        return
+
+    resolved_endpoint_url = _resolve_hol_endpoint_url(meta.get("endpoint_url"))
+    pricing = dict(meta.get("pricing") or {})
+    categories = meta.get("categories") or []
+    parsed_categories = [
+        str(category).strip()
+        for category in categories
+        if isinstance(category, str) and str(category).strip()
+    ]
+    capabilities = [
+        str(capability).strip()
+        for capability in (agent.capabilities or [])
+        if isinstance(capability, str) and str(capability).strip()
+    ]
+
+    metadata_payload = AgentMetadataPayload(
+        agent_id=agent.agent_id,
+        name=agent.name,
+        description=str(agent.description or "").strip() or agent.name,
+        endpoint_url=resolved_endpoint_url,
+        capabilities=capabilities,
+        pricing_rate=_coerce_pricing_rate(pricing.get("rate") or pricing.get("base_rate")),
+        pricing_currency=str(pricing.get("currency") or "HBAR"),
+        pricing_rate_type=str(pricing.get("rate_type") or "per_task"),
+        categories=parsed_categories or ["Data", "Storage"],
+        contact_email=meta.get("contact_email"),
+        logo_url=meta.get("logo_url"),
+        health_check_url=_resolve_optional_hol_url(meta.get("health_check_url"), base_url=resolved_endpoint_url),
+        hedera_account=agent.hedera_account_id,
+    )
+    metadata_document = build_agent_metadata_payload(metadata_payload)
+
+    try:
+        upload_result = await publish_agent_metadata(agent.agent_id, metadata_document)
+    except PinataCredentialsError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Pinata credentials missing; configure PINATA_API_KEY and PINATA_SECRET_KEY.",
+        ) from exc
+    except PinataUploadError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc
+
+    updated_meta = dict(meta)
+    updated_meta["metadata_cid"] = upload_result.cid
+    updated_meta["metadata_gateway_url"] = upload_result.gateway_url
+    agent.meta = updated_meta
+    agent.erc8004_metadata_uri = upload_result.ipfs_uri
+    db.add(agent)
+
+
+def _build_hol_registration_payload(
+    agent: Agent,
+    *,
+    endpoint_url_override: Optional[str] = None,
+    metadata_uri_override: Optional[str] = None,
+) -> Dict[str, Any]:
     meta = dict(agent.meta or {})
     pricing = dict(meta.get("pricing") or {})
     categories = meta.get("categories") or []
-    endpoint_url = str(meta.get("endpoint_url") or "").strip()
-    metadata_uri = agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
+    endpoint_url = _resolve_hol_endpoint_url(
+        str(meta.get("endpoint_url") or "").strip(),
+        endpoint_url_override=endpoint_url_override,
+    )
+    metadata_uri = (
+        (metadata_uri_override or "").strip()
+        or agent.erc8004_metadata_uri
+        or meta.get("metadata_gateway_url")
+    )
 
-    if not endpoint_url:
-        raise HTTPException(status_code=400, detail="Agent endpoint URL is required for HOL registration")
     if not metadata_uri:
         raise HTTPException(
             status_code=400,
@@ -424,9 +598,9 @@ def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
         },
     }
 
-    health_check_url = meta.get("health_check_url")
-    if isinstance(health_check_url, str) and health_check_url.strip():
-        profile["aiAgent"]["health_check_url"] = health_check_url.strip()
+    health_check_url = _resolve_optional_hol_url(meta.get("health_check_url"), base_url=endpoint_url)
+    if health_check_url:
+        profile["aiAgent"]["health_check_url"] = health_check_url
     if agent.hedera_account_id:
         profile["owner"] = {"account_id": agent.hedera_account_id}
 
@@ -550,6 +724,8 @@ class HolRegisterAgentRequest(BaseModel):
 
     agent_id: str
     mode: Literal["quote", "register"] = "register"
+    endpoint_url_override: Optional[str] = None
+    metadata_uri_override: Optional[str] = None
 
 
 class HolRegisterAgentResponse(BaseModel):
@@ -870,7 +1046,24 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         if agent is None:
             raise HTTPException(status_code=404, detail=f"Agent '{request.agent_id}' not found")
 
-        payload = _build_hol_registration_payload(agent)
+        if agent.agent_type == "data" and not (request.metadata_uri_override or "").strip():
+            await _ensure_data_agent_metadata_for_hol(agent, db=db)
+            db.commit()
+            db.refresh(agent)
+            try:
+                rebuild_agents_cache()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Failed to rebuild agents cache after metadata auto-publish for %s",
+                    agent.agent_id,
+                    exc_info=True,
+                )
+
+        payload = _build_hol_registration_payload(
+            agent,
+            endpoint_url_override=request.endpoint_url_override,
+            metadata_uri_override=request.metadata_uri_override,
+        )
         current = _extract_hol_meta(agent)
         previous_status = str(current.get("registration_status") or "unregistered")
 

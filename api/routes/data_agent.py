@@ -22,6 +22,12 @@ from sqlalchemy.orm import Session
 
 from shared.database import DataAsset, get_db
 from shared.hedera.client import get_hedera_client
+from shared.hol_client import (
+    HolClientError,
+    create_session as hol_create_session,
+    search_agents as hol_search_agents,
+    send_message as hol_send_message,
+)
 
 router = APIRouter()
 
@@ -31,6 +37,13 @@ ALLOWED_CLASSIFICATIONS = {"failed", "underused"}
 ALLOWED_VISIBILITY = {"private", "org", "public"}
 DEFAULT_STORAGE_DIR = Path(__file__).resolve().parents[2] / "data" / "data_agent_uploads"
 PINATA_PIN_JSON_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
+DEFAULT_HOL_DATA_AGENT_CAPABILITIES = [
+    "data analysis",
+    "dataset curation",
+    "csv processing",
+    "tabular validation",
+]
+HOL_SESSION_HISTORY_LIMIT = 20
 
 
 class SimilarDataset(BaseModel):
@@ -76,6 +89,7 @@ class DataAssetDetailResponse(DataAssetResponse):
     verification_report: Optional[Dict[str, Any]] = None
     proof_bundle: Optional[Dict[str, Any]] = None
     similar_datasets: List[SimilarDataset] = Field(default_factory=list)
+    hol_sessions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DataAssetListResponse(BaseModel):
@@ -123,6 +137,32 @@ class ReuseEventResponse(BaseModel):
     reuse_count: int
     last_reused_at: str
     message: str
+
+
+class HolUseDatasetRequest(BaseModel):
+    """Request payload for hiring a HOL data agent on top of an uploaded dataset."""
+
+    uaid: Optional[str] = None
+    search_query: Optional[str] = None
+    required_capabilities: List[str] = Field(default_factory=list)
+    instructions: Optional[str] = None
+    transport: Optional[str] = None
+    as_uaid: Optional[str] = None
+    limit: int = Field(default=5, ge=1, le=25)
+
+
+class HolUseDatasetResponse(BaseModel):
+    """Response payload for HOL data-agent usage."""
+
+    success: bool = True
+    dataset_id: str
+    uaid: str
+    agent_name: Optional[str] = None
+    registry: Optional[str] = None
+    session_id: str
+    query: str
+    hol_session: Dict[str, Any] = Field(default_factory=dict)
+    broker_response: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _now_iso() -> str:
@@ -210,6 +250,27 @@ def _coerce_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         merged["reuse_domains"] = []
     merged["reuse_count"] = int(merged.get("reuse_count") or 0)
     return merged
+
+
+def _coerce_hol_sessions(meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(meta, dict):
+        return []
+    raw_sessions = meta.get("hol_sessions")
+    if not isinstance(raw_sessions, list):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for item in raw_sessions:
+        if isinstance(item, dict):
+            cleaned.append(dict(item))
+    return cleaned[-HOL_SESSION_HISTORY_LIMIT:]
+
+
+def _append_hol_session(meta: Dict[str, Any], session_payload: Dict[str, Any]) -> Dict[str, Any]:
+    sessions = _coerce_hol_sessions(meta)
+    sessions.append(dict(session_payload))
+    next_meta = dict(meta)
+    next_meta["hol_sessions"] = sessions[-HOL_SESSION_HISTORY_LIMIT:]
+    return next_meta
 
 
 def _tabular_summary(payload: bytes, delimiter: str) -> Tuple[bool, Dict[str, Any], Optional[str]]:
@@ -724,6 +785,7 @@ async def verify_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Data
         verification_report=_coerce_meta(asset.meta).get("verification_report"),
         proof_bundle=_build_proof_bundle(asset),
         similar_datasets=[SimilarDataset(**row) for row in _similar_datasets(db, asset)],
+        hol_sessions=_coerce_hol_sessions(asset.meta),
     )
 
 
@@ -812,6 +874,7 @@ async def get_dataset(dataset_id: str, db: Session = Depends(get_db)) -> DataAss
         verification_report=meta.get("verification_report"),
         proof_bundle=_build_proof_bundle(asset),
         similar_datasets=[SimilarDataset(**row) for row in _similar_datasets(db, asset)],
+        hol_sessions=_coerce_hol_sessions(asset.meta),
     )
 
 
@@ -857,6 +920,134 @@ async def get_dataset_citation(dataset_id: str, db: Session = Depends(get_db)) -
         },
     }
     return DatasetCitationResponse(citation=citation)
+
+
+def _default_hol_query(asset: DataAsset, required_capabilities: List[str]) -> str:
+    terms = [
+        "data agent",
+        asset.data_classification,
+        asset.lab_name,
+        *(asset.tags or []),
+        *required_capabilities,
+    ]
+    return " ".join(part.strip() for part in terms if isinstance(part, str) and part.strip())
+
+
+def _default_hol_instructions(asset: DataAsset) -> str:
+    return (
+        "Analyze this dataset metadata and propose reuse opportunities, data quality caveats, "
+        "and practical next-step recommendations. Keep the response concise and structured."
+    )
+
+
+@router.post("/datasets/{dataset_id}/hol-use", response_model=HolUseDatasetResponse)
+async def use_hol_data_agent(
+    dataset_id: str,
+    request: HolUseDatasetRequest,
+    db: Session = Depends(get_db),
+) -> HolUseDatasetResponse:
+    """Use a HOL-discovered (or explicit) data agent for a dataset microtask."""
+
+    asset = db.query(DataAsset).filter(DataAsset.id == dataset_id).one_or_none()
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    meta = _coerce_meta(asset.meta)
+    required_capabilities = [
+        item.strip()
+        for item in (request.required_capabilities or [])
+        if isinstance(item, str) and item.strip()
+    ] or list(DEFAULT_HOL_DATA_AGENT_CAPABILITIES)
+    query = (request.search_query or "").strip() or _default_hol_query(asset, required_capabilities)
+
+    selected_uaid = (request.uaid or "").strip()
+    selected_name: Optional[str] = None
+    selected_registry: Optional[str] = None
+
+    if not selected_uaid:
+        try:
+            candidates = hol_search_agents(query=query, limit=request.limit)
+        except HolClientError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No HOL agents found for the provided dataset query.",
+            )
+
+        selected = candidates[0]
+        selected_uaid = selected.uaid
+        selected_name = selected.name
+        selected_registry = selected.registry
+
+    instructions = (request.instructions or "").strip() or _default_hol_instructions(asset)
+    context_payload = {
+        "dataset_id": asset.id,
+        "title": asset.title,
+        "description": asset.description,
+        "lab_name": asset.lab_name,
+        "data_classification": asset.data_classification,
+        "tags": asset.tags or [],
+        "reuse_domains": meta.get("reuse_domains") or [],
+        "verification_status": meta.get("verification_status") or "pending",
+        "proof_status": meta.get("proof_status") or "unanchored",
+        "manifest_cid": meta.get("manifest_cid"),
+        "sha256": asset.sha256,
+        "size_bytes": asset.size_bytes,
+    }
+    message_payload = {
+        "role": "user",
+        "type": "synaptica_data_agent_microtask",
+        "instructions": instructions,
+        "context": context_payload,
+    }
+
+    try:
+        session_id = hol_create_session(
+            uaid=selected_uaid,
+            transport=request.transport,
+            as_uaid=request.as_uaid,
+        )
+        broker_response = hol_send_message(
+            session_id=session_id,
+            message=json.dumps(message_payload, ensure_ascii=True),
+            as_uaid=request.as_uaid,
+        )
+    except HolClientError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    public_url = None
+    if isinstance(broker_response, dict):
+        maybe_url = broker_response.get("publicUrl") or broker_response.get("public_url")
+        if isinstance(maybe_url, str) and maybe_url.strip():
+            public_url = maybe_url.strip()
+
+    hol_session = {
+        "created_at": _now_iso(),
+        "session_id": session_id,
+        "uaid": selected_uaid,
+        "agent_name": selected_name,
+        "registry": selected_registry,
+        "query": query,
+        "instructions": instructions,
+        "transport": request.transport,
+        "public_url": public_url,
+    }
+    asset.meta = _append_hol_session(meta, hol_session)
+    db.commit()
+    db.refresh(asset)
+
+    return HolUseDatasetResponse(
+        dataset_id=asset.id,
+        uaid=selected_uaid,
+        agent_name=selected_name,
+        registry=selected_registry,
+        session_id=session_id,
+        query=query,
+        hol_session=hol_session,
+        broker_response=broker_response if isinstance(broker_response, dict) else {},
+    )
 
 
 @router.post("/datasets/{dataset_id}/reuse-events", response_model=ReuseEventResponse)

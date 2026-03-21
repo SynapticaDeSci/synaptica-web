@@ -205,6 +205,8 @@ Configuration in `.env`:
 # HOL Registry Broker (used by shared/hol_client.py)
 REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
 REGISTRY_BROKER_API_KEY=rbk_...
+# Public URL used when local agent endpoint metadata is relative or localhost.
+HOL_PUBLIC_BASE_URL=https://your-deployed-api.example.com
 # Optional registration path overrides for marketplace "Register on HOL"
 REGISTRY_BROKER_REGISTER_PATH=/register
 # or comma-separated fallback list:
@@ -215,6 +217,7 @@ With these values set:
 
 - The orchestrator can call `hol_discover_agents` / `hol_hire_agent` tools to delegate microtasks to external HOL agents.
 - The frontend `TaskStatusCard` shows an **External Agents (HOL)** panel listing which external agents were hired for a given task.
+- Data Vault can trigger HOL data-agent usage via `POST /api/data-agent/datasets/{dataset_id}/hol-use` (with optional UAID override).
 
 To publish / manage the Synaptica skill for HOL, use the CLI from the repo root (after installing Node.js):
 

@@ -1,10 +1,12 @@
 import httpx
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
-from api.main import _build_hol_registration_payload, _resolve_hol_error_status
-from shared.database import Agent
+from api.main import app, _build_hol_registration_payload, _resolve_hol_error_status
+from shared.database import Agent, AgentReputation, AgentsCacheEntry, SessionLocal
 from shared.hol_client import _format_http_error
+from shared.metadata.publisher import PinataUploadResult
 
 
 def _sample_agent() -> Agent:
@@ -118,3 +120,163 @@ def test_resolve_hol_error_status_marks_transient_failures_unregistered() -> Non
 def test_resolve_hol_error_status_marks_non_transient_failures_error() -> None:
     message = "HOL register_agent failed after trying paths (/register): 402 Payment Required: insufficient_credits"
     assert _resolve_hol_error_status("unregistered", message) == "error"
+
+
+def _reset_agent_state() -> None:
+    session = SessionLocal()
+    try:
+        session.query(AgentsCacheEntry).delete()
+        session.query(AgentReputation).delete()
+        session.query(Agent).delete()
+        session.commit()
+    finally:
+        session.close()
+
+
+@pytest.fixture
+def client(monkeypatch):
+    _reset_agent_state()
+    monkeypatch.setattr("api.main.ensure_registry_cache", lambda: None)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _insert_agent(
+    *,
+    agent_id: str,
+    agent_type: str,
+    endpoint_url: str,
+    metadata_uri: str | None = None,
+) -> None:
+    session = SessionLocal()
+    try:
+        row = Agent(  # type: ignore[call-arg]
+            agent_id=agent_id,
+            name=f"{agent_id}-name",
+            description="Agent used for HOL registration endpoint tests.",
+            capabilities=["dataset-upload", "dataset-analysis"],
+            status="active",
+            agent_type=agent_type,
+            hedera_account_id="0.0.555",
+            erc8004_metadata_uri=metadata_uri,
+            meta={
+                "endpoint_url": endpoint_url,
+                "pricing": {"rate": 1.0, "currency": "HBAR", "rate_type": "per_task"},
+                "categories": ["Data", "Research"],
+            },
+        )
+        session.add(row)
+        session.add(
+            AgentReputation(
+                agent_id=agent_id,
+                reputation_score=0.8,
+                payment_multiplier=1.0,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
+def test_register_data_agent_auto_publishes_metadata_and_rewrites_endpoint(client: TestClient, monkeypatch):
+    _insert_agent(
+        agent_id="hol-data-auto-001",
+        agent_type="data",
+        endpoint_url="/api/data-agent/datasets",
+        metadata_uri=None,
+    )
+    monkeypatch.setenv("HOL_PUBLIC_BASE_URL", "https://api.synaptica.example")
+
+    async def _mock_publish(_agent_id: str, metadata: dict):
+        assert metadata["agentId"] == "hol-data-auto-001"
+        assert metadata["endpoints"][0]["endpoint"].startswith("https://api.synaptica.example/")
+        return PinataUploadResult(
+            cid="bafy-data-001",
+            ipfs_uri="ipfs://bafy-data-001",
+            gateway_url="https://gateway.pinata.cloud/ipfs/bafy-data-001",
+            pinata_url="https://app.pinata.cloud/pinmanager?search=bafy-data-001",
+        )
+
+    captured: dict = {}
+
+    def _mock_hol_register(payload: dict, *, mode: str = "register"):
+        captured["payload"] = payload
+        captured["mode"] = mode
+        return {"uaid": "uaid:data:auto:001"}
+
+    monkeypatch.setattr("api.main.publish_agent_metadata", _mock_publish)
+    monkeypatch.setattr("api.main.hol_register_agent", _mock_hol_register)
+
+    response = client.post(
+        "/api/hol/register-agent",
+        json={"agent_id": "hol-data-auto-001", "mode": "register"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["hol_registration_status"] == "registered"
+    assert payload["hol_uaid"] == "uaid:data:auto:001"
+
+    register_payload = captured["payload"]
+    assert register_payload["endpoint_url"].startswith("https://api.synaptica.example/")
+    assert register_payload["metadata_uri"] == "ipfs://bafy-data-001"
+
+    session = SessionLocal()
+    try:
+        agent = session.query(Agent).filter(Agent.agent_id == "hol-data-auto-001").one()
+        assert agent.erc8004_metadata_uri == "ipfs://bafy-data-001"
+        assert agent.meta["metadata_cid"] == "bafy-data-001"
+        assert agent.meta["metadata_gateway_url"] == "https://gateway.pinata.cloud/ipfs/bafy-data-001"
+    finally:
+        session.close()
+
+
+def test_register_agent_honors_endpoint_and_metadata_overrides(client: TestClient, monkeypatch):
+    _insert_agent(
+        agent_id="hol-data-override-001",
+        agent_type="data",
+        endpoint_url="/api/data-agent/datasets",
+        metadata_uri="ipfs://bafy-existing",
+    )
+    monkeypatch.setenv("HOL_PUBLIC_BASE_URL", "https://api.synaptica.example")
+
+    captured: dict = {}
+
+    def _mock_hol_register(payload: dict, *, mode: str = "register"):
+        captured["payload"] = payload
+        captured["mode"] = mode
+        return {"uaid": "uaid:data:override:001"}
+
+    monkeypatch.setattr("api.main.hol_register_agent", _mock_hol_register)
+
+    response = client.post(
+        "/api/hol/register-agent",
+        json={
+            "agent_id": "hol-data-override-001",
+            "mode": "quote",
+            "endpoint_url_override": "https://public.agent.example/execute",
+            "metadata_uri_override": "ipfs://bafy-override",
+        },
+    )
+    assert response.status_code == 200
+    register_payload = captured["payload"]
+    assert register_payload["endpoint_url"] == "https://public.agent.example/execute"
+    assert register_payload["metadata_uri"] == "ipfs://bafy-override"
+    assert register_payload["profile"]["url"] == "https://public.agent.example/execute"
+    assert register_payload["profile"]["aiAgent"]["metadata_uri"] == "ipfs://bafy-override"
+
+
+def test_register_data_agent_requires_public_endpoint_base_when_relative(client: TestClient, monkeypatch):
+    _insert_agent(
+        agent_id="hol-data-relative-001",
+        agent_type="data",
+        endpoint_url="/api/data-agent/datasets",
+        metadata_uri="ipfs://bafy-existing",
+    )
+    monkeypatch.delenv("HOL_PUBLIC_BASE_URL", raising=False)
+
+    response = client.post(
+        "/api/hol/register-agent",
+        json={"agent_id": "hol-data-relative-001", "mode": "register"},
+    )
+    assert response.status_code == 400
+    assert "HOL_PUBLIC_BASE_URL" in response.json()["detail"]

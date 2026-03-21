@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from shared.hol_client import HolAgentSummary, HolClientError
 from shared.database import (
     Agent as AgentModel,
     AgentReputation,
@@ -226,6 +227,92 @@ def test_dataset_download_and_missing_download(client: TestClient):
 
     missing_download = client.get("/api/data-agent/datasets/missing-id/download")
     assert missing_download.status_code == 404
+
+
+def test_hol_use_auto_discovery_persists_session_history(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=5: [
+            HolAgentSummary(
+                uaid="uaid:hol:data:001",
+                name="HOL Data Curator",
+                description="Analyzes datasets for reuse opportunities.",
+                capabilities=["data analysis"],
+                categories=["Data"],
+                transports=["http"],
+                pricing={"rate": 1.0, "currency": "HBAR"},
+                registry="hol",
+            )
+        ],
+    )
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda **_: "session-hol-001")
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_send_message",
+        lambda **_: {"status": "queued", "publicUrl": "https://hol.example/chat/session-hol-001"},
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["uaid"] == "uaid:hol:data:001"
+    assert payload["session_id"] == "session-hol-001"
+
+    detail = client.get(f"/api/data-agent/datasets/{dataset_id}")
+    assert detail.status_code == 200
+    detail_payload = detail.json()
+    assert isinstance(detail_payload["hol_sessions"], list)
+    assert len(detail_payload["hol_sessions"]) == 1
+    assert detail_payload["hol_sessions"][0]["session_id"] == "session-hol-001"
+
+
+def test_hol_use_with_explicit_uaid_skips_discovery(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    def _should_not_discover(*_args, **_kwargs):
+        raise AssertionError("hol_search_agents should not be called when uaid is provided")
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", _should_not_discover)
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda **_: "session-hol-explicit")
+    monkeypatch.setattr("api.routes.data_agent.hol_send_message", lambda **_: {"status": "ok"})
+
+    response = client.post(
+        f"/api/data-agent/datasets/{dataset_id}/hol-use",
+        json={"uaid": "uaid:explicit:data-agent"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["uaid"] == "uaid:explicit:data-agent"
+    assert payload["session_id"] == "session-hol-explicit"
+
+
+def test_hol_use_returns_404_when_no_candidates(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [])
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 404
+    assert "No HOL agents found" in response.json()["detail"]
+
+
+def test_hol_use_maps_hol_errors_to_502(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    def _raise_hol_error(*_args, **_kwargs):
+        raise HolClientError("HOL search failed: upstream timeout")
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", _raise_hol_error)
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 502
+    assert "HOL search failed" in response.json()["detail"]
 
 
 def test_built_in_data_agent_is_listed(client: TestClient):

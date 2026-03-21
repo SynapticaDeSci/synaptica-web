@@ -31,6 +31,7 @@ import {
   getDatasetProof,
   listDatasets,
   recordDatasetReuse,
+  invokeDatasetHolAgent,
   uploadDataset,
   verifyDataset,
 } from '@/lib/api'
@@ -270,6 +271,8 @@ export function DataVault() {
   const [verifyFeedback, setVerifyFeedback] = useState<ActionFeedback | null>(null)
   const [anchorFeedback, setAnchorFeedback] = useState<ActionFeedback | null>(null)
   const [reuseFeedback, setReuseFeedback] = useState<ActionFeedback | null>(null)
+  const [holUseFeedback, setHolUseFeedback] = useState<ActionFeedback | null>(null)
+  const [holAgentUaid, setHolAgentUaid] = useState('')
   const [copiedCitation, setCopiedCitation] = useState(false)
 
   const query = useQuery({
@@ -428,6 +431,40 @@ export function DataVault() {
     },
   })
 
+  const holUseMutation = useMutation({
+    mutationFn: ({ datasetId, uaid }: { datasetId: string; uaid?: string }) =>
+      invokeDatasetHolAgent(datasetId, {
+        uaid,
+      }),
+    onMutate: () => {
+      setHolUseFeedback({
+        tone: 'info',
+        message: 'Requesting HOL data agent session...',
+      })
+    },
+    onSuccess: async (result) => {
+      setErrorMessage(null)
+      if (selectedDataset) {
+        const refreshed = await getDataset(selectedDataset.id)
+        setSelectedDataset(refreshed)
+        setSelectedDatasetProof(refreshed.proof_bundle ?? null)
+      }
+      setHolUseFeedback({
+        tone: 'success',
+        message: `HOL session created (${result.session_id}) with ${result.agent_name || result.uaid}.`,
+      })
+      await query.refetch()
+    },
+    onError: (error: Error) => {
+      const message = error.message || 'Failed to use HOL data agent'
+      setErrorMessage(message)
+      setHolUseFeedback({
+        tone: 'error',
+        message: `HOL data-agent call failed. ${message}`,
+      })
+    },
+  })
+
   const datasets = query.data?.datasets ?? EMPTY_DATASETS
   const sortedTagSuggestions = useMemo(() => {
     const tags = new Set<string>()
@@ -487,6 +524,8 @@ export function DataVault() {
       setVerifyFeedback(null)
       setAnchorFeedback(null)
       setReuseFeedback(null)
+      setHolUseFeedback(null)
+      setHolAgentUaid('')
       const detail = await getDataset(datasetId)
       setSelectedDataset(detail)
       setSelectedDatasetProof(detail.proof_bundle ?? null)
@@ -968,6 +1007,8 @@ export function DataVault() {
             setVerifyFeedback(null)
             setAnchorFeedback(null)
             setReuseFeedback(null)
+            setHolUseFeedback(null)
+            setHolAgentUaid('')
           }
         }}
       >
@@ -1049,6 +1090,32 @@ export function DataVault() {
                 </Button>
               </div>
 
+              <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
+                <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">HOL data agent</p>
+                <div className="flex flex-col gap-2 md:flex-row">
+                  <Input
+                    value={holAgentUaid}
+                    onChange={(event) => setHolAgentUaid(event.target.value)}
+                    placeholder="Optional UAID override (otherwise auto-discover)"
+                    className="border-white/10 bg-slate-950/40 text-white md:flex-1"
+                  />
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      holUseMutation.mutate({
+                        datasetId: selectedDataset.id,
+                        uaid: holAgentUaid.trim() || undefined,
+                      })
+                    }
+                    disabled={holUseMutation.isPending}
+                    className="bg-cyan-600 text-white hover:bg-cyan-500"
+                    title="Delegate a microtask to a HOL data agent using this dataset context."
+                  >
+                    {holUseMutation.isPending ? 'Contacting HOL...' : 'Use HOL data agent'}
+                  </Button>
+                </div>
+              </div>
+
               {verifyFeedback && (
                 <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(verifyFeedback.tone)}`}>
                   {verifyFeedback.message}
@@ -1064,6 +1131,12 @@ export function DataVault() {
               {reuseFeedback && (
                 <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(reuseFeedback.tone)}`}>
                   {reuseFeedback.message}
+                </div>
+              )}
+
+              {holUseFeedback && (
+                <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(holUseFeedback.tone)}`}>
+                  {holUseFeedback.message}
                 </div>
               )}
 
@@ -1127,6 +1200,43 @@ export function DataVault() {
                         {entry.title} ({entry.data_classification}) score: {entry.similarity_score}
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedDataset.hol_sessions && selectedDataset.hol_sessions.length > 0 && (
+                <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
+                  <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">HOL sessions</p>
+                  <div className="space-y-2">
+                    {selectedDataset.hol_sessions
+                      .slice()
+                      .reverse()
+                      .map((session, index) => (
+                        <div
+                          key={`${session.session_id || index}-${index}`}
+                          className="rounded-md border border-white/10 bg-black/30 px-3 py-2 text-xs text-slate-200"
+                        >
+                          <div>
+                            <span className="text-slate-400">Agent:</span>{' '}
+                            {session.agent_name || session.uaid || 'Unknown'}
+                          </div>
+                          <div>
+                            <span className="text-slate-400">Session:</span>{' '}
+                            <span className="font-mono">{session.session_id || 'N/A'}</span>
+                          </div>
+                          {session.created_at && (
+                            <div>
+                              <span className="text-slate-400">Created:</span>{' '}
+                              {formatDate(session.created_at)}
+                            </div>
+                          )}
+                          {session.query && (
+                            <div className="line-clamp-2">
+                              <span className="text-slate-400">Query:</span> {session.query}
+                            </div>
+                          )}
+                        </div>
+                      ))}
                   </div>
                 </div>
               )}

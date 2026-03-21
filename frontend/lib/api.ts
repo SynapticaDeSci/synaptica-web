@@ -495,6 +495,8 @@ export type HolRegisterMode = 'quote' | 'register';
 export interface HolRegisterAgentRequest {
   agent_id: string;
   mode?: HolRegisterMode;
+  endpoint_url_override?: string;
+  metadata_uri_override?: string;
 }
 
 export interface HolRegisterAgentResponse {
@@ -547,6 +549,8 @@ export async function registerAgentOnHol(
     body: JSON.stringify({
       agent_id: payload.agent_id,
       mode: payload.mode ?? 'register',
+      endpoint_url_override: payload.endpoint_url_override,
+      metadata_uri_override: payload.metadata_uri_override,
     }),
   });
 
@@ -1178,6 +1182,7 @@ export interface DataAssetDetailRecord extends DataAssetRecord {
   verification_report?: Record<string, any>;
   proof_bundle?: DatasetProofBundle;
   similar_datasets: SimilarDataset[];
+  hol_sessions: Record<string, any>[];
 }
 
 export interface DataAssetListResponse {
@@ -1202,6 +1207,28 @@ export interface UploadDatasetPayload {
 
 export interface UploadDatasetResponse extends DataAssetRecord {
   message: string;
+}
+
+export interface HolUseDatasetPayload {
+  uaid?: string;
+  search_query?: string;
+  required_capabilities?: string[];
+  instructions?: string;
+  transport?: string;
+  as_uaid?: string;
+  limit?: number;
+}
+
+export interface HolUseDatasetResponse {
+  success: boolean;
+  dataset_id: string;
+  uaid: string;
+  agent_name?: string;
+  registry?: string;
+  session_id: string;
+  query: string;
+  hol_session: Record<string, any>;
+  broker_response: Record<string, any>;
 }
 
 export interface ListDatasetsParams {
@@ -1377,6 +1404,26 @@ export async function recordDatasetReuse(
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: 'Failed to record reuse event' }));
     throw new Error(error.detail || error.error || 'Failed to record reuse event');
+  }
+
+  return response.json();
+}
+
+export async function invokeDatasetHolAgent(
+  datasetId: string,
+  payload: HolUseDatasetPayload = {}
+): Promise<HolUseDatasetResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/hol-use`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to use HOL data agent' }));
+    throw new Error(error.detail || error.error || 'Failed to use HOL data agent');
   }
 
   return response.json();
