@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -16,12 +17,21 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from shared.database import DataAsset, get_db
 from shared.hedera.client import get_hedera_client
+from shared.a2a.models import AgentCapability, AgentCard, MessagePayload, MessageResponse
+from shared.hol_client import (
+    HolAgentSummary,
+    HolClientError,
+    create_session as hol_create_session,
+    search_agents as hol_search_agents,
+    send_message as hol_send_message,
+)
 
 router = APIRouter()
 
@@ -31,6 +41,7 @@ ALLOWED_CLASSIFICATIONS = {"failed", "underused"}
 ALLOWED_VISIBILITY = {"private", "org", "public"}
 DEFAULT_STORAGE_DIR = Path(__file__).resolve().parents[2] / "data" / "data_agent_uploads"
 PINATA_PIN_JSON_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
+DEFAULT_HOL_DATA_CAPABILITIES = ["data", "analysis", "dataset"]
 
 
 class SimilarDataset(BaseModel):
@@ -76,6 +87,7 @@ class DataAssetDetailResponse(DataAssetResponse):
     verification_report: Optional[Dict[str, Any]] = None
     proof_bundle: Optional[Dict[str, Any]] = None
     similar_datasets: List[SimilarDataset] = Field(default_factory=list)
+    hol_sessions: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class DataAssetListResponse(BaseModel):
@@ -123,6 +135,37 @@ class ReuseEventResponse(BaseModel):
     reuse_count: int
     last_reused_at: str
     message: str
+
+
+class DatasetHolUseRequest(BaseModel):
+    """Request payload for using a HOL data agent from a dataset."""
+
+    uaid: Optional[str] = None
+    search_query: Optional[str] = None
+    required_capabilities: Optional[List[str]] = None
+    instructions: Optional[str] = None
+    transport: Optional[str] = None
+    as_uaid: Optional[str] = None
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class DatasetHolUseResponse(BaseModel):
+    """Response payload for a HOL data-agent interaction."""
+
+    success: bool
+    selected_agent: Dict[str, Any]
+    session_id: str
+    broker_response: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DatasetHolUseErrorDetail(BaseModel):
+    """Structured HOL discovery diagnostics for UI/debug surfaces."""
+
+    message: str
+    search_queries: List[str] = Field(default_factory=list)
+    discovered_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    rejected_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    attempted_errors: List[str] = Field(default_factory=list)
 
 
 def _now_iso() -> str:
@@ -208,6 +251,8 @@ def _coerce_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         merged.update(meta)
     if not isinstance(merged.get("reuse_domains"), list):
         merged["reuse_domains"] = []
+    if not isinstance(merged.get("hol_sessions"), list):
+        merged["hol_sessions"] = []
     merged["reuse_count"] = int(merged.get("reuse_count") or 0)
     return merged
 
@@ -378,6 +423,32 @@ def _serialize_asset(asset: DataAsset) -> Dict[str, Any]:
     }
 
 
+def _build_dataset_citation_payload(asset: DataAsset) -> Dict[str, Any]:
+    meta = _coerce_meta(asset.meta)
+    return {
+        "type": "dataset",
+        "title": asset.title,
+        "dataset_id": asset.id,
+        "authoring_lab": asset.lab_name,
+        "uploader": asset.uploader_name,
+        "published_at": asset.created_at.isoformat() if asset.created_at else _now_iso(),
+        "provider": "Synaptica Data Agent",
+        "classification": asset.data_classification,
+        "failed_reason": meta.get("failed_reason"),
+        "reuse_domains": meta.get("reuse_domains") or [],
+        "identifiers": {
+            "file_sha256": asset.sha256,
+            "manifest_cid": meta.get("manifest_cid"),
+            "manifest_sha256": meta.get("manifest_sha256"),
+            "hcs_topic_id": meta.get("hcs_topic_id"),
+        },
+        "links": {
+            "manifest_gateway_url": meta.get("manifest_gateway_url"),
+            "proof_endpoint": f"/api/data-agent/datasets/{asset.id}/proof",
+        },
+    }
+
+
 def _build_proof_bundle(asset: DataAsset) -> Dict[str, Any]:
     meta = _coerce_meta(asset.meta)
     return {
@@ -394,6 +465,250 @@ def _build_proof_bundle(asset: DataAsset) -> Dict[str, Any]:
         "verification_report": meta.get("verification_report"),
         "proof_status": meta.get("proof_status") or "unanchored",
     }
+
+
+def _hol_agent_summary(agent: HolAgentSummary) -> Dict[str, Any]:
+    return {
+        "uaid": getattr(agent, "uaid", ""),
+        "name": getattr(agent, "name", ""),
+        "description": getattr(agent, "description", ""),
+        "capabilities": getattr(agent, "capabilities", []) or [],
+        "categories": getattr(agent, "categories", []) or [],
+        "transports": getattr(agent, "transports", []) or [],
+        "pricing": getattr(agent, "pricing", {}) or {},
+        "registry": getattr(agent, "registry", None),
+        "available": getattr(agent, "available", None),
+        "availability_status": getattr(agent, "availability_status", None),
+        "source_url": getattr(agent, "source_url", None),
+        "adapter": getattr(agent, "adapter", None),
+        "protocol": getattr(agent, "protocol", None),
+    }
+
+
+def _matches_required_capabilities(
+    agent: HolAgentSummary,
+    required_capabilities: List[str],
+) -> bool:
+    if not required_capabilities:
+        return True
+    haystack = " ".join(
+        [
+            agent.name,
+            agent.description,
+            *agent.capabilities,
+            *agent.categories,
+            *agent.transports,
+        ]
+    ).lower()
+    return any(capability.lower() in haystack for capability in required_capabilities if capability.strip())
+
+
+def _hol_candidate_sort_key(agent: HolAgentSummary) -> tuple[int, int, int, int]:
+    availability = str(getattr(agent, "availability_status", "") or "").strip().lower()
+    source_url = getattr(agent, "source_url", None)
+    transports = getattr(agent, "transports", []) or []
+    available_flag = getattr(agent, "available", None)
+    has_url = 1 if source_url else 0
+    has_http_transport = 1 if "http" in [str(item).lower() for item in transports] else 0
+    available = 1 if available_flag is True else 0
+    online = 1 if availability in {"online", "ok", "available"} else 0
+    stale = 1 if availability == "stale" else 0
+    return (
+        available,
+        online,
+        has_http_transport or has_url,
+        0 if stale else 1,
+    )
+
+
+def _get_broker_chatable_rejection_reason(agent: HolAgentSummary) -> Optional[str]:
+    transports = [str(item).strip().lower() for item in (getattr(agent, "transports", []) or []) if str(item).strip()]
+    source_url = str(getattr(agent, "source_url", "") or "").strip()
+    protocol = str(getattr(agent, "protocol", "") or "").strip().lower()
+    adapter = str(getattr(agent, "adapter", "") or "").strip().lower()
+    availability = str(getattr(agent, "availability_status", "") or "").strip().lower()
+    available_flag = getattr(agent, "available", None)
+
+    if available_flag is not True:
+        return "Agent is not marked available by HOL search metadata."
+    if availability in {"offline", "inactive", "error"}:
+        return f"Agent availability status is {availability}."
+
+    if "http" in transports:
+        return None
+    if protocol in {"a2a", "uagent"}:
+        return f"Agent protocol {protocol} is not broker-chatable in this Synaptica flow."
+    if adapter in {"a2a-registry-adapter", "agentverse-adapter"}:
+        return f"Agent adapter {adapter} is not broker-chatable in this Synaptica flow."
+    if source_url:
+        return None
+    return "Agent does not expose an HTTP transport or resolvable source URL."
+
+
+def _is_broker_chatable_candidate(agent: HolAgentSummary) -> bool:
+    return _get_broker_chatable_rejection_reason(agent) is None
+
+
+def _build_dataset_hol_search_query(
+    asset: DataAsset,
+    request: DatasetHolUseRequest,
+    required_capabilities: List[str],
+) -> str:
+    if request.search_query and request.search_query.strip():
+        return request.search_query.strip()
+
+    parts = [
+        asset.title,
+        asset.lab_name,
+        asset.data_classification,
+        "data agent",
+        *list(asset.tags or []),
+        *required_capabilities,
+    ]
+    return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def _build_dataset_hol_search_queries(
+    asset: DataAsset,
+    request: DatasetHolUseRequest,
+    required_capabilities: List[str],
+) -> List[str]:
+    fallbacks = [
+        _build_dataset_hol_search_query(asset, request, required_capabilities),
+        " ".join(["data agent", *required_capabilities]).strip(),
+        "data agent",
+    ]
+
+    deduped: List[str] = []
+    for item in fallbacks:
+        normalized = " ".join(str(item or "").split())
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def _build_dataset_hol_error_detail(
+    *,
+    message: str,
+    search_queries: List[str],
+    discovered: Optional[List[HolAgentSummary]] = None,
+    rejected: Optional[List[Dict[str, Any]]] = None,
+    attempted_errors: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return DatasetHolUseErrorDetail(
+        message=message,
+        search_queries=search_queries,
+        discovered_candidates=[_hol_agent_summary(agent) for agent in (discovered or [])][:10],
+        rejected_candidates=(rejected or [])[:10],
+        attempted_errors=(attempted_errors or [])[:10],
+    ).model_dump()
+
+
+def _build_dataset_hol_message(asset: DataAsset, instructions: Optional[str] = None) -> str:
+    meta = _coerce_meta(asset.meta)
+    proof_bundle = _build_proof_bundle(asset)
+    citation = _build_dataset_citation_payload(asset)
+    payload = {
+        "type": "synaptica_dataset_task",
+        "dataset": {
+            "id": asset.id,
+            "title": asset.title,
+            "description": asset.description,
+            "lab_name": asset.lab_name,
+            "classification": asset.data_classification,
+            "tags": asset.tags or [],
+            "filename": asset.filename,
+            "size_bytes": asset.size_bytes,
+            "created_at": asset.created_at.isoformat() if asset.created_at else _now_iso(),
+        },
+        "verification": {
+            "status": meta.get("verification_status"),
+            "report": meta.get("verification_report"),
+        },
+        "proof": proof_bundle,
+        "citation": citation,
+        "instructions": instructions
+        or (
+            "Review this dataset context and provide a concise data-agent response focused on "
+            "reuse potential, analysis suggestions, and any integrity or provenance concerns."
+        ),
+    }
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _append_hol_session_trace(
+    asset: DataAsset,
+    *,
+    selected_agent: Dict[str, Any],
+    session_id: str,
+    search_query: Optional[str],
+    instructions: Optional[str],
+    transport: Optional[str],
+    broker_response: Dict[str, Any],
+) -> None:
+    meta = _coerce_meta(asset.meta)
+    sessions = list(meta.get("hol_sessions") or [])
+    sessions.append(
+        {
+            "created_at": _now_iso(),
+            "selected_agent": selected_agent,
+            "session_id": session_id,
+            "search_query": search_query,
+            "instructions": instructions,
+            "transport": transport,
+            "broker_response": broker_response,
+        }
+    )
+    meta["hol_sessions"] = sessions[-20:]
+    asset.meta = meta
+
+
+def _build_data_agent_chat_response(message: str, db: Session) -> str:
+    query = (message or "").strip().lower()
+    rows = db.query(DataAsset).order_by(DataAsset.created_at.desc()).limit(50).all()
+
+    terms = re.findall(r"[a-z0-9]{3,}", query)
+    if terms:
+        matched: List[Tuple[int, DataAsset]] = []
+        for row in rows:
+            haystack = " ".join(
+                [
+                    row.title or "",
+                    row.description or "",
+                    row.lab_name or "",
+                    row.data_classification or "",
+                    " ".join(row.tags or []),
+                ]
+            ).lower()
+            score = sum(1 for term in terms if term in haystack)
+            if score:
+                matched.append((score, row))
+        matched.sort(key=lambda item: (item[0], item[1].created_at or datetime.min), reverse=True)
+        rows = [row for _, row in matched[:5]]
+    else:
+        rows = rows[:5]
+
+    if not rows:
+        return (
+            "No datasets are currently stored in the Synaptica Data Vault. "
+            "Upload a failed or underused dataset first, then ask again."
+        )
+
+    lines = [
+        "Synaptica Data Agent dataset summary:",
+    ]
+    for row in rows[:5]:
+        meta = _coerce_meta(row.meta)
+        lines.append(
+            "- "
+            f"{row.title} | lab={row.lab_name} | classification={row.data_classification} | "
+            f"verification={meta.get('verification_status')} | proof={meta.get('proof_status')} | "
+            f"tags={', '.join(row.tags or []) or 'none'}"
+        )
+    lines.append(
+        "Reply with a dataset title, tag, lab, or classification if you want a narrower match."
+    )
+    return "\n".join(lines)
 
 
 def _manifest_payload(asset: DataAsset) -> Dict[str, Any]:
@@ -724,6 +1039,7 @@ async def verify_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Data
         verification_report=_coerce_meta(asset.meta).get("verification_report"),
         proof_bundle=_build_proof_bundle(asset),
         similar_datasets=[SimilarDataset(**row) for row in _similar_datasets(db, asset)],
+        hol_sessions=_coerce_meta(asset.meta).get("hol_sessions") or [],
     )
 
 
@@ -812,6 +1128,182 @@ async def get_dataset(dataset_id: str, db: Session = Depends(get_db)) -> DataAss
         verification_report=meta.get("verification_report"),
         proof_bundle=_build_proof_bundle(asset),
         similar_datasets=[SimilarDataset(**row) for row in _similar_datasets(db, asset)],
+        hol_sessions=meta.get("hol_sessions") or [],
+    )
+
+
+@router.post("/datasets/{dataset_id}/hol-use", response_model=DatasetHolUseResponse)
+async def use_hol_data_agent(
+    dataset_id: str,
+    request: DatasetHolUseRequest,
+    db: Session = Depends(get_db),
+) -> DatasetHolUseResponse:
+    """Use a HOL data agent against a dataset via broker chat session/message."""
+
+    asset = db.query(DataAsset).filter(DataAsset.id == dataset_id).one_or_none()
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    required_capabilities = [
+        item.strip()
+        for item in (request.required_capabilities or DEFAULT_HOL_DATA_CAPABILITIES)
+        if isinstance(item, str) and item.strip()
+    ]
+    search_queries = _build_dataset_hol_search_queries(asset, request, required_capabilities)
+    search_query = search_queries[0]
+
+    if request.uaid and request.uaid.strip():
+        selected_agent = {
+            "uaid": request.uaid.strip(),
+            "name": request.uaid.strip(),
+            "description": "",
+            "capabilities": [],
+            "categories": [],
+            "transports": [],
+            "pricing": {},
+            "registry": None,
+            "available": None,
+            "availability_status": None,
+            "source_url": None,
+            "adapter": None,
+            "protocol": None,
+        }
+        candidate_agents: List[HolAgentSummary] = []
+    else:
+        discovered: List[HolAgentSummary] = []
+        seen_uaids: set[str] = set()
+        search_errors: List[str] = []
+        broker_limit = min(100, max(request.limit, request.limit * 5))
+        for candidate_query in search_queries:
+            try:
+                results = await run_in_threadpool(
+                    hol_search_agents,
+                    candidate_query,
+                    limit=broker_limit,
+                )
+            except HolClientError as exc:
+                search_errors.append(str(exc))
+                continue
+
+            for agent in results:
+                uaid = str(getattr(agent, "uaid", "") or "").strip()
+                if not uaid or uaid in seen_uaids:
+                    continue
+                seen_uaids.add(uaid)
+                discovered.append(agent)
+
+        if not discovered and search_errors:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=_build_dataset_hol_error_detail(
+                    message="HOL discovery failed while searching for data agents.",
+                    search_queries=search_queries,
+                    attempted_errors=search_errors,
+                ),
+            )
+
+        candidates = [
+            agent for agent in discovered if _matches_required_capabilities(agent, required_capabilities)
+        ]
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_build_dataset_hol_error_detail(
+                    message="No HOL agents found for the provided dataset query.",
+                    search_queries=search_queries,
+                    discovered=discovered,
+                ),
+            )
+
+        rejected_candidates: List[Dict[str, Any]] = []
+        broker_chatable_candidates: List[HolAgentSummary] = []
+        for agent in candidates:
+            rejection_reason = _get_broker_chatable_rejection_reason(agent)
+            if rejection_reason:
+                rejected_candidates.append(
+                    {
+                        **_hol_agent_summary(agent),
+                        "reason": rejection_reason,
+                    }
+                )
+                continue
+            broker_chatable_candidates.append(agent)
+        if not broker_chatable_candidates:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=_build_dataset_hol_error_detail(
+                    message="No broker-chatable HOL agents found for the provided dataset query.",
+                    search_queries=search_queries,
+                    discovered=candidates,
+                    rejected=rejected_candidates,
+                ),
+            )
+
+        candidate_agents = sorted(
+            broker_chatable_candidates,
+            key=_hol_candidate_sort_key,
+            reverse=True,
+        )
+        selected_agent = _hol_agent_summary(candidate_agents[0])
+
+    message = _build_dataset_hol_message(asset, request.instructions)
+    attempted_errors: List[str] = []
+    if request.uaid and request.uaid.strip():
+        candidates_to_try = [selected_agent]
+    else:
+        candidates_to_try = [_hol_agent_summary(agent) for agent in candidate_agents]
+
+    session_id: Optional[str] = None
+    broker_response: Optional[Dict[str, Any]] = None
+    for candidate in candidates_to_try:
+        try:
+            session_id = await run_in_threadpool(
+                hol_create_session,
+                candidate["uaid"],
+                transport=request.transport,
+                as_uaid=request.as_uaid,
+            )
+            broker_response = await run_in_threadpool(
+                hol_send_message,
+                session_id,
+                message,
+                as_uaid=request.as_uaid,
+            )
+            selected_agent = candidate
+            break
+        except HolClientError as exc:
+            attempted_errors.append(f"{candidate['uaid']}: {exc}")
+            continue
+
+    if session_id is None or broker_response is None:
+        detail = attempted_errors[0] if len(attempted_errors) == 1 else "; ".join(attempted_errors[:5])
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=_build_dataset_hol_error_detail(
+                message=detail,
+                search_queries=search_queries,
+                rejected=[selected_agent] if request.uaid and request.uaid.strip() else None,
+                attempted_errors=attempted_errors,
+            ),
+        )
+
+    _append_hol_session_trace(
+        asset,
+        selected_agent=selected_agent,
+        session_id=session_id,
+        search_query=None if request.uaid else search_query,
+        instructions=request.instructions,
+        transport=request.transport,
+        broker_response=broker_response,
+    )
+    db.commit()
+    db.refresh(asset)
+
+    return DatasetHolUseResponse(
+        success=True,
+        selected_agent=selected_agent,
+        session_id=session_id,
+        broker_response=broker_response,
     )
 
 
@@ -832,31 +1324,7 @@ async def get_dataset_citation(dataset_id: str, db: Session = Depends(get_db)) -
     asset = db.query(DataAsset).filter(DataAsset.id == dataset_id).one_or_none()
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
-    meta = _coerce_meta(asset.meta)
-
-    citation = {
-        "type": "dataset",
-        "title": asset.title,
-        "dataset_id": asset.id,
-        "authoring_lab": asset.lab_name,
-        "uploader": asset.uploader_name,
-        "published_at": asset.created_at.isoformat() if asset.created_at else _now_iso(),
-        "provider": "Synaptica Data Agent",
-        "classification": asset.data_classification,
-        "failed_reason": meta.get("failed_reason"),
-        "reuse_domains": meta.get("reuse_domains") or [],
-        "identifiers": {
-            "file_sha256": asset.sha256,
-            "manifest_cid": meta.get("manifest_cid"),
-            "manifest_sha256": meta.get("manifest_sha256"),
-            "hcs_topic_id": meta.get("hcs_topic_id"),
-        },
-        "links": {
-            "manifest_gateway_url": meta.get("manifest_gateway_url"),
-            "proof_endpoint": f"/api/data-agent/datasets/{asset.id}/proof",
-        },
-    }
-    return DatasetCitationResponse(citation=citation)
+    return DatasetCitationResponse(citation=_build_dataset_citation_payload(asset))
 
 
 @router.post("/datasets/{dataset_id}/reuse-events", response_model=ReuseEventResponse)
@@ -901,4 +1369,48 @@ async def download_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Fi
         path=str(path),
         media_type=asset.content_type or "application/octet-stream",
         filename=asset.filename,
+    )
+
+
+@router.get("/agent/.well-known/agent.json", response_model=AgentCard)
+async def data_agent_card() -> AgentCard:
+    """Expose the built-in Data Agent as a minimal A2A-compatible agent."""
+
+    return AgentCard(
+        id="data-agent-001",
+        name="Data Agent",
+        description="Synaptica Data Vault agent for cataloging and summarizing stored datasets.",
+        version="0.1.0",
+        capabilities=[
+            AgentCapability(name="dataset-search", description="Find datasets by title, lab, tag, or classification."),
+            AgentCapability(name="dataset-summary", description="Summarize stored datasets and provenance state."),
+        ],
+        tags=["data", "desci", "a2a", "synaptica"],
+        extras={"message_endpoint": "/api/data-agent/agent/a2a/v1/messages"},
+    )
+
+
+@router.get("/agent/health")
+async def data_agent_health() -> Dict[str, Any]:
+    """Health endpoint for the built-in Data Agent A2A surface."""
+
+    return {
+        "status": "ok",
+        "agent_id": "data-agent-001",
+        "service": "synaptica-data-agent",
+    }
+
+
+@router.post("/agent/a2a/v1/messages", response_model=MessageResponse)
+async def data_agent_message(
+    payload: MessagePayload,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    """Respond to simple broker/A2A-style chat messages for the built-in Data Agent."""
+
+    response = _build_data_agent_chat_response(payload.message, db)
+    return MessageResponse(
+        message_id=uuid.uuid4().hex,
+        response=response,
+        metadata=payload.metadata,
     )

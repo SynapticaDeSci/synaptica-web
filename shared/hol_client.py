@@ -172,6 +172,11 @@ class HolAgentSummary:
     transports: List[str]
     pricing: Dict[str, Any]
     registry: Optional[str] = None
+    available: Optional[bool] = None
+    availability_status: Optional[str] = None
+    source_url: Optional[str] = None
+    adapter: Optional[str] = None
+    protocol: Optional[str] = None
 
 
 def search_agents(
@@ -247,6 +252,22 @@ def search_agents(
                 or item.get("registry")
                 or item.get("sourceRegistry")
             )
+            available = item.get("available")
+            if available is None:
+                available = meta.get("available")
+            availability_status = (
+                item.get("availabilityStatus")
+                or meta.get("availabilityStatus")
+                or meta.get("status")
+            )
+            source_url = (
+                meta.get("url")
+                or item.get("url")
+                or ((item.get("endpoints") or {}).get("primary") if isinstance(item.get("endpoints"), dict) else None)
+                or ((item.get("endpoints") or {}).get("api") if isinstance(item.get("endpoints"), dict) else None)
+            )
+            adapter = meta.get("adapter") or item.get("adapter")
+            protocol = meta.get("protocol") or item.get("protocol")
             results.append(
                 HolAgentSummary(
                     uaid=uaid,
@@ -257,6 +278,11 @@ def search_agents(
                     transports=transports,
                     pricing=pricing if isinstance(pricing, dict) else {},
                     registry=str(registry) if registry else None,
+                    available=bool(available) if available is not None else None,
+                    availability_status=str(availability_status) if availability_status else None,
+                    source_url=str(source_url) if source_url else None,
+                    adapter=str(adapter) if adapter else None,
+                    protocol=str(protocol) if protocol else None,
                 )
             )
         except Exception:  # noqa: BLE001
@@ -284,8 +310,9 @@ def create_session(
             response = client.post("/chat/session", json=payload)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL create_session failed: %s", exc)
-            raise HolClientError(f"HOL create_session failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL create_session failed: %s", detail)
+            raise HolClientError(f"HOL create_session failed: {detail}") from exc
 
         data = response.json()
 
@@ -317,8 +344,9 @@ def send_message(
             response = client.post("/chat/message", json=payload)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL send_message failed: %s", exc)
-            raise HolClientError(f"HOL send_message failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL send_message failed: %s", detail)
+            raise HolClientError(f"HOL send_message failed: {detail}") from exc
 
         data = response.json()
 
@@ -336,8 +364,9 @@ def get_history(session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
             response = client.get(f"/chat/history/{session_id}", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL get_history failed: %s", exc)
-            raise HolClientError(f"HOL get_history failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL get_history failed: %s", detail)
+            raise HolClientError(f"HOL get_history failed: {detail}") from exc
 
         data = response.json()
 
@@ -357,8 +386,9 @@ def list_sessions(*, as_uaid: Optional[str] = None, limit: int = 50) -> List[Dic
             response = client.get("/chat/sessions", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL list_sessions failed: %s", exc)
-            raise HolClientError(f"HOL list_sessions failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL list_sessions failed: %s", detail)
+            raise HolClientError(f"HOL list_sessions failed: {detail}") from exc
 
         data = response.json()
 

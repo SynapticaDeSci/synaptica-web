@@ -315,8 +315,10 @@ export function Marketplace() {
                 const hasHolUaid = Boolean(agent.hol_uaid)
                 const holRegistered = holStatus === 'registered' || holStatus === 'ok' || hasHolUaid
                 const holPending = holStatus === 'pending'
+                const isDataAgent = typeKey === 'data'
                 const canRegisterOnHol = Boolean(
-                  agent.endpoint_url && (agent.erc8004_metadata_uri || agent.metadata_gateway_url)
+                  agent.endpoint_url &&
+                    (isDataAgent || agent.erc8004_metadata_uri || agent.metadata_gateway_url)
                 )
                 const isRegistering = registeringAgentId === agent.agent_id
                 const registerDisabled =

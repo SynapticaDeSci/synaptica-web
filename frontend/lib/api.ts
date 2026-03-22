@@ -4,12 +4,41 @@
 
 const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000';
 
+export interface DatasetHolUseErrorDetail {
+  message?: string;
+  search_queries?: string[];
+  discovered_candidates?: Array<Record<string, any>>;
+  rejected_candidates?: Array<Record<string, any>>;
+  attempted_errors?: string[];
+}
+
+export class ApiRequestError extends Error {
+  status?: number;
+  detail?: any;
+
+  constructor(message: string, options?: { status?: number; detail?: any }) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = options?.status;
+    this.detail = options?.detail;
+  }
+}
+
 function extractApiErrorMessage(payload: any, fallback: string): string {
   if (!payload) return fallback;
 
   const detail = payload.detail;
   if (typeof detail === 'string' && detail.trim()) {
     return detail;
+  }
+
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) {
+      return detail.message;
+    }
+    if (typeof (detail as any).detail === 'string' && (detail as any).detail.trim()) {
+      return (detail as any).detail;
+    }
   }
 
   if (Array.isArray(detail) && detail.length > 0) {
@@ -488,6 +517,11 @@ export interface HolAgentRecord {
     [key: string]: any;
   };
   registry?: string | null;
+  available?: boolean | null;
+  availability_status?: string | null;
+  source_url?: string | null;
+  adapter?: string | null;
+  protocol?: string | null;
 }
 
 export type HolRegisterMode = 'quote' | 'register';
@@ -495,6 +529,8 @@ export type HolRegisterMode = 'quote' | 'register';
 export interface HolRegisterAgentRequest {
   agent_id: string;
   mode?: HolRegisterMode;
+  endpoint_url_override?: string;
+  metadata_uri_override?: string;
 }
 
 export interface HolRegisterAgentResponse {
@@ -516,12 +552,31 @@ export interface HolRegisterAgentStatusResponse {
   updated_at?: string | null;
 }
 
+export interface HolChatMessageRecord {
+  role: string;
+  content: string;
+  timestamp?: string | null;
+  raw?: Record<string, any>;
+}
+
+export interface HolChatSessionResponse {
+  success: boolean;
+  session_id: string;
+  uaid?: string | null;
+  broker_response?: Record<string, any>;
+  history: HolChatMessageRecord[];
+}
+
 export async function searchHolAgents(
-  query: string
+  query: string,
+  options?: { onlyAvailable?: boolean }
 ): Promise<{ agents: HolAgentRecord[]; query: string }> {
   const q = query.trim() || 'agent';
   const url = new URL(`${BACKEND_BASE_URL}/api/hol/agents/search`);
   url.searchParams.set('q', q);
+  if (options?.onlyAvailable) {
+    url.searchParams.set('only_available', 'true');
+  }
 
   const response = await fetch(url.toString(), {
     method: 'GET',
@@ -547,6 +602,8 @@ export async function registerAgentOnHol(
     body: JSON.stringify({
       agent_id: payload.agent_id,
       mode: payload.mode ?? 'register',
+      endpoint_url_override: payload.endpoint_url_override,
+      metadata_uri_override: payload.metadata_uri_override,
     }),
   });
 
@@ -575,6 +632,52 @@ export async function getHolRegistrationStatus(
   }
 
   return result as HolRegisterAgentStatusResponse;
+}
+
+export async function createHolChatSession(payload: {
+  uaid: string;
+  transport?: string;
+  as_uaid?: string;
+}): Promise<HolChatSessionResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/hol/chat/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = extractApiErrorMessage(result, 'Failed to create HOL chat session');
+    throw new ApiRequestError(message, {
+      status: response.status,
+      detail: result?.detail ?? result,
+    });
+  }
+
+  return result as HolChatSessionResponse;
+}
+
+export async function sendHolChatMessage(payload: {
+  session_id: string;
+  message: string;
+  as_uaid?: string;
+}): Promise<HolChatSessionResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/hol/chat/message`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = extractApiErrorMessage(result, 'Failed to send HOL chat message');
+    throw new ApiRequestError(message, {
+      status: response.status,
+      detail: result?.detail ?? result,
+    });
+  }
+
+  return result as HolChatSessionResponse;
 }
 
 /**
@@ -1178,6 +1281,7 @@ export interface DataAssetDetailRecord extends DataAssetRecord {
   verification_report?: Record<string, any>;
   proof_bundle?: DatasetProofBundle;
   similar_datasets: SimilarDataset[];
+  hol_sessions: Array<Record<string, any>>;
 }
 
 export interface DataAssetListResponse {
@@ -1213,6 +1317,23 @@ export interface ListDatasetsParams {
   lab_name?: string;
   limit?: number;
   offset?: number;
+}
+
+export interface DatasetHolUseRequest {
+  uaid?: string;
+  search_query?: string;
+  required_capabilities?: string[];
+  instructions?: string;
+  transport?: string;
+  as_uaid?: string;
+  limit?: number;
+}
+
+export interface DatasetHolUseResponse {
+  success: boolean;
+  selected_agent: Record<string, any>;
+  session_id: string;
+  broker_response: Record<string, any>;
 }
 
 export async function uploadDataset(payload: UploadDatasetPayload): Promise<UploadDatasetResponse> {
@@ -1393,4 +1514,26 @@ export async function downloadDataset(datasetId: string): Promise<Blob> {
   }
 
   return response.blob();
+}
+
+export async function invokeDatasetHolAgent(
+  datasetId: string,
+  payload: DatasetHolUseRequest = {}
+): Promise<DatasetHolUseResponse> {
+  const response = await fetch(`${BACKEND_BASE_URL}/api/data-agent/datasets/${datasetId}/hol-use`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Failed to use HOL data agent' }));
+    const message = extractApiErrorMessage(error, 'Failed to use HOL data agent');
+    throw new ApiRequestError(message, {
+      status: response.status,
+      detail: error?.detail ?? error,
+    });
+  }
+
+  return response.json();
 }

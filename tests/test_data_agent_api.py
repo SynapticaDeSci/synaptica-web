@@ -234,3 +234,293 @@ def test_built_in_data_agent_is_listed(client: TestClient):
     payload = listing.json()
     ids = [agent["agent_id"] for agent in payload["agents"]]
     assert "data-agent-001" in ids
+
+
+def test_dataset_hol_use_autodiscovery_persists_session_trace(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _Agent:
+        uaid = "uaid:aid:hol-data"
+        name = "HOL Data Agent"
+        description = "Remote data specialist"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {"rate": 0}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/hol-data"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [_Agent()])
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda uaid, transport=None, as_uaid=None: "session-123")
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_send_message",
+        lambda session_id, message, as_uaid=None: {"reply": "analysis ready", "sessionId": session_id},
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["selected_agent"]["uaid"] == "uaid:aid:hol-data"
+    assert payload["session_id"] == "session-123"
+
+    detail = client.get(f"/api/data-agent/datasets/{dataset_id}")
+    assert detail.status_code == 200
+    hol_sessions = detail.json()["hol_sessions"]
+    assert len(hol_sessions) == 1
+    assert hol_sessions[0]["session_id"] == "session-123"
+    assert hol_sessions[0]["selected_agent"]["uaid"] == "uaid:aid:hol-data"
+
+
+def test_dataset_hol_use_autodiscovery_skips_broken_adapter_candidate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _BrokenAgent:
+        uaid = "uaid:aid:broken"
+        name = "Broken Agent"
+        description = "First candidate fails on broker adapter"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = []
+        pricing = {"rate": 0}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://broken.example.com"
+        adapter = "broken-adapter"
+        protocol = "broken"
+
+    class _WorkingAgent:
+        uaid = "uaid:aid:working"
+        name = "Working Agent"
+        description = "Second candidate succeeds"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = []
+        pricing = {"rate": 0}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://working.example.com"
+        adapter = "working-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=5: [_BrokenAgent(), _WorkingAgent()],
+    )
+
+    def _mock_create_session(uaid, transport=None, as_uaid=None):
+        if uaid == "uaid:aid:broken":
+            return "session-broken"
+        return "session-working"
+
+    def _mock_send_message(session_id, message, as_uaid=None):
+        if session_id == "session-broken":
+            from shared.hol_client import HolClientError
+
+            raise HolClientError("HOL send_message failed: 500 Internal Server Error: No adapter found for broken-adapter")
+        return {"reply": "usable", "sessionId": session_id}
+
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", _mock_create_session)
+    monkeypatch.setattr("api.routes.data_agent.hol_send_message", _mock_send_message)
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_agent"]["uaid"] == "uaid:aid:working"
+    assert payload["session_id"] == "session-working"
+
+
+def test_dataset_hol_use_explicit_uaid_skips_discovery(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    def _unexpected_search(query, limit=5):
+        raise AssertionError("HOL search should be skipped when uaid is explicitly provided")
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", _unexpected_search)
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda uaid, transport=None, as_uaid=None: "session-explicit")
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_send_message",
+        lambda session_id, message, as_uaid=None: {"reply": "ok", "sessionId": session_id},
+    )
+
+    response = client.post(
+        f"/api/data-agent/datasets/{dataset_id}/hol-use",
+        json={"uaid": "uaid:aid:explicit"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_agent"]["uaid"] == "uaid:aid:explicit"
+    assert payload["session_id"] == "session-explicit"
+
+
+def test_dataset_hol_use_returns_404_when_no_candidates_found(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [])
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "No HOL agents found" in detail["message"]
+    assert detail["search_queries"]
+
+
+def test_dataset_hol_use_filters_non_broker_chatable_candidates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _A2AAgent:
+        uaid = "uaid:aid:a2a"
+        name = "A2A Agent"
+        description = "Looks discoverable but not broker-chatable"
+        capabilities = ["data"]
+        categories = ["Data"]
+        transports = []
+        pricing = {}
+        registry = "broker"
+        protocol = "a2a"
+        adapter = "a2a-registry-adapter"
+        source_url = "https://example.com/a2a"
+        available = True
+        availability_status = "online"
+
+    class _UAgent:
+        uaid = "uaid:aid:uagent"
+        name = "UAgent"
+        description = "Agentverse style candidate"
+        capabilities = ["data"]
+        categories = ["Data"]
+        transports = []
+        pricing = {}
+        registry = "broker"
+        protocol = "uagent"
+        adapter = "agentverse-adapter"
+        source_url = "https://example.com/uagent"
+        available = True
+        availability_status = "online"
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=5: [_A2AAgent(), _UAgent()],
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "No broker-chatable HOL agents found" in detail["message"]
+    assert len(detail["rejected_candidates"]) == 2
+
+
+def test_dataset_hol_use_filters_unavailable_candidates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _UnavailableAgent:
+        uaid = "uaid:aid:unavailable"
+        name = "Unavailable Agent"
+        description = "Found by search but not marked available"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = False
+        availability_status = "offline"
+        source_url = "https://example.com/unavailable"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=10: [_UnavailableAgent()],
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert "No broker-chatable HOL agents found" in detail["message"]
+    assert detail["rejected_candidates"][0]["uaid"] == "uaid:aid:unavailable"
+    assert "not marked available" in detail["rejected_candidates"][0]["reason"]
+
+
+def test_dataset_hol_use_returns_502_for_hol_failures(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _Agent:
+        uaid = "uaid:aid:hol-data"
+        name = "HOL Data Agent"
+        description = "Remote data specialist"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {"rate": 0}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/hol-data"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [_Agent()])
+
+    def _failing_create_session(uaid, transport=None, as_uaid=None):
+        from shared.hol_client import HolClientError
+
+        raise HolClientError("HOL create_session failed: 502 Bad Gateway: upstream HOL registry error page")
+
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", _failing_create_session)
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 502
+    detail = response.json()["detail"]
+    assert "HOL create_session failed" in detail["message"]
+    assert detail["attempted_errors"]
+
+
+def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):
+    _upload_dataset(client)
+
+    card = client.get("/api/data-agent/agent/.well-known/agent.json")
+    assert card.status_code == 200
+    assert card.json()["id"] == "data-agent-001"
+
+    message = client.post(
+        "/api/data-agent/agent/a2a/v1/messages",
+        json={"message": "show me recent failed datasets", "metadata": {"source": "test"}},
+    )
+    assert message.status_code == 200
+    payload = message.json()
+    assert payload["message_id"]
+    assert "Synaptica Data Agent dataset summary" in payload["response"]
