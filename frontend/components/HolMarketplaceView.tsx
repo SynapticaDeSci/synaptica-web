@@ -51,15 +51,36 @@ function holAgentChatHint(agent: HolAgentRecord): {
 }
 
 function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?: string } {
+  const isAvailable = agent.available === true
   const protocol = String(agent.protocol ?? '').trim().toLowerCase()
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
+  const transports = (agent.transports ?? []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+
+  if (!isAvailable) {
+    return {
+      supported: false,
+      reason: 'This agent is discoverable in HOL but is not currently marked available by the broker.',
+    }
+  }
 
   if (protocol === 'acp' || adapter === 'virtuals-protocol-adapter') {
     return {
-      supported: true,
+      supported: false,
       reason:
-        'Virtuals ACP is often job-based and may require provider wallet/payment setup; chat can still be attempted.',
+        'Virtuals ACP is often job-based and may require provider wallet/payment setup, so Marketplace chat is disabled here.',
     }
+  }
+
+  if (['a2a', 'uagent'].includes(protocol) || ['a2a-registry-adapter', 'agentverse-adapter'].includes(adapter)) {
+    return {
+      supported: false,
+      reason:
+        'This agent is discoverable, but this broker environment commonly cannot relay chat for this protocol/adapter.',
+    }
+  }
+
+  if (transports.includes('http')) {
+    return { supported: true }
   }
 
   return { supported: true }
@@ -67,6 +88,7 @@ function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?
 
 export function HolMarketplaceView() {
   const [searchQuery, setSearchQuery] = useState('')
+  const [showAvailableOnly, setShowAvailableOnly] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<HolAgentRecord | null>(null)
   const [chatTransport, setChatTransport] = useState('')
   const [chatSessionId, setChatSessionId] = useState<string | null>(null)
@@ -78,8 +100,8 @@ export function HolMarketplaceView() {
     { agents: HolAgentRecord[]; query: string },
     Error
   >({
-    queryKey: ['hol-agents', searchQuery],
-    queryFn: () => searchHolAgents(searchQuery, { onlyAvailable: true }),
+    queryKey: ['hol-agents', searchQuery, showAvailableOnly],
+    queryFn: () => searchHolAgents(searchQuery, { onlyAvailable: showAvailableOnly }),
     staleTime: 30_000,
   })
 
@@ -133,7 +155,15 @@ export function HolMarketplaceView() {
     setChatError(null)
   }, [selectedAgent])
 
-  const agents = data?.agents ?? []
+  const agents = useMemo(() => data?.agents ?? [], [data])
+  const availableAgents = useMemo(
+    () => agents.filter((agent) => agent.available === true),
+    [agents]
+  )
+  const unavailableAgents = useMemo(
+    () => agents.filter((agent) => agent.available !== true),
+    [agents]
+  )
   const errorMessage = isError ? error?.message ?? 'Failed to load HOL agents' : null
   const selectedAgentHint = useMemo(
     () => (selectedAgent ? holAgentChatHint(selectedAgent) : null),
@@ -164,13 +194,117 @@ export function HolMarketplaceView() {
     })
   }
 
+  const renderAgentCard = (agent: HolAgentRecord) => {
+    const hasTransports = Array.isArray(agent.transports) && agent.transports.length > 0
+    const Icon = hasTransports ? Network : Cpu
+    const price = agent.pricing?.rate
+    const currency = agent.pricing?.currency ?? 'HBAR'
+    const rateType = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
+    const hint = holAgentChatHint(agent)
+    const sessionSupport = holSessionSupport(agent)
+
+    return (
+      <div
+        key={agent.uaid}
+        className="group overflow-hidden rounded-2xl border border-white/15 bg-slate-900/50 backdrop-blur-sm transition hover:border-sky-400/50 hover:bg-slate-900/70"
+      >
+        <div className="p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
+              <Icon className="h-7 w-7" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="truncate text-lg font-semibold text-white">{agent.name}</h3>
+                <span className={`rounded-md px-2 py-0.5 text-[11px] ${hint.toneClass}`}>
+                  {hint.label}
+                </span>
+                <span
+                  className={`rounded-md px-2 py-0.5 text-[11px] ${
+                    agent.available === true
+                      ? 'bg-emerald-500/20 text-emerald-200'
+                      : 'bg-slate-700/70 text-slate-300'
+                  }`}
+                >
+                  {agent.available === true ? 'Available now' : 'Discoverable only'}
+                </span>
+              </div>
+              <p className="mt-1 truncate font-mono text-xs text-slate-400">{agent.uaid}</p>
+              {agent.registry && (
+                <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
+                  <Globe2 className="h-3 w-3 text-sky-400" />
+                  {agent.registry}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {agent.description && (
+            <p className="mt-4 line-clamp-3 text-sm leading-relaxed text-slate-300">
+              {agent.description}
+            </p>
+          )}
+
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {(agent.transports ?? []).map((t) => (
+              <span
+                key={t}
+                className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-slate-200"
+              >
+                {t}
+              </span>
+            ))}
+            {agent.protocol && (
+              <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
+                proto:{agent.protocol}
+              </span>
+            )}
+            {agent.availability_status && (
+              <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
+                {agent.availability_status}
+              </span>
+            )}
+          </div>
+
+          <div className="mt-5 flex items-center justify-between border-t border-white/10 pt-4 text-sm">
+            <div className="text-slate-300">
+              <div className="text-xs uppercase tracking-[0.15em] text-slate-500">
+                Pricing
+              </div>
+              <div className="mt-1 text-sm font-semibold text-white">
+                {typeof price === 'number' ? `${price.toFixed(2)} ${currency}` : '—'}
+              </div>
+              <div className="text-xs text-slate-500">{rateType}</div>
+            </div>
+            <div className="flex flex-col items-end gap-2">
+              <button
+                type="button"
+                className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                  sessionSupport.supported
+                    ? 'bg-sky-500 text-white shadow-sm shadow-sky-500/30 hover:bg-sky-400'
+                    : 'cursor-not-allowed bg-slate-700/60 text-slate-400'
+                }`}
+                onClick={() => handleOpenChat(agent)}
+                disabled={!sessionSupport.supported}
+                title={sessionSupport.reason}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                Open chat
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-2xl font-semibold text-white">HOL Registry</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Discover external HOL agents currently marked available by the broker and test them with a live broker chat session.
+            Browse all discovered HOL agents, see which ones are currently available, and only chat with the ones this broker environment is likely to support.
           </p>
         </div>
       </div>
@@ -187,6 +321,18 @@ export function HolMarketplaceView() {
             className="w-full rounded-2xl border border-white/10 bg-slate-900/40 px-12 py-3 text-sm text-white placeholder:text-slate-500 focus:border-sky-400/50 focus:outline-none focus:ring-1 focus:ring-sky-400/30"
           />
         </div>
+        <label className="inline-flex items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-4 py-2 text-sm text-slate-300">
+          <input
+            type="checkbox"
+            checked={showAvailableOnly}
+            onChange={(event) => setShowAvailableOnly(event.target.checked)}
+            className="h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-400/40"
+          />
+          <span>Available only</span>
+          <span className="text-xs text-slate-500">
+            {showAvailableOnly ? 'Hide discoverable-only agents' : 'Show all discovered HOL agents'}
+          </span>
+        </label>
       </div>
 
       {isLoading && (
@@ -201,106 +347,44 @@ export function HolMarketplaceView() {
         </div>
       )}
 
-      <div className="grid gap-4 md:grid-cols-2">
-        {!isLoading &&
-          !errorMessage &&
-          agents.map((agent) => {
-            const hasTransports = Array.isArray(agent.transports) && agent.transports.length > 0
-            const Icon = hasTransports ? Network : Cpu
-            const price = agent.pricing?.rate
-            const currency = agent.pricing?.currency ?? 'HBAR'
-            const rateType = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
-            const hint = holAgentChatHint(agent)
-            const sessionSupport = holSessionSupport(agent)
+      {!isLoading && !errorMessage && availableAgents.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-200">
+              Available Now
+            </h3>
+            <span className="text-xs text-slate-400">{availableAgents.length} agents</span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {availableAgents.map((agent) => renderAgentCard(agent))}
+          </div>
+        </div>
+      )}
 
-            return (
-              <div
-                key={agent.uaid}
-                className="group overflow-hidden rounded-2xl border border-white/15 bg-slate-900/50 backdrop-blur-sm transition hover:border-sky-400/50 hover:bg-slate-900/70"
-              >
-                <div className="p-6">
-                  <div className="flex items-start gap-4">
-                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
-                      <Icon className="h-7 w-7" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="truncate text-lg font-semibold text-white">{agent.name}</h3>
-                        <span className={`rounded-md px-2 py-0.5 text-[11px] ${hint.toneClass}`}>
-                          {hint.label}
-                        </span>
-                      </div>
-                      <p className="mt-1 truncate font-mono text-xs text-slate-400">{agent.uaid}</p>
-                      {agent.registry && (
-                        <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
-                          <Globe2 className="h-3 w-3 text-sky-400" />
-                          {agent.registry}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {agent.description && (
-                    <p className="mt-4 line-clamp-3 text-sm leading-relaxed text-slate-300">
-                      {agent.description}
-                    </p>
-                  )}
-
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {(agent.transports ?? []).map((t) => (
-                      <span
-                        key={t}
-                        className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-slate-200"
-                      >
-                        {t}
-                      </span>
-                    ))}
-                    {agent.protocol && (
-                      <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
-                        proto:{agent.protocol}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="mt-5 flex items-center justify-between border-t border-white/10 pt-4 text-sm">
-                    <div className="text-slate-300">
-                      <div className="text-xs uppercase tracking-[0.15em] text-slate-500">
-                        Pricing
-                      </div>
-                      <div className="mt-1 text-sm font-semibold text-white">
-                        {typeof price === 'number' ? `${price.toFixed(2)} ${currency}` : '—'}
-                      </div>
-                      <div className="text-xs text-slate-500">{rateType}</div>
-                    </div>
-                    <div className="flex flex-col items-end gap-2">
-                      <button
-                        type="button"
-                        className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium transition ${
-                          sessionSupport.supported
-                            ? 'bg-sky-500 text-white shadow-sm shadow-sky-500/30 hover:bg-sky-400'
-                            : 'cursor-not-allowed bg-slate-700/60 text-slate-400'
-                        }`}
-                        onClick={() => handleOpenChat(agent)}
-                        disabled={!sessionSupport.supported}
-                        title={sessionSupport.reason}
-                      >
-                        <MessageSquare className="h-3.5 w-3.5" />
-                        Open chat
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-      </div>
+      {!isLoading && !errorMessage && !showAvailableOnly && unavailableAgents.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-300">
+              Discoverable Only
+            </h3>
+            <span className="text-xs text-slate-500">
+              {unavailableAgents.length} agents
+            </span>
+          </div>
+          <p className="text-sm text-slate-500">
+            These agents exist in HOL search results, but the broker does not currently mark them available for direct use here.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {unavailableAgents.map((agent) => renderAgentCard(agent))}
+          </div>
+        </div>
+      )}
 
       {!isLoading && !errorMessage && agents.length === 0 && (
         <div className="rounded-2xl border border-white/15 bg-slate-900/50 p-12 text-center">
           <p className="text-slate-400">No HOL agents found for this query yet.</p>
           <p className="mt-2 text-sm text-slate-500">
-            Try a broader search term, or ensure REGISTRY_BROKER_API_KEY is configured on the
-            backend.
+            Try a broader search term, or ensure the HOL sidecar and REGISTRY_BROKER_API_KEY are configured.
           </p>
         </div>
       )}
