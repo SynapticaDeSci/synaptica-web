@@ -11,7 +11,15 @@ from api.main import (
 )
 from shared.database import Agent, AgentReputation, AgentsCacheEntry, SessionLocal
 import shared.hol_client as hol_client
-from shared.hol_client import _format_http_error, _get_quote_paths, create_session, search_agents
+from shared.hol_client import (
+    _format_http_error,
+    _get_quote_paths,
+    create_session,
+    get_history,
+    search_agents,
+    send_message,
+    vector_search_agents,
+)
 from shared.research.catalog import default_public_research_endpoint, default_public_research_health_url
 
 
@@ -233,6 +241,59 @@ def test_search_agents_supports_hits_payload(
     assert agents[0].name == "Demo HOL Agent"
     assert agents[0].trust_score == 42.5
     assert agents[0].trust_scores == {"total": 42.5, "availability.uptime": 88.0}
+
+
+def test_vector_search_agents_supports_nested_agent_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://127.0.0.1:8040/search/vector")
+    response = httpx.Response(
+        200,
+        json={
+            "hits": [
+                {
+                    "agent": {
+                        "uaid": "uaid:aid:vector-demo",
+                        "metadata": {
+                            "name": "Vector HOL Agent",
+                            "description": "Semantic match",
+                            "capabilities": ["analysis"],
+                        },
+                        "transports": ["http"],
+                        "available": "true",
+                    },
+                    "score": 0.97,
+                }
+            ]
+        },
+        request=request,
+    )
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(self, path: str, json: dict | None = None) -> httpx.Response:
+            assert path == "/search/vector"
+            assert json is not None
+            assert json.get("query") == "treasury risk monitoring assistant"
+            assert json.get("filter") == {"registry": "hashgraph-online"}
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    agents = vector_search_agents(
+        "treasury risk monitoring assistant",
+        limit=3,
+        filter={"registry": "hashgraph-online"},
+    )
+    assert len(agents) == 1
+    assert agents[0].uaid == "uaid:aid:vector-demo"
+    assert agents[0].name == "Vector HOL Agent"
+    assert agents[0].available is True
 
 
 def test_hol_agents_search_exposes_candidate_metadata(
@@ -494,6 +555,125 @@ def test_create_session_normalizes_http_errors(
 
     with pytest.raises(hol_client.HolClientError, match="HOL create_session failed: 502 Bad Gateway"):
         create_session("uaid:aid:demo")
+
+
+def test_create_session_forwards_sender_uaid_auth_and_history_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://127.0.0.1:8040/chat/session")
+    response = httpx.Response(
+        200,
+        json={"sessionId": "session-123"},
+        request=request,
+    )
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(
+            self,
+            path: str,
+            json: dict | None = None,
+            timeout: object | None = None,
+        ) -> httpx.Response:
+            assert path == "/chat/session"
+            assert json == {
+                "uaid": "uaid:aid:demo",
+                "senderUaid": "uaid:aid:sender",
+                "auth": {"type": "bearer", "token": "secret"},
+                "historyTtlSeconds": 120,
+            }
+            assert timeout is not None
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    session_id = create_session(
+        "uaid:aid:demo",
+        as_uaid="uaid:aid:sender",
+        auth={"type": "bearer", "token": "secret"},
+        history_ttl_seconds=120,
+    )
+    assert session_id == "session-123"
+
+
+def test_send_message_supports_agent_url_and_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://127.0.0.1:8040/chat/message")
+    response = httpx.Response(
+        200,
+        json={"reply": "ack"},
+        request=request,
+    )
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(self, path: str, json: dict | None = None) -> httpx.Response:
+            assert path == "/chat/message"
+            assert json == {
+                "message": "hello",
+                "agentUrl": "https://agent.example.com",
+                "senderUaid": "uaid:aid:sender",
+                "auth": {"type": "bearer", "token": "secret"},
+                "streaming": True,
+            }
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    payload = send_message(
+        None,
+        "hello",
+        agent_url="https://agent.example.com",
+        as_uaid="uaid:aid:sender",
+        auth={"type": "bearer", "token": "secret"},
+        streaming=True,
+    )
+    assert payload["reply"] == "ack"
+
+
+def test_get_history_passes_limit_and_decrypt_to_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "http://127.0.0.1:8040/chat/history/session-123")
+    response = httpx.Response(
+        200,
+        json={
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+                {"role": "assistant", "content": "three"},
+            ]
+        },
+        request=request,
+    )
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def get(self, path: str, params: dict | None = None) -> httpx.Response:
+            assert path == "/chat/history/session-123"
+            assert params == {"limit": 2, "decrypt": "true"}
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    history = get_history("session-123", limit=2, decrypt=True)
+    assert [message["content"] for message in history] == ["two", "three"]
 
 
 def test_check_sidecar_health_surfaces_clear_unavailable_message(

@@ -174,3 +174,111 @@ test('chat routes preserve transport and sender UAID', async () => {
   assert.equal(capturedMessagePayload.sessionId, 'session-123');
   assert.equal(capturedMessagePayload.senderUaid, 'uaid:aid:sender');
 });
+
+test('chat routes support newer SDK namespace and camelCase sender fields', async () => {
+  let capturedSessionPayload = null;
+  let capturedMessagePayload = null;
+  const handler = createTestHandler(() => ({
+    chat: {
+      async createSession(payload) {
+        capturedSessionPayload = payload;
+        return { sessionId: 'session-chat-namespace' };
+      },
+      async sendMessage(payload) {
+        capturedMessagePayload = payload;
+        return { reply: 'ack' };
+      },
+    },
+  }));
+
+  const sessionResponse = await invokeHandler(handler, {
+    method: 'POST',
+    url: '/chat/session',
+    body: {
+      uaid: 'uaid:aid:test',
+      senderUaid: 'uaid:aid:sender',
+      historyTtlSeconds: 90,
+      auth: { type: 'bearer', token: 'secret' },
+    },
+  });
+  assert.equal(sessionResponse.statusCode, 200);
+  assert.equal(capturedSessionPayload.senderUaid, 'uaid:aid:sender');
+  assert.equal(capturedSessionPayload.historyTtlSeconds, 90);
+  assert.equal(capturedSessionPayload.auth.type, 'bearer');
+
+  const messageResponse = await invokeHandler(handler, {
+    method: 'POST',
+    url: '/chat/message',
+    body: {
+      sessionId: 'session-chat-namespace',
+      message: 'hello',
+      senderUaid: 'uaid:aid:sender',
+      auth: { type: 'bearer', token: 'secret' },
+    },
+  });
+  assert.equal(messageResponse.statusCode, 200);
+  assert.equal(capturedMessagePayload.sessionId, 'session-chat-namespace');
+  assert.equal(capturedMessagePayload.senderUaid, 'uaid:aid:sender');
+  assert.equal(capturedMessagePayload.auth.type, 'bearer');
+});
+
+test('history route trims to limit and forwards decrypt to newer SDK chat namespace', async () => {
+  let capturedOptions = null;
+  const handler = createTestHandler(() => ({
+    chat: {
+      async getHistory(sessionId, options) {
+        assert.equal(sessionId, 'session-123');
+        capturedOptions = options;
+        return [
+          { role: 'user', content: 'one' },
+          { role: 'assistant', content: 'two' },
+          { role: 'assistant', content: 'three' },
+        ];
+      },
+    },
+  }));
+
+  const response = await invokeHandler(handler, {
+    method: 'GET',
+    url: '/chat/history/session-123?limit=2&decrypt=true',
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(capturedOptions.decrypt, true);
+  assert.deepEqual(
+    response.payload.messages.map((item) => item.content),
+    ['two', 'three'],
+  );
+});
+
+test('vector search forwards filter payload to HOL SDK client', async () => {
+  const handler = createTestHandler(() => ({
+    async vectorSearch(payload) {
+      assert.equal(payload.query, 'treasury risk monitoring assistant');
+      assert.equal(payload.limit, 3);
+      assert.equal(payload.filter.registry, 'hashgraph-online');
+      return {
+        hits: [
+          {
+            agent: {
+              uaid: 'uaid:aid:vector',
+              metadata: { name: 'Vector Agent' },
+            },
+            score: 0.99,
+          },
+        ],
+      };
+    },
+  }));
+
+  const response = await invokeHandler(handler, {
+    method: 'POST',
+    url: '/search/vector',
+    body: {
+      query: 'treasury risk monitoring assistant',
+      limit: 3,
+      filter: { registry: 'hashgraph-online' },
+    },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.payload.hits[0].agent.uaid, 'uaid:aid:vector');
+});

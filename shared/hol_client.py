@@ -10,7 +10,7 @@ This module preserves the Python helper surface used by the rest of Synaptica:
 - Register local agents on HOL or request registration quotes.
 
 `get_credit_balance()` remains on the direct REST path as a temporary fallback
-because the current SDK surface used here does not provide a clean equivalent.
+because the current sidecar surface does not yet proxy a clean equivalent.
 """
 
 from __future__ import annotations
@@ -325,6 +325,114 @@ class HolAgentSummary:
     protocol: Optional[str] = None
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _extract_search_items(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = (
+            data.get("results")
+            or data.get("hits")
+            or data.get("agents")
+            or data.get("items")
+            or []
+        )
+    else:
+        items = []
+
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _normalize_hol_agent_entry(item: Dict[str, Any]) -> Optional[HolAgentSummary]:
+    agent_item = item.get("agent")
+    payload = agent_item if isinstance(agent_item, dict) else item
+
+    uaid = str(payload.get("uaid") or payload.get("id") or "").strip()
+    if not uaid:
+        return None
+
+    meta = payload.get("metadata") or {}
+    name = meta.get("name") or payload.get("name") or uaid
+    description = meta.get("description") or payload.get("description") or ""
+    capabilities = _coerce_str_list(meta.get("capabilities") or payload.get("capabilities"))
+    categories = _coerce_str_list(meta.get("categories") or payload.get("categories"))
+    transports = _coerce_str_list(meta.get("transports") or payload.get("transports"))
+    pricing = meta.get("pricing") or payload.get("pricing") or {}
+    registry = meta.get("registry") or payload.get("registry") or payload.get("sourceRegistry")
+    available = payload.get("available")
+    if available is None:
+        available = meta.get("available")
+    availability_status = (
+        payload.get("availabilityStatus")
+        or meta.get("availabilityStatus")
+        or meta.get("status")
+    )
+    trust_score_value = payload.get("trustScore")
+    if trust_score_value is None:
+        trust_score_value = meta.get("trustScore")
+    trust_score: Optional[float]
+    try:
+        trust_score = float(trust_score_value) if trust_score_value is not None else None
+    except (TypeError, ValueError):
+        trust_score = None
+
+    raw_trust_scores = payload.get("trustScores")
+    if raw_trust_scores is None:
+        raw_trust_scores = meta.get("trustScores")
+    trust_scores: Optional[Dict[str, float]] = None
+    if isinstance(raw_trust_scores, dict):
+        normalized_trust_scores: Dict[str, float] = {}
+        for key, value in raw_trust_scores.items():
+            if not isinstance(key, str):
+                continue
+            try:
+                normalized_trust_scores[key] = float(value)
+            except (TypeError, ValueError):
+                continue
+        trust_scores = normalized_trust_scores or None
+
+    endpoints = payload.get("endpoints")
+    source_url = (
+        meta.get("url")
+        or payload.get("url")
+        or (endpoints.get("primary") if isinstance(endpoints, dict) else None)
+        or (endpoints.get("api") if isinstance(endpoints, dict) else None)
+    )
+    adapter = meta.get("adapter") or payload.get("adapter")
+    protocol = meta.get("protocol") or payload.get("protocol")
+
+    return HolAgentSummary(
+        uaid=uaid,
+        name=str(name),
+        description=str(description),
+        capabilities=capabilities,
+        categories=categories,
+        transports=transports,
+        pricing=pricing if isinstance(pricing, dict) else {},
+        registry=str(registry) if registry else None,
+        available=_coerce_optional_bool(available),
+        availability_status=str(availability_status) if availability_status else None,
+        trust_score=trust_score,
+        trust_scores=trust_scores,
+        source_url=str(source_url) if source_url else None,
+        adapter=str(adapter) if adapter else None,
+        protocol=str(protocol) if protocol else None,
+    )
+
+
 def search_agents(
     query: str,
     *,
@@ -362,105 +470,12 @@ def search_agents(
 
         data = response.json()
 
-    if isinstance(data, list):
-        items = data
-    elif isinstance(data, dict):
-        # Broker variants have returned any of these keys in practice.
-        items = (
-            data.get("results")
-            or data.get("hits")
-            or data.get("agents")
-            or data.get("items")
-            or []
-        )
-    else:
-        items = []
-
-    if not isinstance(items, list):
-        items = []
-
     results: List[HolAgentSummary] = []
-    for item in items:
+    for item in _extract_search_items(data):
         try:
-            uaid = str(item.get("uaid") or item.get("id") or "").strip()
-            if not uaid:
-                continue
-            meta = item.get("metadata") or {}
-            name = meta.get("name") or item.get("name") or uaid
-            description = meta.get("description") or item.get("description") or ""
-            capabilities = _coerce_str_list(
-                meta.get("capabilities") or item.get("capabilities")
-            )
-            categories = _coerce_str_list(
-                meta.get("categories") or item.get("categories")
-            )
-            transports = _coerce_str_list(
-                meta.get("transports") or item.get("transports")
-            )
-            pricing = meta.get("pricing") or item.get("pricing") or {}
-            registry = (
-                meta.get("registry")
-                or item.get("registry")
-                or item.get("sourceRegistry")
-            )
-            available = item.get("available")
-            if available is None:
-                available = meta.get("available")
-            availability_status = (
-                item.get("availabilityStatus")
-                or meta.get("availabilityStatus")
-                or meta.get("status")
-            )
-            trust_score_value = item.get("trustScore")
-            if trust_score_value is None:
-                trust_score_value = meta.get("trustScore")
-            trust_score: Optional[float]
-            try:
-                trust_score = float(trust_score_value) if trust_score_value is not None else None
-            except (TypeError, ValueError):
-                trust_score = None
-
-            raw_trust_scores = item.get("trustScores")
-            if raw_trust_scores is None:
-                raw_trust_scores = meta.get("trustScores")
-            trust_scores: Optional[Dict[str, float]] = None
-            if isinstance(raw_trust_scores, dict):
-                normalized_trust_scores: Dict[str, float] = {}
-                for key, value in raw_trust_scores.items():
-                    if not isinstance(key, str):
-                        continue
-                    try:
-                        normalized_trust_scores[key] = float(value)
-                    except (TypeError, ValueError):
-                        continue
-                trust_scores = normalized_trust_scores or None
-            source_url = (
-                meta.get("url")
-                or item.get("url")
-                or ((item.get("endpoints") or {}).get("primary") if isinstance(item.get("endpoints"), dict) else None)
-                or ((item.get("endpoints") or {}).get("api") if isinstance(item.get("endpoints"), dict) else None)
-            )
-            adapter = meta.get("adapter") or item.get("adapter")
-            protocol = meta.get("protocol") or item.get("protocol")
-            results.append(
-                HolAgentSummary(
-                    uaid=uaid,
-                    name=str(name),
-                    description=str(description),
-                    capabilities=capabilities,
-                    categories=categories,
-                    transports=transports,
-                    pricing=pricing if isinstance(pricing, dict) else {},
-                    registry=str(registry) if registry else None,
-                    available=bool(available) if available is not None else None,
-                    availability_status=str(availability_status) if availability_status else None,
-                    trust_score=trust_score,
-                    trust_scores=trust_scores,
-                    source_url=str(source_url) if source_url else None,
-                    adapter=str(adapter) if adapter else None,
-                    protocol=str(protocol) if protocol else None,
-                )
-            )
+            normalized = _normalize_hol_agent_entry(item)
+            if normalized is not None:
+                results.append(normalized)
         except Exception:  # noqa: BLE001
             logger.debug("Failed to normalize HOL agent entry: %r", item, exc_info=True)
             continue
@@ -468,18 +483,79 @@ def search_agents(
     return results
 
 
-def create_session(
-    uaid: str,
+def vector_search_agents(
+    query: str,
     *,
+    limit: int = 5,
+    filter: Optional[Dict[str, Any]] = None,
+) -> List[HolAgentSummary]:
+    """Run semantic/vector search through the HOL SDK sidecar."""
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string")
+
+    payload: Dict[str, Any] = {
+        "query": query.strip(),
+        "limit": max(1, min(limit, 100)),
+    }
+    if filter:
+        payload["filter"] = dict(filter)
+
+    with _build_sidecar_client() as client:
+        try:
+            response = client.post("/search/vector", json=payload)
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar vector search request failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
+        except httpx.HTTPError as exc:  # noqa: BLE001
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL vector search request via sidecar failed: %s", detail)
+            raise HolClientError(f"HOL vector_search failed: {detail}") from exc
+
+        data = response.json()
+
+    results: List[HolAgentSummary] = []
+    for item in _extract_search_items(data):
+        try:
+            normalized = _normalize_hol_agent_entry(item)
+            if normalized is not None:
+                results.append(normalized)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to normalize HOL vector-search entry: %r", item, exc_info=True)
+            continue
+
+    return results
+
+
+def create_session(
+    uaid: Optional[str] = None,
+    *,
+    agent_url: Optional[str] = None,
     transport: Optional[str] = None,
     as_uaid: Optional[str] = None,
+    auth: Optional[Dict[str, Any]] = None,
+    history_ttl_seconds: Optional[int] = None,
 ) -> str:
     """Create a chat session with a target UAID."""
-    payload: Dict[str, Any] = {"uaid": uaid}
+    normalized_uaid = (uaid or "").strip()
+    normalized_agent_url = (agent_url or "").strip()
+    if not normalized_uaid and not normalized_agent_url:
+        raise ValueError("uaid or agent_url is required")
+
+    payload: Dict[str, Any] = {}
+    if normalized_uaid:
+        payload["uaid"] = normalized_uaid
+    if normalized_agent_url:
+        payload["agentUrl"] = normalized_agent_url
     if transport:
         payload["transport"] = transport
     if as_uaid:
-        payload["asUaid"] = as_uaid
+        payload["senderUaid"] = as_uaid
+    if auth:
+        payload["auth"] = dict(auth)
+    if history_ttl_seconds is not None:
+        payload["historyTtlSeconds"] = int(history_ttl_seconds)
 
     attempts = _get_sidecar_create_session_retries() + 1
     request_timeout = httpx.Timeout(
@@ -557,23 +633,33 @@ def send_message(
     message: str,
     *,
     uaid: Optional[str] = None,
+    agent_url: Optional[str] = None,
     as_uaid: Optional[str] = None,
+    auth: Optional[Dict[str, Any]] = None,
+    streaming: bool = False,
 ) -> Dict[str, Any]:
     """Send a message into an existing chat session (or directly by UAID)."""
     if not message or not message.strip():
         raise ValueError("message must be a non-empty string")
     normalized_session_id = (session_id or "").strip()
     normalized_uaid = (uaid or "").strip()
-    if not normalized_session_id and not normalized_uaid:
-        raise ValueError("session_id or uaid is required")
+    normalized_agent_url = (agent_url or "").strip()
+    if not normalized_session_id and not normalized_uaid and not normalized_agent_url:
+        raise ValueError("session_id, uaid, or agent_url is required")
 
     payload: Dict[str, Any] = {"message": message}
     if normalized_session_id:
         payload["sessionId"] = normalized_session_id
     if normalized_uaid:
         payload["uaid"] = normalized_uaid
+    if normalized_agent_url:
+        payload["agentUrl"] = normalized_agent_url
     if as_uaid:
         payload["senderUaid"] = as_uaid
+    if auth:
+        payload["auth"] = dict(auth)
+    if streaming:
+        payload["streaming"] = True
 
     with _build_sidecar_client() as client:
         try:
@@ -595,9 +681,17 @@ def send_message(
     return data
 
 
-def get_history(session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
+def get_history(
+    session_id: str,
+    *,
+    limit: int = 50,
+    decrypt: bool = False,
+) -> List[Dict[str, Any]]:
     """Fetch recent messages for a chat session."""
-    params = {"limit": max(1, min(limit, 200))}
+    params = {
+        "limit": max(1, min(limit, 200)),
+        "decrypt": "true" if decrypt else "false",
+    }
 
     with _build_sidecar_client() as client:
         try:
@@ -614,9 +708,10 @@ def get_history(session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
 
         data = response.json()
 
-    if isinstance(data, list):
-        return data
-    return data.get("messages") or []
+    messages = data if isinstance(data, list) else data.get("messages") or []
+    if not isinstance(messages, list):
+        return []
+    return messages[-params["limit"] :]
 
 
 def list_sessions(*, as_uaid: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
