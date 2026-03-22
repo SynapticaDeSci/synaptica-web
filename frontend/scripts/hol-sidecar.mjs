@@ -71,6 +71,52 @@ function firstString(values) {
   return null;
 }
 
+function firstObject(values) {
+  for (const value of values) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function resolveClientMethod(client, paths) {
+  for (const path of paths) {
+    const parts = `${path}`.split('.');
+    let owner = client;
+    let value = client;
+    let found = true;
+    for (const part of parts) {
+      if (!value || typeof value !== 'object' || !(part in value)) {
+        found = false;
+        break;
+      }
+      owner = value;
+      value = value[part];
+    }
+    if (found && typeof value === 'function') {
+      return value.bind(owner);
+    }
+  }
+  return null;
+}
+
 export function buildSidecarConfig(env = process.env) {
   const baseUrl = (env.REGISTRY_BROKER_API_URL || DEFAULT_BASE_URL).trim();
   const host = (env.HOL_SDK_SIDECAR_HOST || DEFAULT_HOST).trim() || DEFAULT_HOST;
@@ -263,10 +309,23 @@ async function requestSendMessageRaw(client, payload) {
   });
 }
 
-async function requestHistoryRaw(client, sessionId) {
-  return client.requestJson(`/chat/history/${encodeURIComponent(sessionId)}`, {
+async function requestHistoryRaw(client, sessionId, options = {}) {
+  const query = new URLSearchParams();
+  if (options.limit !== undefined && options.limit !== null) {
+    query.set('limit', `${options.limit}`);
+  }
+  if (options.decrypt !== undefined && options.decrypt !== null) {
+    query.set('decrypt', options.decrypt ? 'true' : 'false');
+  }
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  return client.requestJson(`/chat/history/${encodeURIComponent(sessionId)}${suffix}`, {
     method: 'GET',
   });
+}
+
+function normalizeHistoryMessages(snapshot) {
+  const normalized = normalizeHistorySnapshot(snapshot);
+  return Array.isArray(normalized.messages) ? normalized.messages : [];
 }
 
 export function createHolSidecarHandler({
@@ -308,13 +367,39 @@ export function createHolSidecarHandler({
         };
         let result;
         try {
-          result = await client.search(payload);
+          const search = resolveClientMethod(client, ['search']);
+          if (!search) {
+            throw new Error('HOL SDK client does not expose a search method');
+          }
+          result = await search(payload);
         } catch (error) {
           if (!isRegistryBrokerParseError(error)) {
             throw error;
           }
           result = await requestSearchRaw(client, payload);
         }
+        jsonResponse(res, 200, result);
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/search/vector') {
+        const body = await readJsonBody(req);
+        const query = firstString([body.query, body.q]);
+        if (!query) {
+          jsonResponse(res, 400, { detail: 'query is required' });
+          return;
+        }
+        const filter = firstObject([body.filter, body.filters]) || {};
+        const payload = {
+          query,
+          limit: clamp(body.limit, 1, 100, 5),
+          ...(Object.keys(filter).length > 0 ? { filter } : {}),
+        };
+        const vectorSearch = resolveClientMethod(client, ['vectorSearch', 'vector_search']);
+        if (!vectorSearch) {
+          throw new Error('HOL SDK client does not expose a vectorSearch method');
+        }
+        const result = await vectorSearch(payload);
         jsonResponse(res, 200, result);
         return;
       }
@@ -337,10 +422,15 @@ export function createHolSidecarHandler({
         const sdkPayload = normalizeRegistrationPayload(agentPayload);
         let result;
         try {
+          const getRegistrationQuote = resolveClientMethod(client, ['getRegistrationQuote']);
+          const registerAgent = resolveClientMethod(client, ['registerAgent']);
+          if (!getRegistrationQuote || !registerAgent) {
+            throw new Error('HOL SDK client does not expose registration methods');
+          }
           result =
             mode === 'quote'
-              ? await client.getRegistrationQuote(sdkPayload)
-              : await client.registerAgent(sdkPayload);
+              ? await getRegistrationQuote(sdkPayload)
+              : await registerAgent(sdkPayload);
         } catch (error) {
           if (!isRegistryBrokerParseError(error)) {
             throw error;
@@ -359,17 +449,28 @@ export function createHolSidecarHandler({
           jsonResponse(res, 400, { detail: 'uaid or agent_url is required' });
           return;
         }
+        const senderUaid = firstString([body.senderUaid, body.asUaid, body.as_uaid]);
         const payload = {
           ...(uaid ? { uaid } : { agentUrl }),
-          ...(body.as_uaid ? { senderUaid: body.as_uaid } : {}),
-          ...(body.history_ttl_seconds ? { historyTtlSeconds: body.history_ttl_seconds } : {}),
+          ...(senderUaid ? { senderUaid } : {}),
+          ...(body.historyTtlSeconds || body.history_ttl_seconds
+            ? { historyTtlSeconds: body.historyTtlSeconds || body.history_ttl_seconds }
+            : {}),
         };
+        const auth = firstObject([body.auth]);
+        if (auth) {
+          payload.auth = auth;
+        }
         if (body.transport) {
           payload.transport = body.transport;
         }
         let result;
         try {
-          result = await client.createSession(payload);
+          const createSession = resolveClientMethod(client, ['chat.createSession', 'createSession']);
+          if (!createSession) {
+            throw new Error('HOL SDK client does not expose a createSession method');
+          }
+          result = await createSession(payload);
         } catch (error) {
           if (!isRegistryBrokerParseError(error)) {
             throw error;
@@ -401,12 +502,21 @@ export function createHolSidecarHandler({
           ...(agentUrl ? { agentUrl } : {}),
           ...(body.streaming === true ? { streaming: true } : {}),
         };
-        if (body.as_uaid) {
-          payload.senderUaid = body.as_uaid;
+        const senderUaid = firstString([body.senderUaid, body.asUaid, body.as_uaid]);
+        if (senderUaid) {
+          payload.senderUaid = senderUaid;
+        }
+        const auth = firstObject([body.auth]);
+        if (auth) {
+          payload.auth = auth;
         }
         let result;
         try {
-          result = await client.sendMessage(payload);
+          const sendMessage = resolveClientMethod(client, ['chat.sendMessage', 'sendMessage']);
+          if (!sendMessage) {
+            throw new Error('HOL SDK client does not expose a sendMessage method');
+          }
+          result = await sendMessage(payload);
         } catch (error) {
           if (!isRegistryBrokerParseError(error)) {
             throw error;
@@ -423,16 +533,29 @@ export function createHolSidecarHandler({
           jsonResponse(res, 400, { detail: 'session_id is required' });
           return;
         }
+        const limit = clamp(url.searchParams.get('limit'), 1, 200, 50);
+        const decrypt = parseBoolean(url.searchParams.get('decrypt'), false);
         let snapshot;
         try {
-          snapshot = await client.fetchHistorySnapshot(sessionId, { decrypt: false });
+          const getHistory = resolveClientMethod(client, ['chat.getHistory']);
+          const fetchHistorySnapshot = resolveClientMethod(client, ['fetchHistorySnapshot']);
+          if (getHistory) {
+            snapshot = await getHistory(sessionId, { decrypt });
+          } else if (fetchHistorySnapshot) {
+            snapshot = await fetchHistorySnapshot(sessionId, { decrypt });
+          } else {
+            throw new Error('HOL SDK client does not expose a history method');
+          }
         } catch (error) {
           if (!isRegistryBrokerParseError(error)) {
             throw error;
           }
-          snapshot = await requestHistoryRaw(client, sessionId);
+          snapshot = await requestHistoryRaw(client, sessionId, { limit, decrypt });
         }
-        jsonResponse(res, 200, normalizeHistorySnapshot(snapshot));
+        const messages = normalizeHistoryMessages(snapshot);
+        jsonResponse(res, 200, {
+          messages: messages.slice(-limit),
+        });
         return;
       }
 
