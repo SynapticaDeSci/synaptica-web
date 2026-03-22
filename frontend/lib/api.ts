@@ -519,6 +519,8 @@ export interface HolAgentRecord {
   registry?: string | null;
   available?: boolean | null;
   availability_status?: string | null;
+  trust_score?: number | null;
+  trust_scores?: Record<string, number> | null;
   source_url?: string | null;
   adapter?: string | null;
   protocol?: string | null;

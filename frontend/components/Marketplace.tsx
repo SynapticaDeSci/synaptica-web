@@ -224,7 +224,7 @@ export function Marketplace() {
       </div>
 
       {activeSource === 'hol' ? (
-        <HolMarketplaceView />
+        <HolMarketplaceView localAgents={agents} />
       ) : (
         <>
           <div className="space-y-4">
