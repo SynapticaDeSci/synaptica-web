@@ -219,7 +219,7 @@ export function Marketplace() {
           </button>
         </div>
         <div className="w-[132px] justify-self-start md:justify-self-end">
-          <AddAgentModal onSuccess={handleAgentAdded} />
+          {activeSource === 'local' ? <AddAgentModal onSuccess={handleAgentAdded} /> : null}
         </div>
       </div>
 

@@ -519,7 +519,7 @@ export interface HolRegisterAgentStatusResponse {
 export async function searchHolAgents(
   query: string
 ): Promise<{ agents: HolAgentRecord[]; query: string }> {
-  const q = query.trim() || 'research';
+  const q = query.trim() || 'agent';
   const url = new URL(`${BACKEND_BASE_URL}/api/hol/agents/search`);
   url.searchParams.set('q', q);
 

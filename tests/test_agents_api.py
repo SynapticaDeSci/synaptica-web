@@ -143,3 +143,62 @@ def test_legacy_builtin_research_agents_are_hidden_from_directory(client: TestCl
 
     detail = client.get("/api/agents/bias-detector-001")
     assert detail.status_code == 404
+
+
+def test_list_agents_includes_custom_agents_when_registry_managed_exist(client: TestClient):
+    session = SessionLocal()
+    try:
+        session.add(
+            AgentModel(  # type: ignore[call-arg]
+                agent_id="registry-managed-001",
+                name="Registry Managed Agent",
+                agent_type="research",
+                description="Synced from registry",
+                capabilities=["analysis"],
+                status="active",
+                meta={
+                    "registry_managed": True,
+                    "endpoint_url": "https://example.com/registry-managed",
+                    "pricing": {"rate": 1.0, "currency": "HBAR", "rate_type": "per_task"},
+                },
+            )
+        )
+        session.add(
+            AgentReputation(
+                agent_id="registry-managed-001",
+                reputation_score=0.8,
+                payment_multiplier=1.0,
+            )
+        )
+        session.add(
+            AgentModel(  # type: ignore[call-arg]
+                agent_id="custom-local-001",
+                name="Custom Local Agent",
+                agent_type="http",
+                description="Created from Add Agent modal",
+                capabilities=["custom-task"],
+                status="active",
+                meta={
+                    "endpoint_url": "https://example.com/custom-local",
+                    "pricing": {"rate": 1.5, "currency": "HBAR", "rate_type": "per_task"},
+                    "support_tier": "supported",
+                },
+            )
+        )
+        session.add(
+            AgentReputation(
+                agent_id="custom-local-001",
+                reputation_score=0.5,
+                payment_multiplier=1.0,
+            )
+        )
+        session.query(AgentsCacheEntry).delete()
+        session.commit()
+    finally:
+        session.close()
+
+    listing = client.get("/api/agents")
+    assert listing.status_code == 200
+    ids = [agent["agent_id"] for agent in listing.json()["agents"]]
+    assert "registry-managed-001" in ids
+    assert "custom-local-001" in ids

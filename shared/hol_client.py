@@ -200,12 +200,29 @@ def search_agents(
             response = client.get("/search", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL search request failed: %s", exc)
-            raise HolClientError(f"HOL search failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL search request failed: %s", detail)
+            raise HolClientError(f"HOL search failed: {detail}") from exc
 
         data = response.json()
 
-    items = data if isinstance(data, list) else data.get("results") or []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        # Broker variants have returned any of these keys in practice.
+        items = (
+            data.get("results")
+            or data.get("hits")
+            or data.get("agents")
+            or data.get("items")
+            or []
+        )
+    else:
+        items = []
+
+    if not isinstance(items, list):
+        items = []
+
     results: List[HolAgentSummary] = []
     for item in items:
         try:

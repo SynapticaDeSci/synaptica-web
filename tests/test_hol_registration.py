@@ -8,7 +8,8 @@ from api.main import (
     _resolve_hol_error_status,
 )
 from shared.database import Agent
-from shared.hol_client import _format_http_error, _get_quote_paths
+import shared.hol_client as hol_client
+from shared.hol_client import _format_http_error, _get_quote_paths, search_agents
 
 
 def _sample_agent() -> Agent:
@@ -160,3 +161,46 @@ def test_get_quote_paths_maps_publish_to_quote(
     paths = _get_quote_paths()
     assert paths[0] == "/skills/quote"
     assert "/register/quote" in paths
+
+
+def test_search_agents_supports_hits_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("GET", "https://hol.org/registry/api/v1/search")
+    response = httpx.Response(
+        200,
+        json={
+            "hits": [
+                {
+                    "uaid": "uaid:aid:demo",
+                    "name": "Demo HOL Agent",
+                    "description": "Demo description",
+                    "capabilities": ["research"],
+                    "transports": ["a2a"],
+                    "pricing": {"rate": 1, "currency": "HBAR"},
+                    "registry": "broker",
+                }
+            ]
+        },
+        request=request,
+    )
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def get(self, path: str, params: dict | None = None) -> httpx.Response:
+            assert path == "/search"
+            assert params is not None
+            assert params.get("q") == "data agent"
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_client", lambda: _FakeClient())
+
+    agents = search_agents("data agent", limit=1)
+    assert len(agents) == 1
+    assert agents[0].uaid == "uaid:aid:demo"
+    assert agents[0].name == "Demo HOL Agent"

@@ -27,11 +27,12 @@ def build_agents_payload(session: Optional[Session] = None) -> Dict[str, Any]:
     try:
         agents = db.query(Agent).order_by(Agent.created_at.desc()).all()
         registry_agents = [agent for agent in agents if is_registry_managed(agent)]
-        always_listed = [agent for agent in agents if (agent.meta or {}).get("always_listed")]
         if registry_agents:
+            # Keep registry-managed records first, but do not hide local/custom
+            # agents when registry sync has populated managed entries.
             source = list(registry_agents)
             seen = {agent.agent_id for agent in source}
-            for agent in always_listed:
+            for agent in agents:
                 if agent.agent_id not in seen:
                     source.append(agent)
         else:
