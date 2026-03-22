@@ -60,9 +60,9 @@ function normalizeHolErrorMessage(value?: string | null): string | null {
     const required = message.match(/requiredCredits=(\d+(?:\.\d+)?)/i)?.[1]
     const available = message.match(/availableCredits=(\d+(?:\.\d+)?)/i)?.[1]
     if (required && available) {
-      return `HOL credits are insufficient (required ${required}, available ${available}).`
+      return `HOL credits are insufficient (required ${required}, available ${available}). This is HOL Registry broker credit balance, not Synaptica app credits.`
     }
-    return 'HOL credits are insufficient for registration.'
+    return 'HOL credits are insufficient for registration. This is HOL Registry broker credit balance, not Synaptica app credits.'
   }
 
   if (/timed out|timeout/i.test(message)) {
@@ -219,7 +219,7 @@ export function Marketplace() {
           </button>
         </div>
         <div className="w-[132px] justify-self-start md:justify-self-end">
-          <AddAgentModal onSuccess={handleAgentAdded} />
+          {activeSource === 'local' ? <AddAgentModal onSuccess={handleAgentAdded} /> : null}
         </div>
       </div>
 
@@ -315,8 +315,10 @@ export function Marketplace() {
                 const hasHolUaid = Boolean(agent.hol_uaid)
                 const holRegistered = holStatus === 'registered' || holStatus === 'ok' || hasHolUaid
                 const holPending = holStatus === 'pending'
+                const isDataAgent = typeKey === 'data'
                 const canRegisterOnHol = Boolean(
-                  agent.endpoint_url && (agent.erc8004_metadata_uri || agent.metadata_gateway_url)
+                  agent.endpoint_url &&
+                    (isDataAgent || agent.erc8004_metadata_uri || agent.metadata_gateway_url)
                 )
                 const isRegistering = registeringAgentId === agent.agent_id
                 const registerDisabled =
@@ -331,13 +333,15 @@ export function Marketplace() {
                       <div className="flex items-start gap-4">
                         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
                           <IconComponent className="h-7 w-7" />
-                          <HolRegisterBadge
-                            holUaid={agent.hol_uaid}
-                            holStatus={agent.hol_registration_status}
-                          />
                         </div>
                         <div className="flex-1">
-                          <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
+                            <HolRegisterBadge
+                              holUaid={agent.hol_uaid}
+                              holStatus={agent.hol_registration_status}
+                            />
+                          </div>
                           {agent.agent_type && <p className="text-sm text-sky-400">{agent.agent_type}</p>}
                         </div>
                       </div>

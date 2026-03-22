@@ -139,24 +139,39 @@ RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY=0
 
 ### Running Locally
 
-Start all services in separate terminals:
+Start all primary local services with one command:
+
+```bash
+make dev
+```
+
+This runs `make api`, `make research`, `make stripe-webhook`, `npm --prefix frontend run hol-sidecar`, and `make frontend-dev` together in one terminal. If one process exits, the rest are stopped so you can restart cleanly.
+
+Or start services in separate terminals:
 
 ```bash
 # Terminal 1: Frontend
 make frontend-dev
 # Runs at http://localhost:3000
 
-# Terminal 2: Backend API
+# Terminal 2: HOL SDK sidecar
+npm --prefix frontend run hol-sidecar
+# Runs at http://127.0.0.1:8040 by default
+
+# Terminal 3: Backend API
 make api
 # Runs at http://localhost:8000
 
-# Terminal 3: Sample Research Agents
+# Terminal 4: Sample Research Agents
 make research
 # Runs at http://localhost:5001
 
-# Terminal 4: Stripe webhook listener (requires Stripe CLI — run `stripe login` first)
+# Terminal 5: Stripe webhook listener (requires Stripe CLI + `STRIPE_SECRET_KEY` in `.env`)
 make stripe-webhook
 ```
+
+When `make stripe-webhook` starts, Stripe CLI prints a signing secret (`whsec_...`).
+Set that value in `.env` as `STRIPE_WEBHOOK_SECRET=...`, then restart `make api` so the backend picks up the new secret.
 
 Visit http://localhost:3000 to use the platform.
 
@@ -202,14 +217,35 @@ For the Hashgraph Online (HOL) hackathon track, Synaptica can act as both:
 Configuration in `.env`:
 
 ```bash
-# HOL Registry Broker (used by shared/hol_client.py)
+# HOL Registry Broker (used by the Node HOL SDK sidecar)
 REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
 REGISTRY_BROKER_API_KEY=rbk_...
-# Optional registration path overrides for marketplace "Register on HOL"
-REGISTRY_BROKER_REGISTER_PATH=/register
-# or comma-separated fallback list:
-REGISTRY_BROKER_REGISTER_PATHS=/register,/agents/register
+# Internal sidecar bridge target used by the Python API
+HOL_SDK_SIDECAR_URL=http://127.0.0.1:8040
+# Optional Python API -> sidecar request timeout (seconds, default 60)
+# HOL_SDK_SIDECAR_TIMEOUT_SECONDS=60
+# Optional connect timeout for sidecar requests (seconds, default 5)
+# HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS=5
+# Optional chat-session timeout (seconds, default 120)
+# HOL_SDK_SIDECAR_CREATE_SESSION_TIMEOUT_SECONDS=120
+# Optional retries for chat-session timeout/transient 5xx failures (default 2)
+# HOL_SDK_SIDECAR_CREATE_SESSION_RETRIES=2
+# Optional base backoff between retries (seconds, default 2.0)
+# HOL_SDK_SIDECAR_CREATE_SESSION_RETRY_BACKOFF_SECONDS=2.0
+# Optional sidecar bind controls when running `npm --prefix frontend run hol-sidecar`
+# HOL_SDK_SIDECAR_HOST=127.0.0.1
+# HOL_SDK_SIDECAR_PORT=8040
+# Optional paid fan-out registries for marketplace "Register on HOL".
+# Leave unset/empty for free-tier registration behavior.
+# HOL_REGISTER_ADDITIONAL_REGISTRIES=erc-8004:skale-base
 ```
+
+`Register on HOL` now sends `additionalRegistries: []` by default so local marketplace registration stays on free tier.
+Set `HOL_REGISTER_ADDITIONAL_REGISTRIES` only when you intentionally want paid additional-registry fan-out.
+
+The Python API no longer talks to HOL directly for search, registration, or chat. It bridges through the official HOL Standards SDK running in the local sidecar. If `/api/hol/*` calls fail with a sidecar-unavailable error, start `npm --prefix frontend run hol-sidecar` and restart `make api`.
+The sidecar auto-loads the repo root `.env`, so `REGISTRY_BROKER_API_KEY` can live there; shell-exported env vars still take precedence.
+If `createSession` hits transient broker timeouts/5xx, the API automatically falls back to direct UAID messaging mode so chat can still be attempted from the marketplace UI.
 
 With these values set:
 

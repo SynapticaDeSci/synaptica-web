@@ -8,10 +8,13 @@
   - `make db-init`
   - `make db-init` runs `uv run alembic upgrade head`
 - Dev servers:
+  - `make dev` (starts API + research + Stripe webhook + HOL sidecar + frontend in one terminal)
   - `make api`
   - `make research`
   - `make mock-agent`
   - `make frontend-dev`
+  - `npm --prefix frontend run hol-sidecar` for HOL Registry Broker search/registration/chat
+  - `make stripe-webhook` (uses `STRIPE_SECRET_KEY` from root `.env` to avoid Stripe account mismatch)
 - Validation commands that currently reflect repo reality:
   - `make test`
   - `make smoke`
@@ -26,6 +29,11 @@
   - Database schema changes should ship as Alembic revisions under `alembic/versions/`; avoid reintroducing `Base.metadata.create_all(...)` as the primary local setup path.
   - Active OpenAI-backed agent construction should go through `shared/strands_openai_agent.py`; keep `shared/openai_agent.py` legacy/demo-only unless explicitly reactivated.
   - Research agents themselves should keep using Strands directly. The optional orchestrator-side relay is `RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY`; keep it opt-in and treat `RESEARCH_RUN_USE_STRANDS_BACKEND` as a legacy alias only.
+  - HOL marketplace registration defaults to free-tier (`additionalRegistries: []`). Use `HOL_REGISTER_ADDITIONAL_REGISTRIES` only for intentional paid additional-registry fan-out.
+  - HOL broker traffic now goes through the Node sidecar started with `npm --prefix frontend run hol-sidecar`; Python HOL routes should target `HOL_SDK_SIDECAR_URL` instead of talking to the broker directly.
+  - If HOL registration/search/chat requests time out under broker load, tune `HOL_SDK_SIDECAR_TIMEOUT_SECONDS` (and optionally `HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS`) in root `.env`.
+  - HOL chat session creation has dedicated controls: `HOL_SDK_SIDECAR_CREATE_SESSION_TIMEOUT_SECONDS`, `HOL_SDK_SIDECAR_CREATE_SESSION_RETRIES`, and `HOL_SDK_SIDECAR_CREATE_SESSION_RETRY_BACKOFF_SECONDS` (for timeout/transient 5xx retries with backoff).
+  - HOL marketplace chat now auto-falls back to direct UAID messaging mode when `createSession` fails with transient timeout/5xx errors.
 - Safe edits:
   - Treat `.env`, local DB files, and files under `agent_metadata/` as potentially sensitive; do not commit secrets or generated local data.
   - If a change affects local developer workflow, update `README.md` and this file in the same change.

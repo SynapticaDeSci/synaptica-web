@@ -17,9 +17,13 @@ import {
 } from 'lucide-react'
 
 import {
+  ApiRequestError,
   DataAssetDetailRecord,
   DataAssetRecord,
   DataClassification,
+  HolAgentRecord,
+  DatasetHolUseErrorDetail,
+  DatasetHolUseResponse,
   DataProofStatus,
   DataVerificationStatus,
   DataVisibility,
@@ -29,8 +33,10 @@ import {
   getDataset,
   getDatasetCitation,
   getDatasetProof,
+  invokeDatasetHolAgent,
   listDatasets,
   recordDatasetReuse,
+  searchHolAgents,
   uploadDataset,
   verifyDataset,
 } from '@/lib/api'
@@ -99,6 +105,73 @@ function actionFeedbackClass(tone: ActionFeedback['tone']): string {
   if (tone === 'success') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
   if (tone === 'error') return 'border-red-500/40 bg-red-500/10 text-red-200'
   return 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+}
+
+function normalizeHolErrorDetail(detail: unknown): DatasetHolUseErrorDetail | null {
+  if (!detail || typeof detail !== 'object') return null
+  return detail as DatasetHolUseErrorDetail
+}
+
+function holCandidateStatus(agent: HolAgentRecord): {
+  label: string
+  tone: 'success' | 'warning' | 'error'
+  reason: string
+  recommendedTransport?: string
+} {
+  const transports = (agent.transports ?? []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+  const protocol = String(agent.protocol ?? '').trim().toLowerCase()
+  const adapter = String(agent.adapter ?? '').trim().toLowerCase()
+  const availability = String(agent.availability_status ?? '').trim().toLowerCase()
+  const hasHttp = transports.includes('http')
+  const hasUrl = Boolean(agent.source_url)
+
+  if (agent.available === false || ['offline', 'inactive', 'error'].includes(availability)) {
+    return {
+      label: 'Blocked',
+      tone: 'error',
+      reason: availability ? `Availability is ${availability}.` : 'Agent is marked unavailable.',
+    }
+  }
+  if (['a2a', 'uagent'].includes(protocol)) {
+    return {
+      label: 'Blocked',
+      tone: 'error',
+      reason: `Protocol ${protocol} is not broker-chatable in this flow.`,
+    }
+  }
+  if (['a2a-registry-adapter', 'agentverse-adapter'].includes(adapter)) {
+    return {
+      label: 'Blocked',
+      tone: 'error',
+      reason: `Adapter ${adapter} is not broker-chatable in this flow.`,
+    }
+  }
+  if (hasHttp) {
+    return {
+      label: 'Likely usable',
+      tone: 'success',
+      reason: 'HTTP transport is advertised.',
+      recommendedTransport: 'http',
+    }
+  }
+  if (hasUrl) {
+    return {
+      label: 'Possible',
+      tone: 'warning',
+      reason: 'Source URL exists, but transport is not explicit.',
+    }
+  }
+  return {
+    label: 'Unclear',
+    tone: 'warning',
+    reason: 'No explicit HTTP transport or source URL metadata.',
+  }
+}
+
+function holCandidateBadgeClass(tone: 'success' | 'warning' | 'error'): string {
+  if (tone === 'success') return 'bg-emerald-500/20 text-emerald-200'
+  if (tone === 'error') return 'bg-red-500/20 text-red-200'
+  return 'bg-amber-500/20 text-amber-200'
 }
 
 function getFileExtension(filename: string): string {
@@ -270,6 +343,11 @@ export function DataVault() {
   const [verifyFeedback, setVerifyFeedback] = useState<ActionFeedback | null>(null)
   const [anchorFeedback, setAnchorFeedback] = useState<ActionFeedback | null>(null)
   const [reuseFeedback, setReuseFeedback] = useState<ActionFeedback | null>(null)
+  const [holAgentFeedback, setHolAgentFeedback] = useState<ActionFeedback | null>(null)
+  const [holUaidOverride, setHolUaidOverride] = useState('')
+  const [holSearchQuery, setHolSearchQuery] = useState('')
+  const [holTransport, setHolTransport] = useState('')
+  const [holDiagnostics, setHolDiagnostics] = useState<DatasetHolUseErrorDetail | null>(null)
   const [copiedCitation, setCopiedCitation] = useState(false)
 
   const query = useQuery({
@@ -293,6 +371,27 @@ export function DataVault() {
         limit: 100,
         offset: 0,
       }),
+  })
+
+  const holCandidatePreviewQuery = useMemo(() => {
+    if (holSearchQuery.trim()) return holSearchQuery.trim()
+    if (!selectedDataset) return 'data agent'
+    return [
+      selectedDataset.title,
+      selectedDataset.lab_name,
+      selectedDataset.data_classification,
+      'data agent',
+    ]
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .join(' ')
+  }, [holSearchQuery, selectedDataset])
+
+  const holCandidatesQuery = useQuery<{ agents: HolAgentRecord[]; query: string }, Error>({
+    queryKey: ['data-vault-hol-candidates', selectedDataset?.id ?? null, holCandidatePreviewQuery],
+    queryFn: () => searchHolAgents(holCandidatePreviewQuery, { onlyAvailable: true }),
+    enabled: Boolean(selectedDataset),
+    staleTime: 30_000,
   })
 
   const uploadMutation = useMutation({
@@ -428,6 +527,49 @@ export function DataVault() {
     },
   })
 
+  const holAgentMutation = useMutation({
+    mutationFn: async (input: { datasetId: string; uaid?: string; searchQuery?: string; transport?: string }) =>
+      invokeDatasetHolAgent(input.datasetId, {
+        uaid: input.uaid,
+        search_query: input.searchQuery,
+        transport: input.transport,
+      }),
+    onMutate: () => {
+      setHolDiagnostics(null)
+      setHolAgentFeedback({
+        tone: 'info',
+        message: 'Starting HOL data-agent session...',
+      })
+    },
+    onSuccess: async (result: DatasetHolUseResponse) => {
+      setErrorMessage(null)
+      setHolDiagnostics(null)
+      if (selectedDataset) {
+        const refreshed = await getDataset(selectedDataset.id)
+        setSelectedDataset(refreshed)
+        setSelectedDatasetProof(refreshed.proof_bundle ?? null)
+      }
+      const agentName =
+        String(result.selected_agent?.name || result.selected_agent?.uaid || 'HOL agent')
+      setHolAgentFeedback({
+        tone: 'success',
+        message: `${agentName} responded via HOL session ${result.session_id}.`,
+      })
+      await query.refetch()
+    },
+    onError: (error: Error) => {
+      const message = error.message || 'HOL data-agent call failed'
+      const detail =
+        error instanceof ApiRequestError ? normalizeHolErrorDetail(error.detail) : null
+      setHolDiagnostics(detail)
+      setErrorMessage(message)
+      setHolAgentFeedback({
+        tone: 'error',
+        message: `HOL data-agent call failed. ${message}`,
+      })
+    },
+  })
+
   const datasets = query.data?.datasets ?? EMPTY_DATASETS
   const sortedTagSuggestions = useMemo(() => {
     const tags = new Set<string>()
@@ -487,6 +629,11 @@ export function DataVault() {
       setVerifyFeedback(null)
       setAnchorFeedback(null)
       setReuseFeedback(null)
+      setHolAgentFeedback(null)
+      setHolUaidOverride('')
+      setHolSearchQuery('')
+      setHolTransport('')
+      setHolDiagnostics(null)
       const detail = await getDataset(datasetId)
       setSelectedDataset(detail)
       setSelectedDatasetProof(detail.proof_bundle ?? null)
@@ -968,6 +1115,11 @@ export function DataVault() {
             setVerifyFeedback(null)
             setAnchorFeedback(null)
             setReuseFeedback(null)
+            setHolAgentFeedback(null)
+            setHolUaidOverride('')
+            setHolSearchQuery('')
+            setHolTransport('')
+            setHolDiagnostics(null)
           }
         }}
       >
@@ -1049,6 +1201,177 @@ export function DataVault() {
                 </Button>
               </div>
 
+              <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
+                <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Ask HOL agent about this dataset</p>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <Input
+                    placeholder="Optional UAID override"
+                    value={holUaidOverride}
+                    onChange={(event) => setHolUaidOverride(event.target.value)}
+                    className="border-white/10 bg-slate-950/40 text-white"
+                  />
+                  <Input
+                    placeholder="Optional HOL search query override"
+                    value={holSearchQuery}
+                    onChange={(event) => setHolSearchQuery(event.target.value)}
+                    className="border-white/10 bg-slate-950/40 text-white"
+                  />
+                  <select
+                    value={holTransport}
+                    onChange={(event) => setHolTransport(event.target.value)}
+                    className="h-10 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-white"
+                  >
+                    <option value="">Auto transport</option>
+                    <option value="http">Force http</option>
+                    <option value="a2a">Force a2a</option>
+                  </select>
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      holAgentMutation.mutate({
+                        datasetId: selectedDataset.id,
+                        uaid: holUaidOverride.trim() || undefined,
+                        searchQuery: holSearchQuery.trim() || undefined,
+                        transport: holTransport.trim() || undefined,
+                      })
+                    }
+                    disabled={holAgentMutation.isPending}
+                    className="bg-emerald-600 text-white hover:bg-emerald-500 md:justify-self-start"
+                  >
+                    {holAgentMutation.isPending ? 'Asking HOL agent...' : 'Ask HOL agent about this dataset'}
+                  </Button>
+                </div>
+                <p className="mt-2 text-xs text-slate-400">
+                  Leave UAID empty to auto-discover. Use search query override to broaden or narrow HOL discovery, and transport to force broker routing when you know the agent expects `http` or `a2a`.
+                </p>
+
+                <div className="mt-4 rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-400">Search HOL first</p>
+                      <p className="text-xs text-slate-500">
+                        Preview query: {holCandidatesQuery.data?.query || holCandidatePreviewQuery}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="border-white/20 bg-transparent text-slate-200 hover:bg-white/10"
+                      onClick={() => void holCandidatesQuery.refetch()}
+                      disabled={holCandidatesQuery.isFetching}
+                    >
+                      {holCandidatesQuery.isFetching ? 'Searching...' : 'Refresh HOL search'}
+                    </Button>
+                  </div>
+
+                  {holCandidatesQuery.isLoading && (
+                    <div className="rounded-md border border-white/10 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
+                      Searching HOL candidates...
+                    </div>
+                  )}
+
+                  {holCandidatesQuery.isError && (
+                    <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                      {(holCandidatesQuery.error as Error)?.message || 'Failed to search HOL candidates'}
+                    </div>
+                  )}
+
+                  {!holCandidatesQuery.isLoading && !holCandidatesQuery.isError && (
+                    <div className="space-y-2">
+                      {(holCandidatesQuery.data?.agents ?? []).slice(0, 6).map((agent) => {
+                        const status = holCandidateStatus(agent)
+                        return (
+                          <div
+                            key={agent.uaid}
+                            className="rounded-md border border-white/10 bg-slate-900/60 p-3"
+                          >
+                            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <div className="font-medium text-white">{agent.name || agent.uaid}</div>
+                                  <span className={`rounded-md px-2 py-0.5 text-[11px] ${holCandidateBadgeClass(status.tone)}`}>
+                                    {status.label}
+                                  </span>
+                                  {agent.registry && (
+                                    <span className="rounded-md bg-slate-800 px-2 py-0.5 text-[11px] text-slate-300">
+                                      {agent.registry}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-1 break-all font-mono text-[11px] text-slate-400">
+                                  {agent.uaid}
+                                </div>
+                                {agent.description && (
+                                  <p className="mt-2 text-xs text-slate-300">{agent.description}</p>
+                                )}
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {(agent.transports ?? []).slice(0, 6).map((transport) => (
+                                    <span
+                                      key={`${agent.uaid}-${transport}`}
+                                      className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-slate-200"
+                                    >
+                                      {transport}
+                                    </span>
+                                  ))}
+                                  {agent.protocol && (
+                                    <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
+                                      proto:{agent.protocol}
+                                    </span>
+                                  )}
+                                  {agent.availability_status && (
+                                    <span className="rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
+                                      {agent.availability_status}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-2 text-[11px] text-slate-400">{status.reason}</div>
+                              </div>
+                              <div className="flex shrink-0 flex-wrap gap-2">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  className="border-white/20 bg-transparent text-slate-200 hover:bg-white/10"
+                                  onClick={() => {
+                                    setHolUaidOverride(agent.uaid)
+                                    if (status.recommendedTransport) {
+                                      setHolTransport(status.recommendedTransport)
+                                    }
+                                  }}
+                                >
+                                  Use this agent
+                                </Button>
+                                <Button
+                                  type="button"
+                                  className="bg-emerald-600 text-white hover:bg-emerald-500"
+                                  onClick={() =>
+                                    holAgentMutation.mutate({
+                                      datasetId: selectedDataset.id,
+                                      uaid: agent.uaid,
+                                      searchQuery: holSearchQuery.trim() || undefined,
+                                      transport: holTransport.trim() || status.recommendedTransport || undefined,
+                                    })
+                                  }
+                                  disabled={holAgentMutation.isPending || status.tone === 'error'}
+                                  title={status.tone === 'error' ? status.reason : 'Run this HOL agent now'}
+                                >
+                                  Run this agent
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      {(holCandidatesQuery.data?.agents ?? []).length === 0 && (
+                        <div className="rounded-md border border-white/10 bg-slate-900/60 px-3 py-2 text-xs text-slate-300">
+                          No HOL candidates found for this query.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {verifyFeedback && (
                 <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(verifyFeedback.tone)}`}>
                   {verifyFeedback.message}
@@ -1064,6 +1387,42 @@ export function DataVault() {
               {reuseFeedback && (
                 <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(reuseFeedback.tone)}`}>
                   {reuseFeedback.message}
+                </div>
+              )}
+
+              {holAgentFeedback && (
+                <div className={`rounded-lg border px-3 py-2 text-xs ${actionFeedbackClass(holAgentFeedback.tone)}`}>
+                  {holAgentFeedback.message}
+                </div>
+              )}
+
+              {holDiagnostics && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                  <p className="mb-2 font-medium uppercase tracking-wide text-amber-200">HOL diagnostics</p>
+                  {holDiagnostics.search_queries && holDiagnostics.search_queries.length > 0 && (
+                    <div className="mb-2">
+                      <div className="text-amber-300">Search queries</div>
+                      <div>{holDiagnostics.search_queries.join(' | ')}</div>
+                    </div>
+                  )}
+                  {holDiagnostics.rejected_candidates && holDiagnostics.rejected_candidates.length > 0 && (
+                    <div className="mb-2 space-y-1">
+                      <div className="text-amber-300">Rejected candidates</div>
+                      {holDiagnostics.rejected_candidates.slice(0, 5).map((candidate, index) => (
+                        <div key={`${candidate.uaid || candidate.name || 'candidate'}-${index}`}>
+                          {candidate.name || candidate.uaid || 'Unknown agent'}: {candidate.reason || 'Rejected by broker-chatable filter'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {holDiagnostics.attempted_errors && holDiagnostics.attempted_errors.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-amber-300">Attempted broker errors</div>
+                      {holDiagnostics.attempted_errors.slice(0, 5).map((item, index) => (
+                        <div key={`attempted-error-${index}`}>{item}</div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1112,6 +1471,37 @@ export function DataVault() {
                     <Copy className="mr-2 h-4 w-4" />
                     {copiedCitation ? 'Copied' : 'Copy citation JSON'}
                   </Button>
+                </div>
+              )}
+
+              {selectedDataset.hol_sessions.length > 0 && (
+                <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
+                  <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Recent HOL sessions</p>
+                  <div className="grid gap-2">
+                    {selectedDataset.hol_sessions
+                      .slice()
+                      .reverse()
+                      .map((entry, index) => {
+                        const selectedAgent = entry.selected_agent as Record<string, any> | undefined
+                        const agentName = String(
+                          selectedAgent?.name || selectedAgent?.uaid || 'HOL agent'
+                        )
+                        const responsePreview = JSON.stringify(entry.broker_response ?? {}, null, 2)
+                        return (
+                          <div
+                            key={`${entry.session_id || 'session'}-${index}`}
+                            className="rounded-md border border-white/10 bg-black/30 p-2 text-xs text-slate-200"
+                          >
+                            <div><span className="text-slate-500">Agent:</span> {agentName}</div>
+                            <div><span className="text-slate-500">Session:</span> {String(entry.session_id || 'N/A')}</div>
+                            <div><span className="text-slate-500">Started:</span> {formatDate(String(entry.created_at || ''))}</div>
+                            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
+                              {responsePreview}
+                            </pre>
+                          </div>
+                        )
+                      })}
+                  </div>
                 </div>
               )}
 

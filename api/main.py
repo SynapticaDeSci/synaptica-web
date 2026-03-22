@@ -1,15 +1,18 @@
 """FastAPI main application - Orchestrator Agent Entry Point."""
 
 import asyncio
+import ipaddress
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -36,9 +39,22 @@ from shared.registry_sync import (
     get_registry_cache_ttl_seconds,
 )
 from shared.hol_client import (
+    HolClientConfigurationError,
     HolClientError,
+    check_sidecar_health as hol_check_sidecar_health,
+    create_session as hol_create_session,
+    get_history as hol_get_history,
+    get_credit_balance as hol_get_credit_balance,
     register_agent as hol_register_agent,
     search_agents as hol_search_agents,
+    send_message as hol_send_message,
+)
+from shared.metadata import (
+    AgentMetadataPayload,
+    PinataCredentialsError,
+    PinataUploadError,
+    build_agent_metadata_payload,
+    publish_agent_metadata,
 )
 from shared.runtime import (
     TelemetryEnvelope,
@@ -67,6 +83,9 @@ _registry_refresh_task: Optional[asyncio.Task] = None
 logger = logging.getLogger(__name__)
 
 BUILT_IN_DATA_AGENT_ID = "data-agent-001"
+HOL_DIRECT_SESSION_PREFIX = "hol-direct:"
+HOL_DIRECT_SESSION_HISTORY_LIMIT = 50
+_hol_direct_chat_sessions: Dict[str, Dict[str, Any]] = {}
 
 
 def _upsert_builtin_data_agent() -> None:
@@ -81,8 +100,8 @@ def _upsert_builtin_data_agent() -> None:
         )
 
         data_agent_meta = {
-            "endpoint_url": "/api/data-agent/datasets",
-            "health_check_url": "/health",
+            "endpoint_url": "/api/data-agent/agent",
+            "health_check_url": "/api/data-agent/agent/health",
             "pricing": {
                 "rate": 0.0,
                 "currency": "HBAR",
@@ -376,12 +395,184 @@ def _resolve_hol_error_status(previous_status: str, message: str) -> str:
     return "error"
 
 
-def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
+def _is_hol_insufficient_credits_error(message: str) -> bool:
+    return "insufficient_credits" in (message or "").lower()
+
+
+def _is_relative_or_non_public_url(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return True
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return False
+
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        return True
+    if hostname in {"localhost", "0.0.0.0", "127.0.0.1", "::1", "host.docker.internal"}:
+        return True
+    if hostname.endswith(".local"):
+        return True
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+
+    return any(
+        (
+            address.is_private,
+            address.is_loopback,
+            address.is_link_local,
+            address.is_reserved,
+            address.is_unspecified,
+        )
+    )
+
+
+def _rewrite_hol_public_url(url: str) -> str:
+    raw = (url or "").strip()
+    base = (os.getenv("HOL_PUBLIC_BASE_URL") or "").strip()
+    if not base:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "HOL_PUBLIC_BASE_URL is required when registering data agents with "
+                "relative or private endpoints"
+            ),
+        )
+
+    parsed_base = urlparse(base)
+    if parsed_base.scheme.lower() not in {"http", "https"} or not parsed_base.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="HOL_PUBLIC_BASE_URL must be an absolute http(s) URL",
+        )
+
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path or "/"
+        if parsed.params:
+            path = f"{path};{parsed.params}"
+        query = f"?{parsed.query}" if parsed.query else ""
+        fragment = f"#{parsed.fragment}" if parsed.fragment else ""
+        return f"{base.rstrip('/')}{path}{query}{fragment}"
+
+    normalized_path = raw if raw.startswith("/") else f"/{raw}"
+    return urljoin(f"{base.rstrip('/')}/", normalized_path.lstrip("/"))
+
+
+def _coerce_string_list(values: Any) -> List[str]:
+    output: List[str] = []
+    if not isinstance(values, list):
+        return output
+    for value in values:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                output.append(cleaned)
+    return output
+
+
+async def _publish_missing_data_agent_metadata(
+    agent: Agent,
+    *,
+    endpoint_url: str,
+    health_check_url: Optional[str],
+) -> None:
+    meta = dict(agent.meta or {})
+    pricing = dict(meta.get("pricing") or {})
+    metadata_payload = AgentMetadataPayload(
+        agent_id=agent.agent_id,
+        name=agent.name,
+        description=str(agent.description or "").strip(),
+        endpoint_url=endpoint_url,
+        capabilities=_coerce_string_list(agent.capabilities),
+        pricing_rate=float(pricing.get("rate") or 0.0),
+        pricing_currency=str(pricing.get("currency") or "HBAR"),
+        pricing_rate_type=str(pricing.get("rate_type") or "per_task"),
+        categories=_coerce_string_list(meta.get("categories") or []),
+        contact_email=str(meta.get("contact_email") or "").strip() or None,
+        logo_url=str(meta.get("logo_url") or "").strip() or None,
+        health_check_url=health_check_url,
+        hedera_account=agent.hedera_account_id,
+    )
+    metadata = build_agent_metadata_payload(metadata_payload)
+    try:
+        upload_result = await publish_agent_metadata(agent.agent_id, metadata)
+    except PinataCredentialsError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Pinata credentials missing; configure PINATA_API_KEY and PINATA_SECRET_KEY.",
+        ) from exc
+    except PinataUploadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    meta["metadata_cid"] = upload_result.cid
+    meta["metadata_gateway_url"] = upload_result.gateway_url
+    agent.meta = meta
+    agent.erc8004_metadata_uri = upload_result.ipfs_uri
+
+
+async def _prepare_hol_registration_payload(
+    agent: Agent,
+    *,
+    endpoint_url_override: Optional[str] = None,
+    metadata_uri_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    meta = dict(agent.meta or {})
+    endpoint_url = str(
+        endpoint_url_override if endpoint_url_override is not None else (meta.get("endpoint_url") or "")
+    ).strip()
+    health_check_url = str(meta.get("health_check_url") or "").strip() or None
+    metadata_uri = str(
+        metadata_uri_override
+        if metadata_uri_override is not None
+        else (agent.erc8004_metadata_uri or meta.get("metadata_gateway_url") or "")
+    ).strip() or None
+
+    if agent.agent_type == "data":
+        if endpoint_url and _is_relative_or_non_public_url(endpoint_url):
+            endpoint_url = _rewrite_hol_public_url(endpoint_url)
+        if health_check_url and _is_relative_or_non_public_url(health_check_url):
+            health_check_url = _rewrite_hol_public_url(health_check_url)
+        if not metadata_uri:
+            await _publish_missing_data_agent_metadata(
+                agent,
+                endpoint_url=endpoint_url,
+                health_check_url=health_check_url,
+            )
+            refreshed_meta = dict(agent.meta or {})
+            metadata_uri = str(
+                agent.erc8004_metadata_uri or refreshed_meta.get("metadata_gateway_url") or ""
+            ).strip() or None
+
+    return _build_hol_registration_payload(
+        agent,
+        endpoint_url_override=endpoint_url or None,
+        metadata_uri_override=metadata_uri,
+        health_check_url_override=health_check_url,
+    )
+
+
+def _build_hol_registration_payload(
+    agent: Agent,
+    *,
+    endpoint_url_override: Optional[str] = None,
+    metadata_uri_override: Optional[str] = None,
+    health_check_url_override: Optional[str] = None,
+) -> Dict[str, Any]:
     meta = dict(agent.meta or {})
     pricing = dict(meta.get("pricing") or {})
     categories = meta.get("categories") or []
-    endpoint_url = str(meta.get("endpoint_url") or "").strip()
-    metadata_uri = agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
+    endpoint_url = str(
+        endpoint_url_override if endpoint_url_override is not None else (meta.get("endpoint_url") or "")
+    ).strip()
+    metadata_uri = (
+        metadata_uri_override
+        if metadata_uri_override is not None
+        else agent.erc8004_metadata_uri or meta.get("metadata_gateway_url")
+    )
 
     if not endpoint_url:
         raise HTTPException(status_code=400, detail="Agent endpoint URL is required for HOL registration")
@@ -424,15 +615,31 @@ def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
         },
     }
 
-    health_check_url = meta.get("health_check_url")
+    health_check_url = (
+        health_check_url_override
+        if health_check_url_override is not None
+        else meta.get("health_check_url")
+    )
     if isinstance(health_check_url, str) and health_check_url.strip():
         profile["aiAgent"]["health_check_url"] = health_check_url.strip()
     if agent.hedera_account_id:
         profile["owner"] = {"account_id": agent.hedera_account_id}
 
+    # HOL defaults to paid base registration unless additional registries are
+    # explicitly controlled. Keep local marketplace registration on free tier
+    # by default and allow opt-in paid fan-out via env override.
+    additional_registries_env = (os.getenv("HOL_REGISTER_ADDITIONAL_REGISTRIES") or "").strip()
+    additional_registries: List[str] = []
+    if additional_registries_env:
+        additional_registries = [
+            item.strip() for item in additional_registries_env.split(",") if item.strip()
+        ]
+
     return {
         # HOL /register expects this HCS-11 profile envelope.
         "profile": profile,
+        # Explicitly pass additionalRegistries to avoid broker-side paid defaults.
+        "additionalRegistries": additional_registries,
         # Keep the legacy flat shape for compatibility with any alternate broker paths.
         "agent_id": agent.agent_id,
         "name": agent.name,
@@ -536,6 +743,11 @@ class HolAgentRecord(BaseModel):
     transports: List[str]
     pricing: Dict[str, Any]
     registry: Optional[str] = None
+    available: Optional[bool] = None
+    availability_status: Optional[str] = None
+    source_url: Optional[str] = None
+    adapter: Optional[str] = None
+    protocol: Optional[str] = None
 
 
 class HolAgentsSearchResponse(BaseModel):
@@ -545,11 +757,48 @@ class HolAgentsSearchResponse(BaseModel):
     query: str
 
 
+class HolChatSessionRequest(BaseModel):
+    """Request payload for starting a HOL chat session."""
+
+    uaid: str
+    transport: Optional[str] = None
+    as_uaid: Optional[str] = None
+
+
+class HolChatSendRequest(BaseModel):
+    """Request payload for sending a HOL chat message."""
+
+    session_id: str
+    message: str
+    as_uaid: Optional[str] = None
+
+
+class HolChatMessageRecord(BaseModel):
+    """Normalized HOL chat message for frontend display."""
+
+    role: str
+    content: str
+    timestamp: Optional[str] = None
+    raw: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HolChatSessionResponse(BaseModel):
+    """Response payload for HOL chat session operations."""
+
+    success: bool
+    session_id: str
+    uaid: Optional[str] = None
+    broker_response: Dict[str, Any] = Field(default_factory=dict)
+    history: List[HolChatMessageRecord] = Field(default_factory=list)
+
+
 class HolRegisterAgentRequest(BaseModel):
     """Request payload for quoting/registering a local agent into HOL."""
 
     agent_id: str
     mode: Literal["quote", "register"] = "register"
+    endpoint_url_override: Optional[str] = None
+    metadata_uri_override: Optional[str] = None
 
 
 class HolRegisterAgentResponse(BaseModel):
@@ -573,6 +822,112 @@ class HolRegisterAgentStatusResponse(BaseModel):
     hol_uaid: Optional[str] = None
     hol_last_error: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+def _extract_hol_chat_message_content(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, dict):
+        for key in ("content", "message", "text", "reply", "response"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                nested = _extract_hol_chat_message_content(value)
+                if nested:
+                    return nested
+        parts = payload.get("parts")
+        if isinstance(parts, list):
+            chunks: List[str] = []
+            for part in parts:
+                nested = _extract_hol_chat_message_content(part)
+                if nested:
+                    chunks.append(nested)
+            if chunks:
+                return "\n".join(chunks)
+    return ""
+
+
+def _normalize_hol_chat_history(messages: List[Dict[str, Any]]) -> List[HolChatMessageRecord]:
+    normalized: List[HolChatMessageRecord] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(
+            item.get("role")
+            or item.get("senderRole")
+            or item.get("type")
+            or "assistant"
+        ).strip().lower()
+        if role not in {"user", "assistant", "system"}:
+            sender = str(item.get("sender") or item.get("from") or "").strip().lower()
+            role = "assistant" if sender not in {"user", "human"} else "user"
+        content = _extract_hol_chat_message_content(item)
+        if not content:
+            content = json.dumps(item, ensure_ascii=True)[:1200]
+        timestamp_value = item.get("timestamp") or item.get("createdAt") or item.get("sentAt")
+        normalized.append(
+            HolChatMessageRecord(
+                role=role,
+                content=content,
+                timestamp=str(timestamp_value) if timestamp_value else None,
+                raw=item,
+            )
+        )
+    return normalized
+
+
+def _should_use_hol_direct_chat_fallback(error: HolClientError) -> bool:
+    if isinstance(error, HolClientConfigurationError):
+        # Sidecar not reachable/configured is a local setup problem, not a broker timeout.
+        return False
+    message = str(error).lower()
+    if "create_session failed" not in message:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "gateway timeout",
+            "504",
+            "503",
+            "502",
+            "registry broker request failed",
+        )
+    )
+
+
+def _create_hol_direct_chat_session(uaid: str) -> str:
+    session_id = f"{HOL_DIRECT_SESSION_PREFIX}{uuid.uuid4()}"
+    _hol_direct_chat_sessions[session_id] = {"uaid": uaid, "history": []}
+    return session_id
+
+
+def _is_hol_direct_chat_session(session_id: str) -> bool:
+    return session_id.startswith(HOL_DIRECT_SESSION_PREFIX)
+
+
+def _get_hol_direct_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
+    return _hol_direct_chat_sessions.get(session_id)
+
+
+def _append_hol_direct_chat_history(
+    session_id: str,
+    records: List[HolChatMessageRecord],
+) -> List[HolChatMessageRecord]:
+    session = _hol_direct_chat_sessions.get(session_id)
+    if session is None:
+        return []
+
+    history = session.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.extend(records)
+    if len(history) > HOL_DIRECT_SESSION_HISTORY_LIMIT:
+        history = history[-HOL_DIRECT_SESSION_HISTORY_LIMIT:]
+    session["history"] = history
+    return list(history)
 
 
 @asynccontextmanager
@@ -831,6 +1186,7 @@ def get_task_history(limit: int = 50) -> List[TaskHistoryResponse]:
 async def hol_agents_search(
     q: str,
     limit: int = 12,
+    only_available: bool = False,
 ) -> HolAgentsSearchResponse:
     """
     Search HOL Registry Broker for agents, exposed for the Agent Marketplace UI.
@@ -840,8 +1196,15 @@ async def hol_agents_search(
     """
     query = q.strip()
     capped_limit = max(1, min(limit, 25))
+    broker_limit = min(100, max(capped_limit, capped_limit * 5)) if only_available else capped_limit
 
-    agents = hol_search_agents(query=query, limit=capped_limit)
+    try:
+        await run_in_threadpool(hol_check_sidecar_health)
+        agents = await run_in_threadpool(hol_search_agents, query, limit=broker_limit)
+    except HolClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if only_available:
+        agents = [agent for agent in agents if agent.available is True][:capped_limit]
 
     records: List[HolAgentRecord] = []
     for agent in agents:
@@ -855,10 +1218,153 @@ async def hol_agents_search(
                 transports=agent.transports,
                 pricing=agent.pricing,
                 registry=agent.registry,
+                available=agent.available,
+                availability_status=agent.availability_status,
+                source_url=agent.source_url,
+                adapter=agent.adapter,
+                protocol=agent.protocol,
             )
         )
 
     return HolAgentsSearchResponse(agents=records, query=query)
+
+
+@app.post("/api/hol/chat/session", response_model=HolChatSessionResponse)
+async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSessionResponse:
+    """Create a HOL broker chat session for a selected external agent."""
+    uaid = request.uaid.strip()
+    if not uaid:
+        raise HTTPException(status_code=400, detail="uaid is required")
+
+    try:
+        await run_in_threadpool(hol_check_sidecar_health)
+        session_id = await run_in_threadpool(
+            hol_create_session,
+            uaid,
+            transport=request.transport,
+            as_uaid=request.as_uaid,
+        )
+    except HolClientError as exc:
+        if _should_use_hol_direct_chat_fallback(exc):
+            logger.warning(
+                "HOL create_session failed for %s, enabling direct chat fallback: %s",
+                uaid,
+                exc,
+            )
+            fallback_session_id = _create_hol_direct_chat_session(uaid)
+            return HolChatSessionResponse(
+                success=True,
+                session_id=fallback_session_id,
+                uaid=uaid,
+                broker_response={
+                    "mode": "direct",
+                    "fallback_reason": str(exc),
+                },
+                history=[],
+            )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        history = await run_in_threadpool(hol_get_history, session_id, limit=50)
+    except HolClientError as exc:
+        logger.warning("HOL get_history after create_session failed for %s: %s", uaid, exc)
+        history = []
+
+    return HolChatSessionResponse(
+        success=True,
+        session_id=session_id,
+        uaid=uaid,
+        history=_normalize_hol_chat_history(history),
+    )
+
+
+@app.post("/api/hol/chat/message", response_model=HolChatSessionResponse)
+async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionResponse:
+    """Send a message to an existing HOL broker chat session and return refreshed history."""
+    session_id = request.session_id.strip()
+    message = request.message.strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    if _is_hol_direct_chat_session(session_id):
+        direct_session = _get_hol_direct_chat_session(session_id)
+        if direct_session is None:
+            raise HTTPException(status_code=404, detail="HOL direct chat session not found")
+        uaid = str(direct_session.get("uaid") or "").strip()
+        if not uaid:
+            raise HTTPException(status_code=500, detail="HOL direct chat session is missing UAID")
+
+        try:
+            await run_in_threadpool(hol_check_sidecar_health)
+            broker_response = await run_in_threadpool(
+                hol_send_message,
+                None,
+                message,
+                uaid=uaid,
+                as_uaid=request.as_uaid,
+            )
+        except HolClientError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        assistant_content = _extract_hol_chat_message_content(broker_response) or json.dumps(
+            broker_response,
+            ensure_ascii=True,
+        )[:1200]
+        history = _append_hol_direct_chat_history(
+            session_id,
+            [
+                HolChatMessageRecord(role="user", content=message, raw={}),
+                HolChatMessageRecord(
+                    role="assistant",
+                    content=assistant_content,
+                    raw=broker_response if isinstance(broker_response, dict) else {},
+                ),
+            ],
+        )
+        return HolChatSessionResponse(
+            success=True,
+            session_id=session_id,
+            uaid=uaid,
+            broker_response=broker_response if isinstance(broker_response, dict) else {},
+            history=history,
+        )
+
+    try:
+        await run_in_threadpool(hol_check_sidecar_health)
+        broker_response = await run_in_threadpool(
+            hol_send_message,
+            session_id,
+            message,
+            as_uaid=request.as_uaid,
+        )
+    except HolClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        history = await run_in_threadpool(hol_get_history, session_id, limit=50)
+    except HolClientError as exc:
+        logger.warning("HOL get_history after send_message failed for %s: %s", session_id, exc)
+        history = []
+
+    normalized_history = _normalize_hol_chat_history(history)
+    if not normalized_history:
+        content = _extract_hol_chat_message_content(broker_response) or json.dumps(
+            broker_response,
+            ensure_ascii=True,
+        )[:1200]
+        normalized_history = [
+            HolChatMessageRecord(role="user", content=message, raw={}),
+            HolChatMessageRecord(role="assistant", content=content, raw=broker_response),
+        ]
+
+    return HolChatSessionResponse(
+        success=True,
+        session_id=session_id,
+        broker_response=broker_response,
+        history=normalized_history,
+    )
 
 
 @app.post("/api/hol/register-agent", response_model=HolRegisterAgentResponse)
@@ -870,7 +1376,18 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         if agent is None:
             raise HTTPException(status_code=404, detail=f"Agent '{request.agent_id}' not found")
 
-        payload = _build_hol_registration_payload(agent)
+        try:
+            await run_in_threadpool(hol_check_sidecar_health)
+        except HolClientError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        payload = await _prepare_hol_registration_payload(
+            agent,
+            endpoint_url_override=request.endpoint_url_override,
+            metadata_uri_override=request.metadata_uri_override,
+        )
+        db.commit()
+        db.refresh(agent)
         current = _extract_hol_meta(agent)
         previous_status = str(current.get("registration_status") or "unregistered")
 
@@ -882,13 +1399,44 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         try:
             broker_response = hol_register_agent(payload, mode=request.mode)
         except HolClientError as exc:
+            error_message = str(exc)
+            if request.mode == "register" and _is_hol_insufficient_credits_error(error_message):
+                diagnostics: List[str] = []
+
+                try:
+                    quote_response = hol_register_agent(payload, mode="quote")
+                    diagnostics.append(
+                        "quote requiredCredits="
+                        f"{quote_response.get('requiredCredits')}, "
+                        "availableCredits="
+                        f"{quote_response.get('availableCredits')}"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("HOL quote diagnostic failed", exc_info=True)
+
+                try:
+                    balance_payload = hol_get_credit_balance()
+                    diagnostics.append(
+                        "balance accountId="
+                        f"{balance_payload.get('accountId')}, "
+                        "balance="
+                        f"{balance_payload.get('balance')}"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("HOL balance diagnostic failed", exc_info=True)
+
+                if diagnostics:
+                    error_message = (
+                        f"{error_message}. HOL diagnostics: {'; '.join(diagnostics)}"
+                    )
+
             if request.mode == "register":
-                next_status = _resolve_hol_error_status(previous_status, str(exc))
+                next_status = _resolve_hol_error_status(previous_status, error_message)
                 _set_hol_meta(
                     agent,
                     status=next_status,
                     uaid=current.get("uaid"),
-                    last_error=str(exc),
+                    last_error=error_message,
                 )
                 db.commit()
                 db.refresh(agent)
@@ -900,7 +1448,7 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
                         agent.agent_id,
                         exc_info=True,
                     )
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise HTTPException(status_code=502, detail=error_message) from exc
 
         extracted_uaid = _extract_hol_uaid(broker_response)
         estimated_credits = _extract_estimated_credits(broker_response)
