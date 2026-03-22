@@ -413,6 +413,26 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
     ) from last_error
 
 
+def get_credit_balance(*, account_id: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch HOL broker credit balance for the authenticated account."""
+    params: Dict[str, Any] = {}
+    if account_id:
+        params["accountId"] = account_id
+
+    with _build_client() as client:
+        try:
+            response = client.get("/credits/balance", params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:  # noqa: BLE001
+            logger.warning("HOL get_credit_balance failed: %s", exc)
+            raise HolClientError(f"HOL get_credit_balance failed: {_format_http_error(exc)}") from exc
+
+        data = response.json()
+    if not isinstance(data, dict):
+        raise HolClientError(f"Unexpected HOL credit balance response payload: {data!r}")
+    return data
+
+
 def _coerce_str_list(value: Any) -> List[str]:
     if not value:
         return []

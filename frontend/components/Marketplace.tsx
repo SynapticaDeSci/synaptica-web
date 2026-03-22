@@ -60,9 +60,9 @@ function normalizeHolErrorMessage(value?: string | null): string | null {
     const required = message.match(/requiredCredits=(\d+(?:\.\d+)?)/i)?.[1]
     const available = message.match(/availableCredits=(\d+(?:\.\d+)?)/i)?.[1]
     if (required && available) {
-      return `HOL credits are insufficient (required ${required}, available ${available}).`
+      return `HOL credits are insufficient (required ${required}, available ${available}). This is HOL Registry broker credit balance, not Synaptica app credits.`
     }
-    return 'HOL credits are insufficient for registration.'
+    return 'HOL credits are insufficient for registration. This is HOL Registry broker credit balance, not Synaptica app credits.'
   }
 
   if (/timed out|timeout/i.test(message)) {

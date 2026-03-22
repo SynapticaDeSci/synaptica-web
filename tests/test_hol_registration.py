@@ -2,7 +2,11 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from api.main import _build_hol_registration_payload, _resolve_hol_error_status
+from api.main import (
+    _build_hol_registration_payload,
+    _is_hol_insufficient_credits_error,
+    _resolve_hol_error_status,
+)
 from shared.database import Agent
 from shared.hol_client import _format_http_error, _get_quote_paths
 
@@ -134,6 +138,11 @@ def test_resolve_hol_error_status_marks_transient_failures_unregistered() -> Non
 def test_resolve_hol_error_status_marks_non_transient_failures_error() -> None:
     message = "HOL register_agent failed after trying paths (/register): 402 Payment Required: insufficient_credits"
     assert _resolve_hol_error_status("unregistered", message) == "error"
+
+
+def test_is_hol_insufficient_credits_error() -> None:
+    assert _is_hol_insufficient_credits_error("402 Payment Required: insufficient_credits")
+    assert not _is_hol_insufficient_credits_error("request timed out")
 
 
 def test_get_quote_paths_defaults_to_register_quote(

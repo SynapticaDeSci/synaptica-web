@@ -37,6 +37,7 @@ from shared.registry_sync import (
 )
 from shared.hol_client import (
     HolClientError,
+    get_credit_balance as hol_get_credit_balance,
     register_agent as hol_register_agent,
     search_agents as hol_search_agents,
 )
@@ -374,6 +375,10 @@ def _resolve_hol_error_status(previous_status: str, message: str) -> str:
             return "registered"
         return "unregistered"
     return "error"
+
+
+def _is_hol_insufficient_credits_error(message: str) -> bool:
+    return "insufficient_credits" in (message or "").lower()
 
 
 def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
@@ -894,13 +899,44 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         try:
             broker_response = hol_register_agent(payload, mode=request.mode)
         except HolClientError as exc:
+            error_message = str(exc)
+            if request.mode == "register" and _is_hol_insufficient_credits_error(error_message):
+                diagnostics: List[str] = []
+
+                try:
+                    quote_response = hol_register_agent(payload, mode="quote")
+                    diagnostics.append(
+                        "quote requiredCredits="
+                        f"{quote_response.get('requiredCredits')}, "
+                        "availableCredits="
+                        f"{quote_response.get('availableCredits')}"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("HOL quote diagnostic failed", exc_info=True)
+
+                try:
+                    balance_payload = hol_get_credit_balance()
+                    diagnostics.append(
+                        "balance accountId="
+                        f"{balance_payload.get('accountId')}, "
+                        "balance="
+                        f"{balance_payload.get('balance')}"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("HOL balance diagnostic failed", exc_info=True)
+
+                if diagnostics:
+                    error_message = (
+                        f"{error_message}. HOL diagnostics: {'; '.join(diagnostics)}"
+                    )
+
             if request.mode == "register":
-                next_status = _resolve_hol_error_status(previous_status, str(exc))
+                next_status = _resolve_hol_error_status(previous_status, error_message)
                 _set_hol_meta(
                     agent,
                     status=next_status,
                     uaid=current.get("uaid"),
-                    last_error=str(exc),
+                    last_error=error_message,
                 )
                 db.commit()
                 db.refresh(agent)
@@ -912,7 +948,7 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
                         agent.agent_id,
                         exc_info=True,
                     )
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+            raise HTTPException(status_code=502, detail=error_message) from exc
 
         extracted_uaid = _extract_hol_uaid(broker_response)
         estimated_credits = _extract_estimated_credits(broker_response)
