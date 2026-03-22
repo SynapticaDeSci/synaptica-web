@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +32,48 @@ class HolClientError(RuntimeError):
 
 class HolClientConfigurationError(HolClientError):
     """Raised when required HOL configuration is missing or invalid."""
+
+
+def _get_env_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %.2f", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning(
+            "Invalid %s=%r (must be >= %.2f); using default %.2f",
+            name,
+            raw,
+            minimum,
+            default,
+        )
+        return default
+    return value
+
+
+def _get_env_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning(
+            "Invalid %s=%r (must be >= %d); using default %d",
+            name,
+            raw,
+            minimum,
+            default,
+        )
+        return default
+    return value
 
 
 def _get_sidecar_url() -> str:
@@ -52,6 +95,44 @@ def _get_api_key() -> Optional[str]:
     return key.strip() if key else None
 
 
+def _get_sidecar_timeout_seconds() -> float:
+    # HOL register can exceed short defaults during broker cold starts or load.
+    return _get_env_float("HOL_SDK_SIDECAR_TIMEOUT_SECONDS", 60.0, minimum=1.0)
+
+
+def _get_sidecar_connect_timeout_seconds() -> float:
+    return _get_env_float("HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+
+
+def _get_sidecar_create_session_timeout_seconds() -> float:
+    return _get_env_float(
+        "HOL_SDK_SIDECAR_CREATE_SESSION_TIMEOUT_SECONDS",
+        120.0,
+        minimum=1.0,
+    )
+
+
+def _get_sidecar_create_session_retries() -> int:
+    # Retries apply to create-session timeouts and transient upstream 5xx.
+    return _get_env_int("HOL_SDK_SIDECAR_CREATE_SESSION_RETRIES", 2, minimum=0)
+
+
+def _get_sidecar_create_session_retry_backoff_seconds() -> float:
+    return _get_env_float(
+        "HOL_SDK_SIDECAR_CREATE_SESSION_RETRY_BACKOFF_SECONDS",
+        2.0,
+        minimum=0.0,
+    )
+
+
+def _retry_backoff_delay_seconds(attempt: int) -> float:
+    base_delay = _get_sidecar_create_session_retry_backoff_seconds()
+    if base_delay <= 0:
+        return 0.0
+    # Exponential backoff with a conservative cap to avoid runaway waits.
+    return min(base_delay * (2 ** max(0, attempt - 1)), 15.0)
+
+
 def _build_client() -> httpx.Client:
     timeout = httpx.Timeout(10.0, connect=5.0)
     limits = httpx.Limits(max_keepalive_connections=4, max_connections=8)
@@ -65,7 +146,10 @@ def _build_client() -> httpx.Client:
 
 
 def _build_sidecar_client() -> httpx.Client:
-    timeout = httpx.Timeout(20.0, connect=2.0)
+    timeout = httpx.Timeout(
+        _get_sidecar_timeout_seconds(),
+        connect=_get_sidecar_connect_timeout_seconds(),
+    )
     limits = httpx.Limits(max_keepalive_connections=4, max_connections=8)
     headers: Dict[str, str] = {
         "Accept": "application/json",
@@ -370,19 +454,69 @@ def create_session(
     if as_uaid:
         payload["asUaid"] = as_uaid
 
-    with _build_sidecar_client() as client:
-        try:
-            response = client.post("/chat/session", json=payload)
-            response.raise_for_status()
-        except httpx.ConnectError as exc:
-            detail = _format_sidecar_error(exc)
-            logger.warning("HOL sidecar create_session failed: %s", detail)
-            raise HolClientConfigurationError(detail) from exc
-        except httpx.HTTPError as exc:  # noqa: BLE001
-            detail = _format_sidecar_error(exc)
-            logger.warning("HOL create_session failed: %s", detail)
-            raise HolClientError(f"HOL create_session failed: {detail}") from exc
+    attempts = _get_sidecar_create_session_retries() + 1
+    request_timeout = httpx.Timeout(
+        _get_sidecar_create_session_timeout_seconds(),
+        connect=_get_sidecar_connect_timeout_seconds(),
+    )
 
+    with _build_sidecar_client() as client:
+        response: Optional[httpx.Response] = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = client.post(
+                    "/chat/session",
+                    json=payload,
+                    timeout=request_timeout,
+                )
+                response.raise_for_status()
+                break
+            except httpx.TimeoutException as exc:
+                detail = _format_sidecar_error(exc)
+                if attempt < attempts:
+                    delay = _retry_backoff_delay_seconds(attempt)
+                    logger.warning(
+                        "HOL create_session timed out (%s). Retrying attempt %d/%d in %.1fs...",
+                        detail,
+                        attempt + 1,
+                        attempts,
+                        delay,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+                logger.warning("HOL create_session failed: %s", detail)
+                raise HolClientError(f"HOL create_session failed: {detail}") from exc
+            except httpx.ConnectError as exc:
+                detail = _format_sidecar_error(exc)
+                logger.warning("HOL sidecar create_session failed: %s", detail)
+                raise HolClientConfigurationError(detail) from exc
+            except httpx.HTTPStatusError as exc:
+                detail = _format_sidecar_error(exc)
+                status = exc.response.status_code
+                if status in {502, 503, 504} and attempt < attempts:
+                    delay = _retry_backoff_delay_seconds(attempt)
+                    logger.warning(
+                        "HOL create_session got transient upstream status %d (%s). "
+                        "Retrying attempt %d/%d in %.1fs...",
+                        status,
+                        detail,
+                        attempt + 1,
+                        attempts,
+                        delay,
+                    )
+                    if delay > 0:
+                        time.sleep(delay)
+                    continue
+                logger.warning("HOL create_session failed: %s", detail)
+                raise HolClientError(f"HOL create_session failed: {detail}") from exc
+            except httpx.HTTPError as exc:  # noqa: BLE001
+                detail = _format_sidecar_error(exc)
+                logger.warning("HOL create_session failed: %s", detail)
+                raise HolClientError(f"HOL create_session failed: {detail}") from exc
+
+        if response is None:
+            raise HolClientError("HOL create_session failed: no response from HOL SDK sidecar")
         data = response.json()
 
     session_id = str(data.get("sessionId") or data.get("id") or "").strip()
@@ -392,19 +526,25 @@ def create_session(
 
 
 def send_message(
-    session_id: str,
+    session_id: Optional[str],
     message: str,
     *,
+    uaid: Optional[str] = None,
     as_uaid: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Send a message into an existing chat session."""
+    """Send a message into an existing chat session (or directly by UAID)."""
     if not message or not message.strip():
         raise ValueError("message must be a non-empty string")
+    normalized_session_id = (session_id or "").strip()
+    normalized_uaid = (uaid or "").strip()
+    if not normalized_session_id and not normalized_uaid:
+        raise ValueError("session_id or uaid is required")
 
-    payload: Dict[str, Any] = {
-        "sessionId": session_id,
-        "message": message,
-    }
+    payload: Dict[str, Any] = {"message": message}
+    if normalized_session_id:
+        payload["sessionId"] = normalized_session_id
+    if normalized_uaid:
+        payload["uaid"] = normalized_uaid
     if as_uaid:
         payload["senderUaid"] = as_uaid
 

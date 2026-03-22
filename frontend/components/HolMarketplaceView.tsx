@@ -50,6 +50,21 @@ function holAgentChatHint(agent: HolAgentRecord): {
   }
 }
 
+function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?: string } {
+  const protocol = String(agent.protocol ?? '').trim().toLowerCase()
+  const adapter = String(agent.adapter ?? '').trim().toLowerCase()
+
+  if (protocol === 'acp' || adapter === 'virtuals-protocol-adapter') {
+    return {
+      supported: true,
+      reason:
+        'Virtuals ACP is often job-based and may require provider wallet/payment setup; chat can still be attempted.',
+    }
+  }
+
+  return { supported: true }
+}
+
 export function HolMarketplaceView() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedAgent, setSelectedAgent] = useState<HolAgentRecord | null>(null)
@@ -124,6 +139,10 @@ export function HolMarketplaceView() {
     () => (selectedAgent ? holAgentChatHint(selectedAgent) : null),
     [selectedAgent]
   )
+  const selectedAgentSessionSupport = useMemo(
+    () => (selectedAgent ? holSessionSupport(selectedAgent) : { supported: false }),
+    [selectedAgent]
+  )
 
   const handleOpenChat = (agent: HolAgentRecord) => {
     setSelectedAgent(agent)
@@ -192,6 +211,7 @@ export function HolMarketplaceView() {
             const currency = agent.pricing?.currency ?? 'HBAR'
             const rateType = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
             const hint = holAgentChatHint(agent)
+            const sessionSupport = holSessionSupport(agent)
 
             return (
               <div
@@ -255,8 +275,14 @@ export function HolMarketplaceView() {
                     <div className="flex flex-col items-end gap-2">
                       <button
                         type="button"
-                        className="inline-flex items-center gap-1 rounded-full bg-sky-500 px-3 py-1.5 text-xs font-medium text-white shadow-sm shadow-sky-500/30 transition hover:bg-sky-400"
+                        className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium transition ${
+                          sessionSupport.supported
+                            ? 'bg-sky-500 text-white shadow-sm shadow-sky-500/30 hover:bg-sky-400'
+                            : 'cursor-not-allowed bg-slate-700/60 text-slate-400'
+                        }`}
                         onClick={() => handleOpenChat(agent)}
+                        disabled={!sessionSupport.supported}
+                        title={sessionSupport.reason}
                       >
                         <MessageSquare className="h-3.5 w-3.5" />
                         Open chat
@@ -333,7 +359,7 @@ export function HolMarketplaceView() {
                 <Button
                   type="button"
                   onClick={handleStartSession}
-                  disabled={startChatMutation.isPending}
+                  disabled={startChatMutation.isPending || !selectedAgentSessionSupport.supported}
                   className="bg-sky-600 text-white hover:bg-sky-500"
                 >
                   {startChatMutation.isPending ? 'Starting...' : chatSessionId ? 'Restart session' : 'Start session'}
@@ -343,6 +369,11 @@ export function HolMarketplaceView() {
               {chatError && (
                 <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
                   {chatError}
+                </div>
+              )}
+              {selectedAgentSessionSupport.reason && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {selectedAgentSessionSupport.reason}
                 </div>
               )}
 

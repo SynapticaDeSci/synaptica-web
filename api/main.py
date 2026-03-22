@@ -39,6 +39,7 @@ from shared.registry_sync import (
     get_registry_cache_ttl_seconds,
 )
 from shared.hol_client import (
+    HolClientConfigurationError,
     HolClientError,
     check_sidecar_health as hol_check_sidecar_health,
     create_session as hol_create_session,
@@ -82,6 +83,9 @@ _registry_refresh_task: Optional[asyncio.Task] = None
 logger = logging.getLogger(__name__)
 
 BUILT_IN_DATA_AGENT_ID = "data-agent-001"
+HOL_DIRECT_SESSION_PREFIX = "hol-direct:"
+HOL_DIRECT_SESSION_HISTORY_LIMIT = 50
+_hol_direct_chat_sessions: Dict[str, Dict[str, Any]] = {}
 
 
 def _upsert_builtin_data_agent() -> None:
@@ -873,6 +877,59 @@ def _normalize_hol_chat_history(messages: List[Dict[str, Any]]) -> List[HolChatM
     return normalized
 
 
+def _should_use_hol_direct_chat_fallback(error: HolClientError) -> bool:
+    if isinstance(error, HolClientConfigurationError):
+        # Sidecar not reachable/configured is a local setup problem, not a broker timeout.
+        return False
+    message = str(error).lower()
+    if "create_session failed" not in message:
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "gateway timeout",
+            "504",
+            "503",
+            "502",
+            "registry broker request failed",
+        )
+    )
+
+
+def _create_hol_direct_chat_session(uaid: str) -> str:
+    session_id = f"{HOL_DIRECT_SESSION_PREFIX}{uuid.uuid4()}"
+    _hol_direct_chat_sessions[session_id] = {"uaid": uaid, "history": []}
+    return session_id
+
+
+def _is_hol_direct_chat_session(session_id: str) -> bool:
+    return session_id.startswith(HOL_DIRECT_SESSION_PREFIX)
+
+
+def _get_hol_direct_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
+    return _hol_direct_chat_sessions.get(session_id)
+
+
+def _append_hol_direct_chat_history(
+    session_id: str,
+    records: List[HolChatMessageRecord],
+) -> List[HolChatMessageRecord]:
+    session = _hol_direct_chat_sessions.get(session_id)
+    if session is None:
+        return []
+
+    history = session.setdefault("history", [])
+    if not isinstance(history, list):
+        history = []
+    history.extend(records)
+    if len(history) > HOL_DIRECT_SESSION_HISTORY_LIMIT:
+        history = history[-HOL_DIRECT_SESSION_HISTORY_LIMIT:]
+    session["history"] = history
+    return list(history)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown."""
@@ -1187,9 +1244,31 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
             transport=request.transport,
             as_uaid=request.as_uaid,
         )
+    except HolClientError as exc:
+        if _should_use_hol_direct_chat_fallback(exc):
+            logger.warning(
+                "HOL create_session failed for %s, enabling direct chat fallback: %s",
+                uaid,
+                exc,
+            )
+            fallback_session_id = _create_hol_direct_chat_session(uaid)
+            return HolChatSessionResponse(
+                success=True,
+                session_id=fallback_session_id,
+                uaid=uaid,
+                broker_response={
+                    "mode": "direct",
+                    "fallback_reason": str(exc),
+                },
+                history=[],
+            )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
         history = await run_in_threadpool(hol_get_history, session_id, limit=50)
     except HolClientError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        logger.warning("HOL get_history after create_session failed for %s: %s", uaid, exc)
+        history = []
 
     return HolChatSessionResponse(
         success=True,
@@ -1209,6 +1288,49 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
 
+    if _is_hol_direct_chat_session(session_id):
+        direct_session = _get_hol_direct_chat_session(session_id)
+        if direct_session is None:
+            raise HTTPException(status_code=404, detail="HOL direct chat session not found")
+        uaid = str(direct_session.get("uaid") or "").strip()
+        if not uaid:
+            raise HTTPException(status_code=500, detail="HOL direct chat session is missing UAID")
+
+        try:
+            await run_in_threadpool(hol_check_sidecar_health)
+            broker_response = await run_in_threadpool(
+                hol_send_message,
+                None,
+                message,
+                uaid=uaid,
+                as_uaid=request.as_uaid,
+            )
+        except HolClientError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        assistant_content = _extract_hol_chat_message_content(broker_response) or json.dumps(
+            broker_response,
+            ensure_ascii=True,
+        )[:1200]
+        history = _append_hol_direct_chat_history(
+            session_id,
+            [
+                HolChatMessageRecord(role="user", content=message, raw={}),
+                HolChatMessageRecord(
+                    role="assistant",
+                    content=assistant_content,
+                    raw=broker_response if isinstance(broker_response, dict) else {},
+                ),
+            ],
+        )
+        return HolChatSessionResponse(
+            success=True,
+            session_id=session_id,
+            uaid=uaid,
+            broker_response=broker_response if isinstance(broker_response, dict) else {},
+            history=history,
+        )
+
     try:
         await run_in_threadpool(hol_check_sidecar_health)
         broker_response = await run_in_threadpool(
@@ -1217,9 +1339,14 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
             message,
             as_uaid=request.as_uaid,
         )
-        history = await run_in_threadpool(hol_get_history, session_id, limit=50)
     except HolClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    try:
+        history = await run_in_threadpool(hol_get_history, session_id, limit=50)
+    except HolClientError as exc:
+        logger.warning("HOL get_history after send_message failed for %s: %s", session_id, exc)
+        history = []
 
     normalized_history = _normalize_hol_chat_history(history)
     if not normalized_history:

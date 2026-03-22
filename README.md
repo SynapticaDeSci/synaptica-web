@@ -222,6 +222,16 @@ REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
 REGISTRY_BROKER_API_KEY=rbk_...
 # Internal sidecar bridge target used by the Python API
 HOL_SDK_SIDECAR_URL=http://127.0.0.1:8040
+# Optional Python API -> sidecar request timeout (seconds, default 60)
+# HOL_SDK_SIDECAR_TIMEOUT_SECONDS=60
+# Optional connect timeout for sidecar requests (seconds, default 5)
+# HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS=5
+# Optional chat-session timeout (seconds, default 120)
+# HOL_SDK_SIDECAR_CREATE_SESSION_TIMEOUT_SECONDS=120
+# Optional retries for chat-session timeout/transient 5xx failures (default 2)
+# HOL_SDK_SIDECAR_CREATE_SESSION_RETRIES=2
+# Optional base backoff between retries (seconds, default 2.0)
+# HOL_SDK_SIDECAR_CREATE_SESSION_RETRY_BACKOFF_SECONDS=2.0
 # Optional sidecar bind controls when running `npm --prefix frontend run hol-sidecar`
 # HOL_SDK_SIDECAR_HOST=127.0.0.1
 # HOL_SDK_SIDECAR_PORT=8040
@@ -235,6 +245,7 @@ Set `HOL_REGISTER_ADDITIONAL_REGISTRIES` only when you intentionally want paid a
 
 The Python API no longer talks to HOL directly for search, registration, or chat. It bridges through the official HOL Standards SDK running in the local sidecar. If `/api/hol/*` calls fail with a sidecar-unavailable error, start `npm --prefix frontend run hol-sidecar` and restart `make api`.
 The sidecar auto-loads the repo root `.env`, so `REGISTRY_BROKER_API_KEY` can live there; shell-exported env vars still take precedence.
+If `createSession` hits transient broker timeouts/5xx, the API automatically falls back to direct UAID messaging mode so chat can still be attempted from the marketplace UI.
 
 With these values set:
 
