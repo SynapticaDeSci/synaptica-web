@@ -331,13 +331,15 @@ export function Marketplace() {
                       <div className="flex items-start gap-4">
                         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-purple-600/20 text-sky-400 ring-1 ring-white/10">
                           <IconComponent className="h-7 w-7" />
-                          <HolRegisterBadge
-                            holUaid={agent.hol_uaid}
-                            holStatus={agent.hol_registration_status}
-                          />
                         </div>
                         <div className="flex-1">
-                          <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-lg font-semibold text-white">{agent.name}</h3>
+                            <HolRegisterBadge
+                              holUaid={agent.hol_uaid}
+                              holStatus={agent.hol_registration_status}
+                            />
+                          </div>
                           {agent.agent_type && <p className="text-sm text-sky-400">{agent.agent_type}</p>}
                         </div>
                       </div>
