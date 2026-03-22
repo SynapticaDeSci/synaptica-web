@@ -226,6 +226,7 @@ HOL_SDK_SIDECAR_URL=http://127.0.0.1:8040
 Set `HOL_REGISTER_ADDITIONAL_REGISTRIES` only when you intentionally want paid additional-registry fan-out.
 
 The Python API no longer talks to HOL directly for search, registration, or chat. It bridges through the official HOL Standards SDK running in the local sidecar. If `/api/hol/*` calls fail with a sidecar-unavailable error, start `npm --prefix frontend run hol-sidecar` and restart `make api`.
+The sidecar auto-loads the repo root `.env`, so `REGISTRY_BROKER_API_KEY` can live there; shell-exported env vars still take precedence.
 
 With these values set:
 

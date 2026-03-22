@@ -78,10 +78,37 @@ test('search forwards query and filters to HOL SDK client', async () => {
   assert.equal(response.payload.hits[0].uaid, 'uaid:aid:test');
 });
 
+test('search falls back to raw broker request on SDK parse error', async () => {
+  let requestedPath = null;
+  const handler = createTestHandler(() => ({
+    async search() {
+      const error = new Error('Failed to parse search response');
+      error.name = 'RegistryBrokerParseError';
+      throw error;
+    },
+    async requestJson(path, config) {
+      requestedPath = [path, config.method];
+      return { hits: [{ uaid: 'uaid:aid:raw', name: 'Raw Agent' }] };
+    },
+  }));
+
+  const response = await invokeHandler(handler, {
+    method: 'POST',
+    url: '/search',
+    body: { query: 'data agent', limit: 7, filters: { online: true } },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.payload.hits[0].uaid, 'uaid:aid:raw');
+  assert.equal(requestedPath[1], 'GET');
+  assert.match(requestedPath[0], /^\/search\?/);
+});
+
 test('register quote uses SDK quote method', async () => {
   const handler = createTestHandler(() => ({
     async getRegistrationQuote(payload) {
       assert.equal(payload.profile.display_name, 'Demo Agent');
+      assert.equal(payload.endpoint, 'https://agent.example.com/execute');
+      assert.equal(payload.additionalRegistries.length, 0);
       return { requiredCredits: 10, availableCredits: 5 };
     },
     async registerAgent() {
@@ -94,7 +121,10 @@ test('register quote uses SDK quote method', async () => {
     url: '/register',
     body: {
       mode: 'quote',
-      agent_payload: { profile: { display_name: 'Demo Agent' } },
+      agent_payload: {
+        profile: { display_name: 'Demo Agent' },
+        endpoint_url: 'https://agent.example.com/execute',
+      },
     },
   });
   assert.equal(response.statusCode, 200);

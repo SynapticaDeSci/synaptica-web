@@ -1,10 +1,46 @@
 import { createServer } from 'node:http';
-import { pathToFileURL } from 'node:url';
-import { RegistryBrokerClient } from '@hashgraphonline/standards-sdk';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { RegistryBrokerClient, RegistryBrokerParseError } from '@hashgraphonline/standards-sdk';
 
 const DEFAULT_BASE_URL = 'https://hol.org/registry/api/v1';
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8040;
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '..', '..');
+
+function loadEnvFile(filePath, target = process.env) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of content.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const separatorIndex = line.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    if (!key || Object.prototype.hasOwnProperty.call(target, key)) {
+      continue;
+    }
+    let value = line.slice(separatorIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    target[key] = value;
+  }
+}
+
+loadEnvFile(path.join(REPO_ROOT, '.env'));
 
 function jsonResponse(res, statusCode, payload) {
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -105,6 +141,10 @@ function sdkErrorStatus(error) {
   return 500;
 }
 
+function isRegistryBrokerParseError(error) {
+  return error instanceof RegistryBrokerParseError || error?.name === 'RegistryBrokerParseError';
+}
+
 function normalizeHistorySnapshot(snapshot) {
   if (Array.isArray(snapshot)) {
     return { messages: snapshot };
@@ -127,6 +167,106 @@ function clamp(value, min, max, fallback) {
     return fallback;
   }
   return Math.max(min, Math.min(max, parsed));
+}
+
+function normalizeRegistrationPayload(agentPayload) {
+  const normalized =
+    agentPayload && typeof agentPayload === 'object' && !Array.isArray(agentPayload)
+      ? { ...agentPayload }
+      : {};
+
+  const endpoint = firstString([normalized.endpoint, normalized.endpoint_url, normalized.endpointUrl]);
+  const protocol = firstString([
+    normalized.protocol,
+    normalized.communicationProtocol,
+    normalized.communication_protocol,
+  ]);
+  const registry = firstString([normalized.registry]);
+  const additionalRegistries = Array.isArray(normalized.additionalRegistries)
+    ? normalized.additionalRegistries.filter((value) => typeof value === 'string' && value.trim())
+    : [];
+  const metadata =
+    normalized.metadata && typeof normalized.metadata === 'object' && !Array.isArray(normalized.metadata)
+      ? { ...normalized.metadata }
+      : {};
+
+  if (!metadata.publicUrl && endpoint) {
+    metadata.publicUrl = endpoint;
+  }
+  if (!metadata.nativeId && normalized.agent_id) {
+    metadata.nativeId = normalized.agent_id;
+  }
+
+  const result = {
+    profile:
+      normalized.profile && typeof normalized.profile === 'object' && !Array.isArray(normalized.profile)
+        ? normalized.profile
+        : {},
+    ...(endpoint ? { endpoint } : {}),
+    ...(protocol ? { protocol } : {}),
+    ...(protocol ? { communicationProtocol: protocol } : {}),
+    ...(registry ? { registry } : {}),
+    ...(additionalRegistries.length > 0 ? { additionalRegistries } : { additionalRegistries: [] }),
+    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+  };
+
+  return result;
+}
+
+async function requestRegisterRaw(client, sdkPayload, mode) {
+  const path = mode === 'quote' ? '/register/quote' : '/register';
+  return client.requestJson(path, {
+    method: 'POST',
+    body: sdkPayload,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function requestSearchRaw(client, payload) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item !== undefined && item !== null) {
+          query.append(key, `${item}`);
+        }
+      }
+      continue;
+    }
+    if (typeof value === 'object') {
+      query.append(key, JSON.stringify(value));
+      continue;
+    }
+    query.append(key, `${value}`);
+  }
+  return client.requestJson(`/search?${query.toString()}`, {
+    method: 'GET',
+  });
+}
+
+async function requestCreateSessionRaw(client, payload) {
+  return client.requestJson('/chat/session', {
+    method: 'POST',
+    body: payload,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function requestSendMessageRaw(client, payload) {
+  return client.requestJson('/chat/message', {
+    method: 'POST',
+    body: payload,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function requestHistoryRaw(client, sessionId) {
+  return client.requestJson(`/chat/history/${encodeURIComponent(sessionId)}`, {
+    method: 'GET',
+  });
 }
 
 export function createHolSidecarHandler({
@@ -166,7 +306,15 @@ export function createHolSidecarHandler({
           limit: clamp(body.limit, 1, 100, 5),
           ...filters,
         };
-        const result = await client.search(payload);
+        let result;
+        try {
+          result = await client.search(payload);
+        } catch (error) {
+          if (!isRegistryBrokerParseError(error)) {
+            throw error;
+          }
+          result = await requestSearchRaw(client, payload);
+        }
         jsonResponse(res, 200, result);
         return;
       }
@@ -186,10 +334,19 @@ export function createHolSidecarHandler({
           jsonResponse(res, 400, { detail: "mode must be either 'quote' or 'register'" });
           return;
         }
-        const result =
-          mode === 'quote'
-            ? await client.getRegistrationQuote(agentPayload)
-            : await client.registerAgent(agentPayload);
+        const sdkPayload = normalizeRegistrationPayload(agentPayload);
+        let result;
+        try {
+          result =
+            mode === 'quote'
+              ? await client.getRegistrationQuote(sdkPayload)
+              : await client.registerAgent(sdkPayload);
+        } catch (error) {
+          if (!isRegistryBrokerParseError(error)) {
+            throw error;
+          }
+          result = await requestRegisterRaw(client, sdkPayload, mode);
+        }
         jsonResponse(res, 200, result);
         return;
       }
@@ -210,7 +367,15 @@ export function createHolSidecarHandler({
         if (body.transport) {
           payload.transport = body.transport;
         }
-        const result = await client.createSession(payload);
+        let result;
+        try {
+          result = await client.createSession(payload);
+        } catch (error) {
+          if (!isRegistryBrokerParseError(error)) {
+            throw error;
+          }
+          result = await requestCreateSessionRaw(client, payload);
+        }
         jsonResponse(res, 200, result);
         return;
       }
@@ -239,7 +404,15 @@ export function createHolSidecarHandler({
         if (body.as_uaid) {
           payload.senderUaid = body.as_uaid;
         }
-        const result = await client.sendMessage(payload);
+        let result;
+        try {
+          result = await client.sendMessage(payload);
+        } catch (error) {
+          if (!isRegistryBrokerParseError(error)) {
+            throw error;
+          }
+          result = await requestSendMessageRaw(client, payload);
+        }
         jsonResponse(res, 200, result);
         return;
       }
@@ -250,7 +423,15 @@ export function createHolSidecarHandler({
           jsonResponse(res, 400, { detail: 'session_id is required' });
           return;
         }
-        const snapshot = await client.fetchHistorySnapshot(sessionId, { decrypt: false });
+        let snapshot;
+        try {
+          snapshot = await client.fetchHistorySnapshot(sessionId, { decrypt: false });
+        } catch (error) {
+          if (!isRegistryBrokerParseError(error)) {
+            throw error;
+          }
+          snapshot = await requestHistoryRaw(client, sessionId);
+        }
         jsonResponse(res, 200, normalizeHistorySnapshot(snapshot));
         return;
       }
