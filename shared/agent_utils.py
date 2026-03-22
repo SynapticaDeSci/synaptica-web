@@ -82,6 +82,7 @@ def serialize_agent(agent: Agent, reputation_score: Optional[float] = None) -> D
     return {
         "agent_id": agent.agent_id,
         "name": agent.name,
+        "agent_type": agent.agent_type,
         "description": agent.description,
         "capabilities": agent.capabilities or [],
         "categories": meta.get("categories") or [],

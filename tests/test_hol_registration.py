@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from api.main import app, _build_hol_registration_payload, _resolve_hol_error_status
 from shared.database import Agent, AgentReputation, AgentsCacheEntry, SessionLocal
-from shared.hol_client import _format_http_error
+from shared.hol_client import _format_http_error, register_agent
 from shared.metadata.publisher import PinataUploadResult
 
 
@@ -110,6 +110,82 @@ def test_format_http_error_collapses_html_502_page() -> None:
 def test_format_http_error_normalizes_timeout() -> None:
     exc = httpx.ReadTimeout("The read operation timed out")
     assert _format_http_error(exc) == "request timed out while waiting for HOL registry response"
+
+
+def test_register_agent_tries_fallback_paths_after_timeout(monkeypatch) -> None:
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, path: str, json: dict):
+            self.paths.append(path)
+            if path == "/register":
+                raise httpx.ReadTimeout("timed out", request=httpx.Request("POST", f"https://hol.org{path}"))
+            request = httpx.Request("POST", f"https://hol.org{path}")
+            return httpx.Response(200, json={"uaid": "uaid:hol:test:ok"}, request=request)
+
+    fake_client = _FakeClient()
+    monkeypatch.setattr("shared.hol_client._build_client", lambda **kwargs: fake_client)
+    monkeypatch.setattr("shared.hol_client._get_base_url_candidates", lambda: ["https://hol.org/registry/api/v1"])
+    monkeypatch.setattr("shared.hol_client._get_register_paths", lambda: ["/register", "/agents/register"])
+
+    response = register_agent({"endpoint_url": "https://agent.example.com/execute"})
+    assert response["uaid"] == "uaid:hol:test:ok"
+    assert fake_client.paths == ["/register", "/agents/register"]
+
+
+def test_register_agent_tries_fallback_base_url_after_timeouts(monkeypatch) -> None:
+    class _TimeoutClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, path: str, json: dict):
+            raise httpx.ReadTimeout("timed out", request=httpx.Request("POST", f"https://hol.org{path}"))
+
+    class _SuccessClient:
+        def __init__(self) -> None:
+            self.paths: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, path: str, json: dict):
+            self.paths.append(path)
+            request = httpx.Request("POST", f"https://api.hashgraph.online{path}")
+            return httpx.Response(200, json={"uaid": "uaid:hol:fallback-base"}, request=request)
+
+    timeout_client = _TimeoutClient()
+    success_client = _SuccessClient()
+
+    def _mock_build_client(*, base_url: str | None = None):
+        if base_url == "https://hol.org/registry/api/v1":
+            return timeout_client
+        if base_url == "https://api.hashgraph.online/v1":
+            return success_client
+        raise AssertionError(f"Unexpected base_url: {base_url}")
+
+    monkeypatch.setattr("shared.hol_client._build_client", _mock_build_client)
+    monkeypatch.setattr(
+        "shared.hol_client._get_base_url_candidates",
+        lambda: ["https://hol.org/registry/api/v1", "https://api.hashgraph.online/v1"],
+    )
+    monkeypatch.setattr("shared.hol_client._get_register_paths", lambda: ["/register"])
+
+    response = register_agent({"endpoint_url": "https://agent.example.com/execute"})
+    assert response["uaid"] == "uaid:hol:fallback-base"
+    assert success_client.paths == ["/register"]
 
 
 def test_resolve_hol_error_status_marks_transient_failures_unregistered() -> None:

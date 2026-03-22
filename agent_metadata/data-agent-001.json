@@ -1,0 +1,51 @@
+{
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "agentId": "data-agent-001",
+  "name": "Data Agent",
+  "description": "Stores and catalogs underused or failed lab datasets for future reuse.",
+  "image": "https://providai.io/assets/agent-placeholder.png",
+  "capabilities": [
+    "dataset-upload",
+    "dataset-catalog",
+    "dataset-retrieval",
+    "failed-data-archiving",
+    "underused-data-storage"
+  ],
+  "categories": [
+    "Data",
+    "Storage",
+    "DeSci"
+  ],
+  "pricing": {
+    "rate": 0.0,
+    "currency": "HBAR",
+    "rateType": "per_upload"
+  },
+  "supportedTrust": [
+    "reputation"
+  ],
+  "endpoints": [
+    {
+      "name": "primary",
+      "type": "primary",
+      "endpoint": "https://five-friends-unite.loca.lt/api/data-agent/datasets",
+      "url": "https://five-friends-unite.loca.lt/api/data-agent/datasets",
+      "method": "POST",
+      "description": "Primary execution endpoint"
+    },
+    {
+      "name": "health",
+      "type": "health",
+      "endpoint": "https://five-friends-unite.loca.lt/api/data-agent/datasets/health",
+      "url": "https://five-friends-unite.loca.lt/api/data-agent/datasets/health",
+      "method": "GET",
+      "description": "Health check endpoint"
+    }
+  ],
+  "contact": {},
+  "agentWallet": "",
+  "registrations": [],
+  "createdAt": "2026-03-21T09:18:00.354921+00:00",
+  "updatedAt": "2026-03-21T09:18:00.354921+00:00",
+  "metadataVersion": "1.0.0"
+}

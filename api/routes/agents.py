@@ -68,6 +68,7 @@ class AgentResponse(BaseModel):
 
     agent_id: str
     name: str
+    agent_type: Optional[str] = None
     description: Optional[str] = None
     capabilities: List[str]
     categories: List[str]

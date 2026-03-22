@@ -543,19 +543,26 @@ export async function searchHolAgents(
 export async function registerAgentOnHol(
   payload: HolRegisterAgentRequest
 ): Promise<HolRegisterAgentResponse> {
+  const requestBody = {
+    agent_id: payload.agent_id,
+    mode: payload.mode ?? 'register',
+    endpoint_url_override: payload.endpoint_url_override,
+    metadata_uri_override: payload.metadata_uri_override,
+  };
   const response = await fetch(`${BACKEND_BASE_URL}/api/hol/register-agent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      agent_id: payload.agent_id,
-      mode: payload.mode ?? 'register',
-      endpoint_url_override: payload.endpoint_url_override,
-      metadata_uri_override: payload.metadata_uri_override,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   const result = await response.json().catch(() => null);
   if (!response.ok) {
+    console.error('[HOL register] request failed', {
+      status: response.status,
+      statusText: response.statusText,
+      request: requestBody,
+      response: result,
+    });
     const message = extractApiErrorMessage(result, 'Failed to register agent on HOL');
     throw new Error(message);
   }

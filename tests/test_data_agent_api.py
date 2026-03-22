@@ -269,6 +269,42 @@ def test_hol_use_auto_discovery_persists_session_history(client: TestClient, mon
     assert detail_payload["hol_sessions"][0]["session_id"] == "session-hol-001"
 
 
+def test_hol_use_auto_discovery_falls_back_to_broad_query(client: TestClient, monkeypatch):
+    upload = _upload_dataset(client, title="Specialized assay", lab_name="QuantumLab")
+    dataset_id = upload.json()["id"]
+
+    seen_queries: list[str] = []
+
+    def _mock_search(query: str, limit: int = 5):
+        seen_queries.append(query)
+        if query.strip().lower() == "data agent":
+            return [
+                HolAgentSummary(
+                    uaid="uaid:hol:data:fallback",
+                    name="HOL Generic Data Agent",
+                    description="General-purpose data helper.",
+                    capabilities=["data analysis"],
+                    categories=["Data"],
+                    transports=["http"],
+                    pricing={"rate": 1.0, "currency": "HBAR"},
+                    registry="hol",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", _mock_search)
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda **_: "session-hol-fallback")
+    monkeypatch.setattr("api.routes.data_agent.hol_send_message", lambda **_: {"status": "ok"})
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["uaid"] == "uaid:hol:data:fallback"
+    assert payload["query"] == "data agent"
+    assert len(seen_queries) >= 2
+    assert seen_queries[0] != "data agent"
+
+
 def test_hol_use_with_explicit_uaid_skips_discovery(client: TestClient, monkeypatch):
     upload = _upload_dataset(client)
     dataset_id = upload.json()["id"]
@@ -321,3 +357,5 @@ def test_built_in_data_agent_is_listed(client: TestClient):
     payload = listing.json()
     ids = [agent["agent_id"] for agent in payload["agents"]]
     assert "data-agent-001" in ids
+    data_agent = next(agent for agent in payload["agents"] if agent["agent_id"] == "data-agent-001")
+    assert data_agent["agent_type"] == "data"

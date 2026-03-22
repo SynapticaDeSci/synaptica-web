@@ -933,6 +933,36 @@ def _default_hol_query(asset: DataAsset, required_capabilities: List[str]) -> st
     return " ".join(part.strip() for part in terms if isinstance(part, str) and part.strip())
 
 
+def _build_hol_search_queries(
+    asset: DataAsset,
+    *,
+    required_capabilities: List[str],
+    search_query: Optional[str],
+) -> List[str]:
+    explicit = (search_query or "").strip()
+    if explicit:
+        return [explicit]
+
+    candidates = [
+        _default_hol_query(asset, required_capabilities),
+        "data agent",
+        "dataset curation",
+        "tabular validation",
+    ]
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        cleaned = candidate.strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
 def _default_hol_instructions(asset: DataAsset) -> str:
     return (
         "Analyze this dataset metadata and propose reuse opportunities, data quality caveats, "
@@ -958,7 +988,12 @@ async def use_hol_data_agent(
         for item in (request.required_capabilities or [])
         if isinstance(item, str) and item.strip()
     ] or list(DEFAULT_HOL_DATA_AGENT_CAPABILITIES)
-    query = (request.search_query or "").strip() or _default_hol_query(asset, required_capabilities)
+    query_candidates = _build_hol_search_queries(
+        asset,
+        required_capabilities=required_capabilities,
+        search_query=request.search_query,
+    )
+    query = query_candidates[0]
 
     selected_uaid = (request.uaid or "").strip()
     selected_name: Optional[str] = None
@@ -966,14 +1001,23 @@ async def use_hol_data_agent(
 
     if not selected_uaid:
         try:
-            candidates = hol_search_agents(query=query, limit=request.limit)
+            candidates: List[Any] = []
+            for candidate_query in query_candidates:
+                discovered = hol_search_agents(query=candidate_query, limit=request.limit)
+                if discovered:
+                    candidates = discovered
+                    query = candidate_query
+                    break
         except HolClientError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
         if not candidates:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No HOL agents found for the provided dataset query.",
+                detail=(
+                    "No HOL agents found for the provided dataset query. "
+                    "Try specifying a known UAID override."
+                ),
             )
 
         selected = candidates[0]

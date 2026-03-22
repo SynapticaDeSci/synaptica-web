@@ -114,6 +114,11 @@ export function Marketplace() {
         await registerAgentOnHol({ agent_id: agentId, mode: 'register' })
         await refetch()
       } catch (err: any) {
+        console.error('[Marketplace] HOL registration failed', {
+          agentId,
+          message: err?.message,
+          error: err,
+        })
         const message = normalizeHolErrorMessage(err?.message || 'Failed to register agent on HOL')
         if (message) {
           setHolRegistrationErrors((current) => ({ ...current, [agentId]: message }))
@@ -315,7 +320,10 @@ export function Marketplace() {
                 const hasHolUaid = Boolean(agent.hol_uaid)
                 const holRegistered = holStatus === 'registered' || holStatus === 'ok' || hasHolUaid
                 const holPending = holStatus === 'pending'
-                const isDataAgent = (agent.agent_type || '').toLowerCase() === 'data'
+                const isDataAgent =
+                  (agent.agent_type || '').toLowerCase() === 'data' ||
+                  agent.agent_id === 'data-agent-001' ||
+                  capabilities.some((capability) => capability.toLowerCase() === 'dataset-upload')
                 const canRegisterOnHol = Boolean(
                   agent.endpoint_url && (isDataAgent || agent.erc8004_metadata_uri || agent.metadata_gateway_url)
                 )
@@ -386,7 +394,7 @@ export function Marketplace() {
                           }`}
                           title={
                             !canRegisterOnHol
-                              ? 'Agent requires endpoint + metadata URI before HOL registration.'
+                              ? 'Agent requires endpoint + metadata URI before HOL registration (data agents can auto-publish metadata).'
                               : undefined
                           }
                         >

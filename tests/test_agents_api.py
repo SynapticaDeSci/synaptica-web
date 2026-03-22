@@ -102,6 +102,7 @@ def test_list_agents_returns_created_agent(client: TestClient):
     assert data["total"] >= 1
     created = next((agent for agent in data["agents"] if agent["agent_id"] == "test-agent"), None)
     assert created is not None
+    assert created["agent_type"] == "http"
     assert created["pricing"]["rate"] == 1.5
     assert created["reputation_score"] == 0.5
     assert created["registry_status"] == "pending"

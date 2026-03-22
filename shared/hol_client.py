@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+DEFAULT_BROKER_BASE_URL = "https://hol.org/registry/api/v1"
+DEFAULT_BROKER_TIMEOUT_FALLBACK_URL_2 = "https://registry.hashgraphonline.com/api/v1"
 
 
 class HolClientError(RuntimeError):
@@ -33,10 +35,48 @@ class HolClientConfigurationError(HolClientError):
 
 
 def _get_base_url() -> str:
-    base_url = os.getenv("REGISTRY_BROKER_API_URL", "https://hol.org/registry/api/v1").strip()
+    base_url = os.getenv("REGISTRY_BROKER_API_URL", DEFAULT_BROKER_BASE_URL).strip()
     if not base_url:
         raise HolClientConfigurationError("REGISTRY_BROKER_API_URL is empty")
     return base_url.rstrip("/")
+
+
+def _normalize_base_url(value: str) -> str:
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return ""
+    if not normalized.startswith(("http://", "https://")):
+        return ""
+    return normalized
+
+
+def _get_base_url_candidates() -> List[str]:
+    primary = _normalize_base_url(_get_base_url())
+    candidates: List[str] = []
+    if primary:
+        candidates.append(primary)
+
+    # Optional explicit fallback list for operators.
+    csv_fallbacks = (os.getenv("REGISTRY_BROKER_API_URL_FALLBACKS") or "").strip()
+    if csv_fallbacks:
+        for raw in csv_fallbacks.split(","):
+            normalized = _normalize_base_url(raw)
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+
+    # Built-in fallback used only when the primary host repeatedly times out.
+    default_fallbacks = [
+        # Keep default fallback list conservative and SNI-safe.
+        DEFAULT_BROKER_TIMEOUT_FALLBACK_URL_2,
+    ]
+    for item in default_fallbacks:
+        default_fallback = _normalize_base_url(item)
+        if default_fallback and default_fallback not in candidates:
+            candidates.append(default_fallback)
+
+    if not candidates:
+        raise HolClientConfigurationError("No valid Registry Broker base URL candidates configured")
+    return candidates
 
 
 def _get_api_key() -> Optional[str]:
@@ -44,8 +84,15 @@ def _get_api_key() -> Optional[str]:
     return key.strip() if key else None
 
 
-def _build_client() -> httpx.Client:
-    timeout = httpx.Timeout(10.0, connect=5.0)
+def _build_client(*, base_url: Optional[str] = None) -> httpx.Client:
+    timeout_raw = (os.getenv("REGISTRY_BROKER_TIMEOUT_SECONDS") or "").strip()
+    try:
+        total_timeout = float(timeout_raw) if timeout_raw else 30.0
+    except ValueError:
+        total_timeout = 30.0
+    total_timeout = max(5.0, min(total_timeout, 300.0))
+    connect_timeout = min(max(5.0, total_timeout / 3.0), 20.0)
+    timeout = httpx.Timeout(total_timeout, connect=connect_timeout)
     limits = httpx.Limits(max_keepalive_connections=4, max_connections=8)
     headers: Dict[str, str] = {
         "Accept": "application/json",
@@ -53,7 +100,12 @@ def _build_client() -> httpx.Client:
     api_key = _get_api_key()
     if api_key:
         headers["x-api-key"] = api_key
-    return httpx.Client(timeout=timeout, limits=limits, headers=headers, base_url=_get_base_url())
+    return httpx.Client(
+        timeout=timeout,
+        limits=limits,
+        headers=headers,
+        base_url=base_url or _get_base_url(),
+    )
 
 
 def _normalize_register_path(path: str) -> str:
@@ -84,7 +136,10 @@ def _get_register_paths() -> List[str]:
 
     # Conservative built-in fallbacks for broker variations. First item remains
     # the configured/default path to preserve existing behavior.
-    fallbacks = [single_path, "/agents/register", "/agent/register", "/skills/publish"]
+    # `/skills/publish` is intentionally excluded for this agent-registration
+    # client because it belongs to a different publishing flow and can cause
+    # long-running incompatible requests.
+    fallbacks = [single_path, "/agents/register", "/agent/register"]
     deduped: List[str] = []
     for candidate in fallbacks:
         if candidate and candidate not in deduped:
@@ -134,6 +189,9 @@ def _format_http_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "request timed out while waiting for HOL registry response"
     if isinstance(exc, httpx.ConnectError):
+        detail = str(exc).strip()
+        if detail:
+            return f"failed to connect to HOL registry ({detail})"
         return "failed to connect to HOL registry"
 
     if isinstance(exc, httpx.HTTPStatusError):
@@ -184,8 +242,9 @@ def search_agents(
             response = client.get("/search", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL search request failed: %s", exc)
-            raise HolClientError(f"HOL search failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL search request failed: %s", detail)
+            raise HolClientError(f"HOL search failed: {detail}") from exc
 
         data = response.json()
 
@@ -251,8 +310,9 @@ def create_session(
             response = client.post("/chat/session", json=payload)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL create_session failed: %s", exc)
-            raise HolClientError(f"HOL create_session failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL create_session failed: %s", detail)
+            raise HolClientError(f"HOL create_session failed: {detail}") from exc
 
         data = response.json()
 
@@ -284,8 +344,9 @@ def send_message(
             response = client.post("/chat/message", json=payload)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL send_message failed: %s", exc)
-            raise HolClientError(f"HOL send_message failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL send_message failed: %s", detail)
+            raise HolClientError(f"HOL send_message failed: {detail}") from exc
 
         data = response.json()
 
@@ -303,8 +364,9 @@ def get_history(session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
             response = client.get(f"/chat/history/{session_id}", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL get_history failed: %s", exc)
-            raise HolClientError(f"HOL get_history failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL get_history failed: %s", detail)
+            raise HolClientError(f"HOL get_history failed: {detail}") from exc
 
         data = response.json()
 
@@ -324,8 +386,9 @@ def list_sessions(*, as_uaid: Optional[str] = None, limit: int = 50) -> List[Dic
             response = client.get("/chat/sessions", params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:  # noqa: BLE001
-            logger.warning("HOL list_sessions failed: %s", exc)
-            raise HolClientError(f"HOL list_sessions failed: {exc}") from exc
+            detail = _format_http_error(exc)
+            logger.warning("HOL list_sessions failed: %s", detail)
+            raise HolClientError(f"HOL list_sessions failed: {detail}") from exc
 
         data = response.json()
 
@@ -346,48 +409,91 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
     attempted_paths: List[str] = []
     last_error: Optional[Exception] = None
     last_error_message: Optional[str] = None
+    last_http_error_404: Optional[httpx.HTTPStatusError] = None
+    last_http_error_non_404: Optional[httpx.HTTPStatusError] = None
 
-    with _build_client() as client:
-        for path in _get_register_paths():
-            attempted_paths.append(path)
-            try:
-                response = client.post(path, json=payload)
-            except httpx.HTTPError as exc:  # noqa: BLE001
-                last_error = exc
-                last_error_message = _format_http_error(exc)
-                logger.warning("HOL register_agent request failed for %s: %s", path, last_error_message)
-                break
-
-            if response.status_code == 404:
-                logger.info("HOL register_agent path not found: %s", path)
-                last_error = httpx.HTTPStatusError(
-                    "404 Not Found",
-                    request=response.request,
-                    response=response,
+    base_urls = _get_base_url_candidates()
+    register_paths = _get_register_paths()
+    for base_url in base_urls:
+        logger.info("HOL register_agent base_url=%s", base_url)
+        with _build_client(base_url=base_url) as client:
+            for path in register_paths:
+                target = path if path.startswith(("http://", "https://")) else f"{base_url}{path}"
+                attempted_paths.append(target)
+                logger.info(
+                    "HOL register_agent attempt mode=%s target=%s",
+                    normalized_mode,
+                    target,
                 )
-                last_error_message = _format_http_error(last_error)
-                continue
+                try:
+                    response = client.post(path, json=payload)
+                except httpx.HTTPError as exc:  # noqa: BLE001
+                    last_error = exc
+                    last_error_message = _format_http_error(exc)
+                    logger.warning(
+                        "HOL register_agent request failed for %s: %s",
+                        target,
+                        last_error_message,
+                    )
+                    # Some brokers/gateways time out on unsupported routes instead of
+                    # returning 404/405. Keep trying configured fallback paths.
+                    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+                        continue
+                    break
 
-            try:
-                response.raise_for_status()
-            except httpx.HTTPError as exc:  # noqa: BLE001
-                last_error = exc
-                last_error_message = _format_http_error(exc)
-                logger.warning("HOL register_agent failed for %s: %s", path, last_error_message)
-                break
+                logger.info(
+                    "HOL register_agent response mode=%s target=%s status=%s",
+                    normalized_mode,
+                    target,
+                    response.status_code,
+                )
+                if response.status_code == 404:
+                    logger.info("HOL register_agent path not found: %s", target)
+                    last_error = httpx.HTTPStatusError(
+                        "404 Not Found",
+                        request=response.request,
+                        response=response,
+                    )
+                    last_error_message = _format_http_error(last_error)
+                    if isinstance(last_error, httpx.HTTPStatusError):
+                        last_http_error_404 = last_error
+                    continue
 
-            data = response.json()
-            if not isinstance(data, dict):
-                raise HolClientError(f"Unexpected HOL registration response payload: {data!r}")
-            return data
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:  # noqa: BLE001
+                    last_error = exc
+                    last_error_message = _format_http_error(exc)
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        if exc.response.status_code == 404:
+                            last_http_error_404 = exc
+                        else:
+                            last_http_error_non_404 = exc
+                    logger.warning(
+                        "HOL register_agent failed for %s: %s",
+                        target,
+                        last_error_message,
+                    )
+                    break
+
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise HolClientError(f"Unexpected HOL registration response payload: {data!r}")
+                return data
 
     attempted = ", ".join(attempted_paths) or "<none>"
-    if isinstance(last_error, httpx.HTTPStatusError) and last_error.response.status_code == 404:
+    if last_http_error_non_404 is not None:
+        detail = _format_http_error(last_http_error_non_404)
+        raise HolClientError(
+            f"HOL register_agent failed after trying paths ({attempted}): {detail}"
+        ) from last_http_error_non_404
+
+    if last_http_error_404 is not None:
         raise HolClientError(
             "HOL register_agent failed: 404 Not Found on all candidate paths "
             f"({attempted}). Set REGISTRY_BROKER_REGISTER_PATH or "
             "REGISTRY_BROKER_REGISTER_PATHS to the correct endpoint."
-        ) from last_error
+        ) from last_http_error_404
 
     raise HolClientError(
         f"HOL register_agent failed after trying paths ({attempted}): "

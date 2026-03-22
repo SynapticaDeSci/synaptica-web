@@ -1041,6 +1041,7 @@ async def hol_agents_search(
 async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegisterAgentResponse:
     """Register (or quote registration for) a local marketplace agent in HOL."""
     db = SessionLocal()
+    trace_id = uuid.uuid4().hex[:8]
     try:
         agent = db.query(Agent).filter(Agent.agent_id == request.agent_id).one_or_none()
         if agent is None:
@@ -1064,6 +1065,15 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
             endpoint_url_override=request.endpoint_url_override,
             metadata_uri_override=request.metadata_uri_override,
         )
+        logger.info(
+            "hol_register[%s] start agent_id=%s mode=%s type=%s endpoint=%s metadata_uri=%s",
+            trace_id,
+            agent.agent_id,
+            request.mode,
+            agent.agent_type or "unknown",
+            payload.get("endpoint_url"),
+            payload.get("metadata_uri"),
+        )
         current = _extract_hol_meta(agent)
         previous_status = str(current.get("registration_status") or "unregistered")
 
@@ -1075,6 +1085,13 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         try:
             broker_response = hol_register_agent(payload, mode=request.mode)
         except HolClientError as exc:
+            logger.warning(
+                "hol_register[%s] broker error agent_id=%s mode=%s detail=%s",
+                trace_id,
+                agent.agent_id,
+                request.mode,
+                str(exc),
+            )
             if request.mode == "register":
                 next_status = _resolve_hol_error_status(previous_status, str(exc))
                 _set_hol_meta(
@@ -1119,6 +1136,15 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
                 )
 
         status_meta = _extract_hol_meta(agent)
+        logger.info(
+            "hol_register[%s] success agent_id=%s mode=%s status=%s uaid=%s broker_keys=%s",
+            trace_id,
+            agent.agent_id,
+            request.mode,
+            status_meta["registration_status"],
+            status_meta["uaid"],
+            sorted(list((broker_response or {}).keys())),
+        )
         return HolRegisterAgentResponse(
             success=True,
             agent_id=agent.agent_id,
