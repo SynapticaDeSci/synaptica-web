@@ -302,7 +302,7 @@ def _serialize_agent_row(agent: Agent, reputation_score: float) -> Dict[str, Any
         "pricing": dict(meta.get("pricing") or {}),
         "support_tier": meta.get("support_tier") or infer_support_tier(agent.agent_id, agent.agent_type).value,
         "endpoint_url": (
-            default_research_endpoint(agent.agent_id)
+            default_public_research_endpoint(agent.agent_id)
             if is_supported_builtin_research_agent(agent.agent_id)
             else meta.get("endpoint_url")
         ),
@@ -355,7 +355,7 @@ def list_supported_research_agents() -> List[Dict[str, Any]]:
             "capabilities": list(details.get("capabilities") or []),
             "pricing": dict(details.get("pricing") or {}),
             "support_tier": SupportTier.SUPPORTED.value,
-            "endpoint_url": default_research_endpoint(agent_id),
+            "endpoint_url": default_public_research_endpoint(agent_id),
             "hedera_account_id": details.get("hedera_account_id"),
             "reputation_score": 0.8,
             "role_families": list(details.get("role_families") or []),
@@ -409,6 +409,22 @@ def default_research_endpoint(agent_id: str) -> str:
 
     base_url = os.getenv("RESEARCH_API_URL", "http://localhost:5001").rstrip("/")
     return f"{base_url}/agents/{agent_id}"
+
+
+def default_public_research_endpoint(agent_id: str) -> str:
+    """Return the public API endpoint exposed for a supported research agent."""
+
+    if is_supported_builtin_research_agent(agent_id):
+        return f"/api/research-agent/{agent_id}"
+    return default_research_endpoint(agent_id)
+
+
+def default_public_research_health_url(agent_id: str) -> str | None:
+    """Return the public health-check endpoint for a supported research agent."""
+
+    if is_supported_builtin_research_agent(agent_id):
+        return f"/api/research-agent/{agent_id}/health"
+    return None
 
 
 def infer_support_tier(agent_id: str, agent_type: str | None = None) -> SupportTier:

@@ -12,6 +12,7 @@ from api.main import (
 from shared.database import Agent, AgentReputation, AgentsCacheEntry, SessionLocal
 import shared.hol_client as hol_client
 from shared.hol_client import _format_http_error, _get_quote_paths, create_session, search_agents
+from shared.research.catalog import default_public_research_endpoint, default_public_research_health_url
 
 
 def _reset_state() -> None:
@@ -203,6 +204,8 @@ def test_search_agents_supports_hits_payload(
                     "transports": ["a2a"],
                     "pricing": {"rate": 1, "currency": "HBAR"},
                     "registry": "broker",
+                    "trustScore": 42.5,
+                    "trustScores": {"total": 42.5, "availability.uptime": 88.0},
                 }
             ]
         },
@@ -228,6 +231,8 @@ def test_search_agents_supports_hits_payload(
     assert len(agents) == 1
     assert agents[0].uaid == "uaid:aid:demo"
     assert agents[0].name == "Demo HOL Agent"
+    assert agents[0].trust_score == 42.5
+    assert agents[0].trust_scores == {"total": 42.5, "availability.uptime": 88.0}
 
 
 def test_hol_agents_search_exposes_candidate_metadata(
@@ -245,6 +250,8 @@ def test_hol_agents_search_exposes_candidate_metadata(
         registry = "broker"
         available = True
         availability_status = "online"
+        trust_score = 52.25
+        trust_scores = {"total": 52.25, "availability.uptime": 77.0}
         source_url = "https://example.com/agent"
         adapter = "http-adapter"
         protocol = "http"
@@ -257,6 +264,8 @@ def test_hol_agents_search_exposes_candidate_metadata(
     assert payload["query"] == "data agent"
     assert payload["agents"][0]["available"] is True
     assert payload["agents"][0]["availability_status"] == "online"
+    assert payload["agents"][0]["trust_score"] == 52.25
+    assert payload["agents"][0]["trust_scores"]["availability.uptime"] == 77.0
     assert payload["agents"][0]["source_url"] == "https://example.com/agent"
     assert payload["agents"][0]["protocol"] == "http"
 
@@ -357,6 +366,52 @@ def test_hol_agents_search_only_available_overfetches_before_filtering(
     assert payload["agents"][0]["uaid"] == "uaid:aid:available"
 
 
+def test_supported_research_agents_use_public_hol_chat_surface(client: TestClient) -> None:
+    session = SessionLocal()
+    try:
+        agent = session.query(Agent).filter(Agent.agent_id == "literature-miner-001").one()
+        meta = dict(agent.meta or {})
+        assert meta["endpoint_url"] == default_public_research_endpoint("literature-miner-001")
+        assert meta["health_check_url"] == default_public_research_health_url("literature-miner-001")
+    finally:
+        session.close()
+
+
+def test_supported_research_agent_public_a2a_endpoints_respond(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeAgent:
+        name = "Literature Miner"
+        description = "Searches for papers."
+        capabilities = ["literature-mining", "evidence-gathering"]
+
+        async def execute(self, request: str, context=None):
+            assert request == "find papers about agent payments"
+            assert context == {"source": "test"}
+            return {
+                "success": True,
+                "agent_id": "literature-miner-001",
+                "result": {"summary": "Found two relevant papers."},
+            }
+
+    monkeypatch.setattr("api.main._load_supported_research_runtime_agent", lambda agent_id: _FakeAgent())
+
+    card = client.get("/api/research-agent/literature-miner-001/.well-known/agent.json")
+    assert card.status_code == 200
+    assert card.json()["id"] == "literature-miner-001"
+    assert card.json()["extras"]["message_endpoint"].endswith("/api/research-agent/literature-miner-001/a2a/v1/messages")
+
+    message = client.post(
+        "/api/research-agent/literature-miner-001/a2a/v1/messages",
+        json={"message": "find papers about agent payments", "metadata": {"source": "test"}},
+    )
+    assert message.status_code == 200
+    payload = message.json()
+    assert payload["message_id"]
+    assert payload["response"] == "Found two relevant papers."
+
+
 def test_hol_chat_session_endpoint_returns_normalized_history(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -426,7 +481,12 @@ def test_create_session_normalizes_http_errors(
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-        def post(self, path: str, json: dict | None = None) -> httpx.Response:
+        def post(
+            self,
+            path: str,
+            json: dict | None = None,
+            timeout: object | None = None,
+        ) -> httpx.Response:
             assert path == "/chat/session"
             raise httpx.HTTPStatusError("502 Bad Gateway", request=request, response=response)
 

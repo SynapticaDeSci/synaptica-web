@@ -2,11 +2,14 @@
 
 import asyncio
 import ipaddress
+import json
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
+from functools import lru_cache
+from importlib import import_module
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -20,10 +23,16 @@ from shared.agents_cache import rebuild_agents_cache
 from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
 from shared.database.models import A2AEvent, Task
 from shared.payments.runtime import sync_verified_payment_profile
-from shared.research.agent_inventory import iter_supported_builtin_research_agents
+from shared.a2a.models import AgentCapability, AgentCard, MessagePayload, MessageResponse
+from shared.research.agent_inventory import (
+    get_builtin_research_agent,
+    is_supported_builtin_research_agent,
+    iter_supported_builtin_research_agents,
+)
 from shared.research.catalog import (
     build_phase0_todo_items,
-    default_research_endpoint,
+    default_public_research_endpoint,
+    default_public_research_health_url,
 )
 from shared.research_runs.deep_research import (
     assign_citation_ids,
@@ -86,6 +95,79 @@ BUILT_IN_DATA_AGENT_ID = "data-agent-001"
 HOL_DIRECT_SESSION_PREFIX = "hol-direct:"
 HOL_DIRECT_SESSION_HISTORY_LIMIT = 50
 _hol_direct_chat_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+@lru_cache(maxsize=8)
+def _load_supported_research_runtime_agent(agent_id: str) -> Any:
+    """Load a supported built-in research agent instance for the public chat shim."""
+
+    record = get_builtin_research_agent(agent_id)
+    if (
+        record is None
+        or not record.public_exposure
+        or not record.active_runtime
+        or not record.module_path
+        or not record.instance_name
+    ):
+        raise KeyError(agent_id)
+
+    module = import_module(record.module_path)
+    return getattr(module, record.instance_name)
+
+
+def _get_supported_research_runtime_agent(agent_id: str) -> Any:
+    """Return a publicly exposed supported research agent or raise 404."""
+
+    if not is_supported_builtin_research_agent(agent_id):
+        raise HTTPException(status_code=404, detail=f"Research agent '{agent_id}' is not publicly exposed")
+
+    try:
+        return _load_supported_research_runtime_agent(agent_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Research agent '{agent_id}' is not publicly exposed") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to load supported research agent %s", agent_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research agent '{agent_id}' is unavailable: {exc}",
+        ) from exc
+
+
+def _coerce_research_chat_response(result: Any) -> str:
+    """Normalize a research agent execution result into a chat-friendly response string."""
+
+    if isinstance(result, str):
+        return result
+    if result is None:
+        return ""
+    if not isinstance(result, dict):
+        return str(result)
+
+    success = bool(result.get("success"))
+    if not success:
+        error = str(result.get("error") or "Unknown agent error").strip()
+        return f"Synaptica Research Agent error: {error}"
+
+    payload = result.get("result")
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        for key in (
+            "answer_markdown",
+            "summary",
+            "executive_summary",
+            "report_markdown",
+            "response",
+            "text",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return json.dumps(payload, ensure_ascii=True)[:4000]
+    if isinstance(payload, list):
+        return json.dumps(payload, ensure_ascii=True)[:4000]
+
+    return str(payload)
 
 
 def _upsert_builtin_data_agent() -> None:
@@ -190,7 +272,8 @@ def _upsert_supported_research_agents() -> None:
                 .one_or_none()
             )
             meta = {
-                "endpoint_url": default_research_endpoint(agent_id),
+                "endpoint_url": default_public_research_endpoint(agent_id),
+                "health_check_url": default_public_research_health_url(agent_id),
                 "pricing": dict(record.pricing),
                 "categories": ["Research", "DeSci"],
                 "support_tier": record.support_tier.value,
@@ -745,6 +828,8 @@ class HolAgentRecord(BaseModel):
     registry: Optional[str] = None
     available: Optional[bool] = None
     availability_status: Optional[str] = None
+    trust_score: Optional[float] = None
+    trust_scores: Optional[Dict[str, float]] = None
     source_url: Optional[str] = None
     adapter: Optional[str] = None
     protocol: Optional[str] = None
@@ -1063,6 +1148,73 @@ async def health():
     return {"status": "healthy", "agent": "orchestrator"}
 
 
+@app.get("/api/research-agent/{agent_id}")
+async def research_agent_public_metadata(agent_id: str) -> Dict[str, Any]:
+    """Describe the public broker-chatable surface for a supported research agent."""
+
+    agent = _get_supported_research_runtime_agent(agent_id)
+    return {
+        "agent_id": agent_id,
+        "name": getattr(agent, "name", agent_id),
+        "description": getattr(agent, "description", ""),
+        "message_endpoint": f"/api/research-agent/{agent_id}/a2a/v1/messages",
+        "card_endpoint": f"/api/research-agent/{agent_id}/.well-known/agent.json",
+        "health_endpoint": f"/api/research-agent/{agent_id}/health",
+    }
+
+
+@app.get("/api/research-agent/{agent_id}/.well-known/agent.json", response_model=AgentCard)
+async def research_agent_public_card(agent_id: str) -> AgentCard:
+    """Expose a supported research agent as a minimal A2A-compatible card."""
+
+    agent = _get_supported_research_runtime_agent(agent_id)
+    capabilities = [
+        AgentCapability(name=str(capability), description=None)
+        for capability in list(getattr(agent, "capabilities", []) or [])
+        if str(capability).strip()
+    ]
+    return AgentCard(
+        id=agent_id,
+        name=str(getattr(agent, "name", agent_id)),
+        description=str(getattr(agent, "description", "") or ""),
+        version="0.1.0",
+        capabilities=capabilities,
+        tags=["research", "desci", "a2a", "synaptica"],
+        extras={"message_endpoint": f"/api/research-agent/{agent_id}/a2a/v1/messages"},
+    )
+
+
+@app.get("/api/research-agent/{agent_id}/health")
+async def research_agent_public_health(agent_id: str) -> Dict[str, Any]:
+    """Health endpoint for the supported research-agent public A2A surface."""
+
+    agent = _get_supported_research_runtime_agent(agent_id)
+    return {
+        "status": "ok",
+        "agent_id": agent_id,
+        "service": "synaptica-research-agent",
+        "name": getattr(agent, "name", agent_id),
+    }
+
+
+@app.post("/api/research-agent/{agent_id}/a2a/v1/messages", response_model=MessageResponse)
+async def research_agent_public_message(
+    agent_id: str,
+    payload: MessagePayload,
+) -> MessageResponse:
+    """Respond to broker/A2A-style chat messages for supported research agents."""
+
+    agent = _get_supported_research_runtime_agent(agent_id)
+    context = dict(payload.metadata or {})
+    result = await agent.execute(payload.message, context=context)
+    response = _coerce_research_chat_response(result)
+    return MessageResponse(
+        message_id=uuid.uuid4().hex,
+        response=response,
+        metadata=payload.metadata,
+    )
+
+
 class SubTaskResponse(BaseModel):
     """Response model for subtask (payment) details."""
     id: str
@@ -1220,9 +1372,11 @@ async def hol_agents_search(
                 registry=agent.registry,
                 available=agent.available,
                 availability_status=agent.availability_status,
-                source_url=agent.source_url,
-                adapter=agent.adapter,
-                protocol=agent.protocol,
+                trust_score=getattr(agent, "trust_score", None),
+                trust_scores=getattr(agent, "trust_scores", None),
+                source_url=getattr(agent, "source_url", None),
+                adapter=getattr(agent, "adapter", None),
+                protocol=getattr(agent, "protocol", None),
             )
         )
 

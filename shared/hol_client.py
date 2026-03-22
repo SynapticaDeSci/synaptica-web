@@ -318,6 +318,8 @@ class HolAgentSummary:
     registry: Optional[str] = None
     available: Optional[bool] = None
     availability_status: Optional[str] = None
+    trust_score: Optional[float] = None
+    trust_scores: Optional[Dict[str, float]] = None
     source_url: Optional[str] = None
     adapter: Optional[str] = None
     protocol: Optional[str] = None
@@ -409,6 +411,29 @@ def search_agents(
                 or meta.get("availabilityStatus")
                 or meta.get("status")
             )
+            trust_score_value = item.get("trustScore")
+            if trust_score_value is None:
+                trust_score_value = meta.get("trustScore")
+            trust_score: Optional[float]
+            try:
+                trust_score = float(trust_score_value) if trust_score_value is not None else None
+            except (TypeError, ValueError):
+                trust_score = None
+
+            raw_trust_scores = item.get("trustScores")
+            if raw_trust_scores is None:
+                raw_trust_scores = meta.get("trustScores")
+            trust_scores: Optional[Dict[str, float]] = None
+            if isinstance(raw_trust_scores, dict):
+                normalized_trust_scores: Dict[str, float] = {}
+                for key, value in raw_trust_scores.items():
+                    if not isinstance(key, str):
+                        continue
+                    try:
+                        normalized_trust_scores[key] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                trust_scores = normalized_trust_scores or None
             source_url = (
                 meta.get("url")
                 or item.get("url")
@@ -429,6 +454,8 @@ def search_agents(
                     registry=str(registry) if registry else None,
                     available=bool(available) if available is not None else None,
                     availability_status=str(availability_status) if availability_status else None,
+                    trust_score=trust_score,
+                    trust_scores=trust_scores,
                     source_url=str(source_url) if source_url else None,
                     adapter=str(adapter) if adapter else None,
                     protocol=str(protocol) if protocol else None,

@@ -7,7 +7,11 @@ from abc import ABC, abstractmethod
 from shared.strands_openai_agent import AsyncStrandsAgent, create_strands_openai_agent
 from shared.database import SessionLocal, Agent as AgentModel, AgentReputation
 from datetime import datetime
-from shared.research.catalog import default_research_endpoint, infer_support_tier
+from shared.research.catalog import (
+    default_public_research_endpoint,
+    default_public_research_health_url,
+    infer_support_tier,
+)
 
 
 class BaseResearchAgent(ABC):
@@ -76,7 +80,8 @@ class BaseResearchAgent(ABC):
                 print(f"Skipping registration for {self.agent_id} - database not initialized yet")
                 return
 
-            default_endpoint = default_research_endpoint(self.agent_id)
+            default_endpoint = default_public_research_endpoint(self.agent_id)
+            default_health_url = default_public_research_health_url(self.agent_id)
             normalized_pricing = self._normalize_pricing()
             support_tier = infer_support_tier(self.agent_id, "research").value
             # Check if agent exists
@@ -96,6 +101,7 @@ class BaseResearchAgent(ABC):
                         "model": self.model,
                         "created_at": datetime.utcnow().isoformat(),
                         "endpoint_url": default_endpoint,
+                        "health_check_url": default_health_url,
                         "support_tier": support_tier,
                     }
                 )
@@ -116,6 +122,9 @@ class BaseResearchAgent(ABC):
                 updated = False
                 if meta.get("endpoint_url") != default_endpoint:
                     meta["endpoint_url"] = default_endpoint
+                    updated = True
+                if meta.get("health_check_url") != default_health_url:
+                    meta["health_check_url"] = default_health_url
                     updated = True
 
                 current_pricing = meta.get("pricing")

@@ -7,6 +7,7 @@ import { Search, Globe2, Network, Cpu, MessageSquare, Send } from 'lucide-react'
 import {
   ApiRequestError,
   createHolChatSession,
+  type AgentRecord,
   type HolAgentRecord,
   type HolChatMessageRecord,
   searchHolAgents,
@@ -22,6 +23,53 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
+const KNOWN_GOOD_UAIDS = {
+  ping: 'uaid:aid:2vdWUw1Qd26QtfXomHZhSJb6x4Pd3r5MTYr82v9A15ua2ja8TiVTWZEFAg1rQ37gpW',
+  hederaMcp:
+    'uaid:aid:9WADT6xgCjoT3XP4QCsfQdJwPn8RhXCufoHQcbKRTzdS6fTnmY4BxFKPrwjqkiT4aC',
+} as const
+const HIGH_TRUST_THRESHOLD = 10
+
+function normalizeForMatch(value: string | null | undefined): string {
+  return String(value ?? '').trim().toLowerCase()
+}
+
+function holAgentTrustScore(agent: HolAgentRecord): number | null {
+  return typeof agent.trust_score === 'number' && Number.isFinite(agent.trust_score)
+    ? agent.trust_score
+    : null
+}
+
+function isOpenRouterRegistryAgent(agent: HolAgentRecord): boolean {
+  const registry = normalizeForMatch(agent.registry)
+  const name = normalizeForMatch(agent.name)
+  const description = normalizeForMatch(agent.description)
+  return (
+    registry.includes('openrouter') ||
+    name.includes('openrouter') ||
+    description.includes('openrouter')
+  )
+}
+
+function isKnownGoodHolAgent(agent: HolAgentRecord): boolean {
+  return (
+    agent.uaid === KNOWN_GOOD_UAIDS.ping ||
+    agent.uaid === KNOWN_GOOD_UAIDS.hederaMcp ||
+    isOpenRouterRegistryAgent(agent)
+  )
+}
+
+function compareAgentsByTrust(a: HolAgentRecord, b: HolAgentRecord): number {
+  const trustA = holAgentTrustScore(a)
+  const trustB = holAgentTrustScore(b)
+  if (trustA !== null && trustB !== null && trustA !== trustB) {
+    return trustB - trustA
+  }
+  if (trustA !== null && trustB === null) return -1
+  if (trustA === null && trustB !== null) return 1
+  return a.name.localeCompare(b.name)
+}
+
 function holAgentChatHint(agent: HolAgentRecord): {
   label: string
   toneClass: string
@@ -30,11 +78,19 @@ function holAgentChatHint(agent: HolAgentRecord): {
   const transports = (agent.transports ?? []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)
   const protocol = String(agent.protocol ?? '').trim().toLowerCase()
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
+  const trustScore = holAgentTrustScore(agent)
 
+  if (transports.includes('http') && trustScore !== null && trustScore >= HIGH_TRUST_THRESHOLD) {
+    return {
+      label: 'Trusted + usable',
+      toneClass: 'bg-emerald-500/20 text-emerald-200',
+      recommendedTransport: 'http',
+    }
+  }
   if (transports.includes('http')) {
     return {
       label: 'Likely usable',
-      toneClass: 'bg-emerald-500/20 text-emerald-200',
+      toneClass: 'bg-sky-500/20 text-sky-200',
       recommendedTransport: 'http',
     }
   }
@@ -54,7 +110,6 @@ function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?
   const isAvailable = agent.available === true
   const protocol = String(agent.protocol ?? '').trim().toLowerCase()
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
-  const transports = (agent.transports ?? []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)
 
   if (!isAvailable) {
     return {
@@ -65,30 +120,27 @@ function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?
 
   if (protocol === 'acp' || adapter === 'virtuals-protocol-adapter') {
     return {
-      supported: false,
+      supported: true,
       reason:
-        'Virtuals ACP is often job-based and may require provider wallet/payment setup, so Marketplace chat is disabled here.',
+        'Virtuals ACP is often job-based and may require provider wallet/payment setup, so chat may fail even though this agent appears available.',
     }
   }
 
   if (['a2a', 'uagent'].includes(protocol) || ['a2a-registry-adapter', 'agentverse-adapter'].includes(adapter)) {
     return {
-      supported: false,
+      supported: true,
       reason:
-        'This agent is discoverable, but this broker environment commonly cannot relay chat for this protocol/adapter.',
+        'This protocol/adapter is available but commonly unreliable in this broker environment. Chat is allowed, but failures are expected.',
     }
-  }
-
-  if (transports.includes('http')) {
-    return { supported: true }
   }
 
   return { supported: true }
 }
 
-export function HolMarketplaceView() {
+export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRecord[] }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [showAvailableOnly, setShowAvailableOnly] = useState(false)
+  const [showHighTrustOnly, setShowHighTrustOnly] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState<HolAgentRecord | null>(null)
   const [chatTransport, setChatTransport] = useState('')
   const [chatSessionId, setChatSessionId] = useState<string | null>(null)
@@ -155,14 +207,57 @@ export function HolMarketplaceView() {
     setChatError(null)
   }, [selectedAgent])
 
-  const agents = useMemo(() => data?.agents ?? [], [data])
+  const agents = useMemo(
+    () => [...(data?.agents ?? [])].sort(compareAgentsByTrust),
+    [data]
+  )
+  const filteredAgents = useMemo(
+    () =>
+      agents.filter((agent) => {
+        if (!showHighTrustOnly) {
+          return true
+        }
+        const trustScore = holAgentTrustScore(agent)
+        return trustScore !== null && trustScore >= HIGH_TRUST_THRESHOLD
+      }),
+    [agents, showHighTrustOnly]
+  )
+  const localHolAgents = useMemo(
+    () =>
+      localAgents
+        .filter(
+          (agent) =>
+            (agent.hol_registration_status || '').toLowerCase() === 'registered' &&
+            typeof agent.hol_uaid === 'string' &&
+            agent.hol_uaid.trim()
+        )
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [localAgents]
+  )
+  const recommendedAgents = useMemo(() => {
+    const seen = new Set<string>()
+    const recommended = filteredAgents.filter((agent) => {
+      if (!isKnownGoodHolAgent(agent)) {
+        return false
+      }
+      seen.add(agent.uaid)
+      return true
+    })
+    return { recommended, seen }
+  }, [filteredAgents])
   const availableAgents = useMemo(
-    () => agents.filter((agent) => agent.available === true),
-    [agents]
+    () =>
+      filteredAgents.filter(
+        (agent) => agent.available === true && !recommendedAgents.seen.has(agent.uaid)
+      ),
+    [filteredAgents, recommendedAgents]
   )
   const unavailableAgents = useMemo(
-    () => agents.filter((agent) => agent.available !== true),
-    [agents]
+    () =>
+      filteredAgents.filter(
+        (agent) => agent.available !== true && !recommendedAgents.seen.has(agent.uaid)
+      ),
+    [filteredAgents, recommendedAgents]
   )
   const errorMessage = isError ? error?.message ?? 'Failed to load HOL agents' : null
   const selectedAgentHint = useMemo(
@@ -194,6 +289,14 @@ export function HolMarketplaceView() {
     })
   }
 
+  const handleCopyUaid = async (uaid: string) => {
+    try {
+      await navigator.clipboard.writeText(uaid)
+    } catch {
+      // ignore clipboard failures in browser-only helper
+    }
+  }
+
   const renderAgentCard = (agent: HolAgentRecord) => {
     const hasTransports = Array.isArray(agent.transports) && agent.transports.length > 0
     const Icon = hasTransports ? Network : Cpu
@@ -202,6 +305,7 @@ export function HolMarketplaceView() {
     const rateType = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
     const hint = holAgentChatHint(agent)
     const sessionSupport = holSessionSupport(agent)
+    const trustScore = holAgentTrustScore(agent)
 
     return (
       <div
@@ -234,6 +338,11 @@ export function HolMarketplaceView() {
                 <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-slate-800/60 px-2 py-0.5 text-[11px] text-slate-200">
                   <Globe2 className="h-3 w-3 text-sky-400" />
                   {agent.registry}
+                </div>
+              )}
+              {trustScore !== null && (
+                <div className="mt-1 inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200">
+                  trust {trustScore.toFixed(2)}
                 </div>
               )}
             </div>
@@ -291,6 +400,13 @@ export function HolMarketplaceView() {
                 <MessageSquare className="h-3.5 w-3.5" />
                 Open chat
               </button>
+              <button
+                type="button"
+                className="text-[11px] text-slate-400 transition hover:text-slate-200"
+                onClick={() => void handleCopyUaid(agent.uaid)}
+              >
+                Copy UAID
+              </button>
             </div>
           </div>
         </div>
@@ -304,7 +420,7 @@ export function HolMarketplaceView() {
         <div>
           <h2 className="text-2xl font-semibold text-white">HOL Registry</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Browse all discovered HOL agents, see which ones are currently available, and only chat with the ones this broker environment is likely to support.
+            Browse all discovered HOL agents, see availability and trust separately, and use the recommended rail or your own registered agents for the most reliable demos.
           </p>
         </div>
       </div>
@@ -321,18 +437,30 @@ export function HolMarketplaceView() {
             className="w-full rounded-2xl border border-white/10 bg-slate-900/40 px-12 py-3 text-sm text-white placeholder:text-slate-500 focus:border-sky-400/50 focus:outline-none focus:ring-1 focus:ring-sky-400/30"
           />
         </div>
-        <label className="inline-flex items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-4 py-2 text-sm text-slate-300">
-          <input
-            type="checkbox"
-            checked={showAvailableOnly}
-            onChange={(event) => setShowAvailableOnly(event.target.checked)}
-            className="h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-400/40"
-          />
-          <span>Available only</span>
-          <span className="text-xs text-slate-500">
-            {showAvailableOnly ? 'Hide discoverable-only agents' : 'Show all discovered HOL agents'}
-          </span>
-        </label>
+        <div className="flex flex-wrap gap-3">
+          <label className="inline-flex items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-4 py-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={showAvailableOnly}
+              onChange={(event) => setShowAvailableOnly(event.target.checked)}
+              className="h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-400/40"
+            />
+            <span>Available only</span>
+          </label>
+          <label className="inline-flex items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-4 py-2 text-sm text-slate-300">
+            <input
+              type="checkbox"
+              checked={showHighTrustOnly}
+              onChange={(event) => setShowHighTrustOnly(event.target.checked)}
+              className="h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-400/40"
+            />
+            <span>High trust only</span>
+            <span className="text-xs text-slate-500">trust &gt;= {HIGH_TRUST_THRESHOLD}</span>
+          </label>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-slate-900/30 p-4 text-sm text-slate-400">
+          Many HOL agents are discoverable but not consistently usable. For demos, prefer your own registered agents, the Ping Agent, Hedera MCP Agent, and OpenRouter-backed entries when available.
+        </div>
       </div>
 
       {isLoading && (
@@ -344,6 +472,88 @@ export function HolMarketplaceView() {
       {errorMessage && !isLoading && (
         <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-center text-red-300">
           {errorMessage}
+        </div>
+      )}
+
+      {!isLoading && !errorMessage && localHolAgents.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-sky-200">
+              Your Registered HOL Agents
+            </h3>
+            <span className="text-xs text-slate-400">{localHolAgents.length} agents</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {localHolAgents.map((agent) => (
+              <div
+                key={agent.agent_id}
+                className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-5 text-sm"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-base font-semibold text-white">{agent.name}</div>
+                    <div className="mt-1 break-all font-mono text-xs text-slate-400">
+                      {agent.hol_uaid}
+                    </div>
+                  </div>
+                  <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[11px] text-emerald-200">
+                    registered
+                  </span>
+                </div>
+                <div className="mt-4 flex items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      handleOpenChat({
+                        uaid: agent.hol_uaid || '',
+                        name: agent.name,
+                        description: agent.description || '',
+                        capabilities: agent.capabilities || [],
+                        categories: agent.categories || [],
+                        transports: ['http'],
+                        pricing: {},
+                        registry: 'synaptica-local',
+                        available: true,
+                        availability_status: 'registered',
+                        trust_score: null,
+                        trust_scores: null,
+                        source_url: agent.endpoint_url || null,
+                        adapter: null,
+                        protocol: 'http',
+                      })
+                    }
+                    className="bg-sky-600 text-white hover:bg-sky-500"
+                  >
+                    <MessageSquare className="mr-2 h-4 w-4" />
+                    Open chat
+                  </Button>
+                  <button
+                    type="button"
+                    className="text-xs text-slate-400 transition hover:text-slate-200"
+                    onClick={() => void handleCopyUaid(agent.hol_uaid || '')}
+                  >
+                    Copy UAID
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!isLoading && !errorMessage && recommendedAgents.recommended.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-200">
+              Recommended For Testing
+            </h3>
+            <span className="text-xs text-slate-400">
+              {recommendedAgents.recommended.length} agents
+            </span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {recommendedAgents.recommended.map((agent) => renderAgentCard(agent))}
+          </div>
         </div>
       )}
 
