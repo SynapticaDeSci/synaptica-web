@@ -31,6 +31,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr("api.main.ensure_registry_cache", lambda: None)
     monkeypatch.setattr("api.routes.agents.trigger_registry_cache_refresh", lambda: False)
     monkeypatch.setattr("api.routes.agents.get_registry_sync_status", lambda: ("test", None))
+    monkeypatch.setattr("api.main.hol_check_sidecar_health", lambda: {"ok": True})
     with TestClient(app) as test_client:
         yield test_client
 
@@ -189,7 +190,7 @@ def test_get_quote_paths_maps_publish_to_quote(
 def test_search_agents_supports_hits_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    request = httpx.Request("GET", "https://hol.org/registry/api/v1/search")
+    request = httpx.Request("POST", "http://127.0.0.1:8040/search")
     response = httpx.Response(
         200,
         json={
@@ -215,13 +216,13 @@ def test_search_agents_supports_hits_payload(
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-        def get(self, path: str, params: dict | None = None) -> httpx.Response:
+        def post(self, path: str, json: dict | None = None) -> httpx.Response:
             assert path == "/search"
-            assert params is not None
-            assert params.get("q") == "data agent"
+            assert json is not None
+            assert json.get("query") == "data agent"
             return response
 
-    monkeypatch.setattr(hol_client, "_build_client", lambda: _FakeClient())
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
 
     agents = search_agents("data agent", limit=1)
     assert len(agents) == 1
@@ -410,7 +411,7 @@ def test_hol_chat_message_endpoint_returns_broker_response_and_history(
 def test_create_session_normalizes_http_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    request = httpx.Request("POST", "https://hol.org/registry/api/v1/chat/session")
+    request = httpx.Request("POST", "http://127.0.0.1:8040/chat/session")
     response = httpx.Response(
         502,
         text="<html>bad gateway</html>",
@@ -429,10 +430,31 @@ def test_create_session_normalizes_http_errors(
             assert path == "/chat/session"
             raise httpx.HTTPStatusError("502 Bad Gateway", request=request, response=response)
 
-    monkeypatch.setattr(hol_client, "_build_client", lambda: _FakeClient())
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
 
     with pytest.raises(hol_client.HolClientError, match="HOL create_session failed: 502 Bad Gateway"):
         create_session("uaid:aid:demo")
+
+
+def test_check_sidecar_health_surfaces_clear_unavailable_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def get(self, path: str) -> httpx.Response:
+            assert path == "/health"
+            request = httpx.Request("GET", "http://127.0.0.1:8040/health")
+            raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    with pytest.raises(hol_client.HolClientConfigurationError, match="HOL SDK sidecar unavailable"):
+        hol_client.check_sidecar_health()
 
 
 def test_hol_register_data_agent_auto_publishes_metadata_and_rewrites_endpoint(

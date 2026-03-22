@@ -1,15 +1,16 @@
-"""Thin client for the Hashgraph Online (HOL) Registry Broker API.
+"""Bridge client for the Hashgraph Online (HOL) Standards SDK sidecar.
 
-This module intentionally mirrors the style of other shared helpers like
-`shared.registry_sync` and provides just enough surface area for Synaptica to:
+The Python application remains the system-of-record API, but HOL broker traffic
+now goes through the official HOL Standards SDK running in a small Node sidecar.
+This module preserves the Python helper surface used by the rest of Synaptica:
 
 - Discover agents in the Universal Agentic Registry.
 - Create chat sessions with specific UAIDs.
-- Send messages and fetch history for those sessions.
-- List sessions for a given identity (for inbox-style workflows).
+- Send messages and fetch session history.
+- Register local agents on HOL or request registration quotes.
 
-The implementation uses simple `httpx` calls instead of a heavy SDK so it can
-run anywhere the rest of the Python stack does.
+`get_credit_balance()` remains on the direct REST path as a temporary fallback
+because the current SDK surface used here does not provide a clean equivalent.
 """
 
 from __future__ import annotations
@@ -30,6 +31,13 @@ class HolClientError(RuntimeError):
 
 class HolClientConfigurationError(HolClientError):
     """Raised when required HOL configuration is missing or invalid."""
+
+
+def _get_sidecar_url() -> str:
+    base_url = os.getenv("HOL_SDK_SIDECAR_URL", "http://127.0.0.1:8040").strip()
+    if not base_url:
+        raise HolClientConfigurationError("HOL_SDK_SIDECAR_URL is empty")
+    return base_url.rstrip("/")
 
 
 def _get_base_url() -> str:
@@ -54,6 +62,20 @@ def _build_client() -> httpx.Client:
     if api_key:
         headers["x-api-key"] = api_key
     return httpx.Client(timeout=timeout, limits=limits, headers=headers, base_url=_get_base_url())
+
+
+def _build_sidecar_client() -> httpx.Client:
+    timeout = httpx.Timeout(20.0, connect=2.0)
+    limits = httpx.Limits(max_keepalive_connections=4, max_connections=8)
+    headers: Dict[str, str] = {
+        "Accept": "application/json",
+    }
+    return httpx.Client(
+        timeout=timeout,
+        limits=limits,
+        headers=headers,
+        base_url=_get_sidecar_url(),
+    )
 
 
 def _normalize_register_path(path: str) -> str:
@@ -160,6 +182,44 @@ def _format_http_error(exc: Exception) -> str:
     return str(exc)
 
 
+def _format_sidecar_error(exc: Exception) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "request timed out while waiting for HOL SDK sidecar response"
+    if isinstance(exc, httpx.ConnectError):
+        return (
+            f"HOL SDK sidecar unavailable at {_get_sidecar_url()}. "
+            "Start `npm --prefix frontend run hol-sidecar` and ensure "
+            "HOL_SDK_SIDECAR_URL is reachable."
+        )
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        status = f"{response.status_code} {response.reason_phrase}".strip()
+        detail = _extract_error_detail(response)
+        return f"{status}: {detail}" if detail else status
+    return str(exc)
+
+
+def check_sidecar_health() -> Dict[str, Any]:
+    """Verify the HOL SDK sidecar is reachable before broker operations."""
+    with _build_sidecar_client() as client:
+        try:
+            response = client.get("/health")
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            raise HolClientConfigurationError(detail) from exc
+        except httpx.HTTPError as exc:  # noqa: BLE001
+            detail = _format_sidecar_error(exc)
+            raise HolClientError(f"HOL sidecar health check failed: {detail}") from exc
+
+        data = response.json()
+
+    if not isinstance(data, dict):
+        raise HolClientError(f"Unexpected HOL sidecar health response payload: {data!r}")
+    return data
+
+
 @dataclass
 class HolAgentSummary:
     """Lightweight representation of an agent returned from search."""
@@ -193,20 +253,25 @@ def search_agents(
     if not query or not query.strip():
         raise ValueError("query must be a non-empty string")
 
-    params: Dict[str, Any] = {"q": query.strip(), "limit": max(1, min(limit, 25))}
     filters = filters or {}
-    for key, value in filters.items():
-        if value is None:
-            continue
-        params[key] = value
 
-    with _build_client() as client:
+    payload: Dict[str, Any] = {
+        "query": query.strip(),
+        "limit": max(1, min(limit, 100)),
+        "filters": filters or {},
+    }
+
+    with _build_sidecar_client() as client:
         try:
-            response = client.get("/search", params=params)
+            response = client.post("/search", json=payload)
             response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar search request failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
         except httpx.HTTPError as exc:  # noqa: BLE001
-            detail = _format_http_error(exc)
-            logger.warning("HOL search request failed: %s", detail)
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL search request via sidecar failed: %s", detail)
             raise HolClientError(f"HOL search failed: {detail}") from exc
 
         data = response.json()
@@ -305,12 +370,16 @@ def create_session(
     if as_uaid:
         payload["asUaid"] = as_uaid
 
-    with _build_client() as client:
+    with _build_sidecar_client() as client:
         try:
             response = client.post("/chat/session", json=payload)
             response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar create_session failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
         except httpx.HTTPError as exc:  # noqa: BLE001
-            detail = _format_http_error(exc)
+            detail = _format_sidecar_error(exc)
             logger.warning("HOL create_session failed: %s", detail)
             raise HolClientError(f"HOL create_session failed: {detail}") from exc
 
@@ -339,12 +408,16 @@ def send_message(
     if as_uaid:
         payload["senderUaid"] = as_uaid
 
-    with _build_client() as client:
+    with _build_sidecar_client() as client:
         try:
             response = client.post("/chat/message", json=payload)
             response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar send_message failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
         except httpx.HTTPError as exc:  # noqa: BLE001
-            detail = _format_http_error(exc)
+            detail = _format_sidecar_error(exc)
             logger.warning("HOL send_message failed: %s", detail)
             raise HolClientError(f"HOL send_message failed: {detail}") from exc
 
@@ -359,12 +432,16 @@ def get_history(session_id: str, *, limit: int = 50) -> List[Dict[str, Any]]:
     """Fetch recent messages for a chat session."""
     params = {"limit": max(1, min(limit, 200))}
 
-    with _build_client() as client:
+    with _build_sidecar_client() as client:
         try:
             response = client.get(f"/chat/history/{session_id}", params=params)
             response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar get_history failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
         except httpx.HTTPError as exc:  # noqa: BLE001
-            detail = _format_http_error(exc)
+            detail = _format_sidecar_error(exc)
             logger.warning("HOL get_history failed: %s", detail)
             raise HolClientError(f"HOL get_history failed: {detail}") from exc
 
@@ -403,61 +480,27 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
     if normalized_mode not in {"quote", "register"}:
         raise ValueError("mode must be either 'quote' or 'register'")
 
-    payload: Dict[str, Any] = dict(agent_payload or {})
-    if normalized_mode == "register":
-        payload["mode"] = normalized_mode
+    payload: Dict[str, Any] = {
+        "agent_payload": dict(agent_payload or {}),
+        "mode": normalized_mode,
+    }
 
-    attempted_paths: List[str] = []
-    last_error: Optional[Exception] = None
-    last_error_message: Optional[str] = None
-    candidate_paths = _get_quote_paths() if normalized_mode == "quote" else _get_register_paths()
+    with _build_sidecar_client() as client:
+        try:
+            response = client.post("/register", json=payload)
+            response.raise_for_status()
+        except httpx.ConnectError as exc:
+            detail = _format_sidecar_error(exc)
+            logger.warning("HOL sidecar register_agent failed: %s", detail)
+            raise HolClientConfigurationError(detail) from exc
+        except httpx.HTTPError as exc:  # noqa: BLE001
+            detail = _format_sidecar_error(exc)
+            raise HolClientError(f"HOL register_agent failed: {detail}") from exc
 
-    with _build_client() as client:
-        for path in candidate_paths:
-            attempted_paths.append(path)
-            try:
-                response = client.post(path, json=payload)
-            except httpx.HTTPError as exc:  # noqa: BLE001
-                last_error = exc
-                last_error_message = _format_http_error(exc)
-                logger.warning("HOL register_agent request failed for %s: %s", path, last_error_message)
-                break
-
-            if response.status_code == 404:
-                logger.info("HOL register_agent path not found: %s", path)
-                last_error = httpx.HTTPStatusError(
-                    "404 Not Found",
-                    request=response.request,
-                    response=response,
-                )
-                last_error_message = _format_http_error(last_error)
-                continue
-
-            try:
-                response.raise_for_status()
-            except httpx.HTTPError as exc:  # noqa: BLE001
-                last_error = exc
-                last_error_message = _format_http_error(exc)
-                logger.warning("HOL register_agent failed for %s: %s", path, last_error_message)
-                break
-
-            data = response.json()
-            if not isinstance(data, dict):
-                raise HolClientError(f"Unexpected HOL registration response payload: {data!r}")
-            return data
-
-    attempted = ", ".join(attempted_paths) or "<none>"
-    if isinstance(last_error, httpx.HTTPStatusError) and last_error.response.status_code == 404:
-        raise HolClientError(
-            "HOL register_agent failed: 404 Not Found on all candidate paths "
-            f"({attempted}). Set REGISTRY_BROKER_REGISTER_PATH or "
-            "REGISTRY_BROKER_REGISTER_PATHS to the correct endpoint."
-        ) from last_error
-
-    raise HolClientError(
-        f"HOL register_agent failed after trying paths ({attempted}): "
-        f"{last_error_message or last_error}"
-    ) from last_error
+        data = response.json()
+    if not isinstance(data, dict):
+        raise HolClientError(f"Unexpected HOL registration response payload: {data!r}")
+    return data
 
 
 def get_credit_balance(*, account_id: Optional[str] = None) -> Dict[str, Any]:

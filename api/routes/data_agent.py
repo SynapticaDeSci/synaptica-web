@@ -28,6 +28,7 @@ from shared.a2a.models import AgentCapability, AgentCard, MessagePayload, Messag
 from shared.hol_client import (
     HolAgentSummary,
     HolClientError,
+    check_sidecar_health as hol_check_sidecar_health,
     create_session as hol_create_session,
     search_agents as hol_search_agents,
     send_message as hol_send_message,
@@ -1143,6 +1144,11 @@ async def use_hol_data_agent(
     asset = db.query(DataAsset).filter(DataAsset.id == dataset_id).one_or_none()
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    try:
+        await run_in_threadpool(hol_check_sidecar_health)
+    except HolClientError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     required_capabilities = [
         item.strip()

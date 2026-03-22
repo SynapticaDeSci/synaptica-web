@@ -40,6 +40,7 @@ from shared.registry_sync import (
 )
 from shared.hol_client import (
     HolClientError,
+    check_sidecar_health as hol_check_sidecar_health,
     create_session as hol_create_session,
     get_history as hol_get_history,
     get_credit_balance as hol_get_credit_balance,
@@ -1140,7 +1141,11 @@ async def hol_agents_search(
     capped_limit = max(1, min(limit, 25))
     broker_limit = min(100, max(capped_limit, capped_limit * 5)) if only_available else capped_limit
 
-    agents = hol_search_agents(query=query, limit=broker_limit)
+    try:
+        await run_in_threadpool(hol_check_sidecar_health)
+        agents = await run_in_threadpool(hol_search_agents, query, limit=broker_limit)
+    except HolClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     if only_available:
         agents = [agent for agent in agents if agent.available is True][:capped_limit]
 
@@ -1175,6 +1180,7 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
         raise HTTPException(status_code=400, detail="uaid is required")
 
     try:
+        await run_in_threadpool(hol_check_sidecar_health)
         session_id = await run_in_threadpool(
             hol_create_session,
             uaid,
@@ -1204,6 +1210,7 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
         raise HTTPException(status_code=400, detail="message is required")
 
     try:
+        await run_in_threadpool(hol_check_sidecar_health)
         broker_response = await run_in_threadpool(
             hol_send_message,
             session_id,
@@ -1241,6 +1248,11 @@ async def hol_register_local_agent(request: HolRegisterAgentRequest) -> HolRegis
         agent = db.query(Agent).filter(Agent.agent_id == request.agent_id).one_or_none()
         if agent is None:
             raise HTTPException(status_code=404, detail=f"Agent '{request.agent_id}' not found")
+
+        try:
+            await run_in_threadpool(hol_check_sidecar_health)
+        except HolClientError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         payload = await _prepare_hol_registration_payload(
             agent,

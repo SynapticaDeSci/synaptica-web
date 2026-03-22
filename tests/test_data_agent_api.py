@@ -32,6 +32,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr("api.main.ensure_registry_cache", lambda: None)
     monkeypatch.setattr("api.routes.agents.trigger_registry_cache_refresh", lambda: False)
     monkeypatch.setattr("api.routes.agents.get_registry_sync_status", lambda: ("test", None))
+    monkeypatch.setattr("api.routes.data_agent.hol_check_sidecar_health", lambda: {"ok": True})
     with TestClient(app) as test_client:
         yield test_client
 

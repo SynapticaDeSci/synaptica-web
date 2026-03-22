@@ -146,15 +146,19 @@ Start all services in separate terminals:
 make frontend-dev
 # Runs at http://localhost:3000
 
-# Terminal 2: Backend API
+# Terminal 2: HOL SDK sidecar
+npm --prefix frontend run hol-sidecar
+# Runs at http://127.0.0.1:8040 by default
+
+# Terminal 3: Backend API
 make api
 # Runs at http://localhost:8000
 
-# Terminal 3: Sample Research Agents
+# Terminal 4: Sample Research Agents
 make research
 # Runs at http://localhost:5001
 
-# Terminal 4: Stripe webhook listener (requires Stripe CLI + `STRIPE_SECRET_KEY` in `.env`)
+# Terminal 5: Stripe webhook listener (requires Stripe CLI + `STRIPE_SECRET_KEY` in `.env`)
 make stripe-webhook
 ```
 
@@ -205,13 +209,14 @@ For the Hashgraph Online (HOL) hackathon track, Synaptica can act as both:
 Configuration in `.env`:
 
 ```bash
-# HOL Registry Broker (used by shared/hol_client.py)
+# HOL Registry Broker (used by the Node HOL SDK sidecar)
 REGISTRY_BROKER_API_URL=https://hol.org/registry/api/v1
 REGISTRY_BROKER_API_KEY=rbk_...
-# Optional registration path overrides for marketplace "Register on HOL"
-REGISTRY_BROKER_REGISTER_PATH=/register
-# or comma-separated fallback list:
-REGISTRY_BROKER_REGISTER_PATHS=/register,/agents/register
+# Internal sidecar bridge target used by the Python API
+HOL_SDK_SIDECAR_URL=http://127.0.0.1:8040
+# Optional sidecar bind controls when running `npm --prefix frontend run hol-sidecar`
+# HOL_SDK_SIDECAR_HOST=127.0.0.1
+# HOL_SDK_SIDECAR_PORT=8040
 # Optional paid fan-out registries for marketplace "Register on HOL".
 # Leave unset/empty for free-tier registration behavior.
 # HOL_REGISTER_ADDITIONAL_REGISTRIES=erc-8004:skale-base
@@ -219,6 +224,8 @@ REGISTRY_BROKER_REGISTER_PATHS=/register,/agents/register
 
 `Register on HOL` now sends `additionalRegistries: []` by default so local marketplace registration stays on free tier.
 Set `HOL_REGISTER_ADDITIONAL_REGISTRIES` only when you intentionally want paid additional-registry fan-out.
+
+The Python API no longer talks to HOL directly for search, registration, or chat. It bridges through the official HOL Standards SDK running in the local sidecar. If `/api/hol/*` calls fail with a sidecar-unavailable error, start `npm --prefix frontend run hol-sidecar` and restart `make api`.
 
 With these values set:
 
