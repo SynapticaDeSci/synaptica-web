@@ -430,9 +430,21 @@ def _build_hol_registration_payload(agent: Agent) -> Dict[str, Any]:
     if agent.hedera_account_id:
         profile["owner"] = {"account_id": agent.hedera_account_id}
 
+    # HOL defaults to paid base registration unless additional registries are
+    # explicitly controlled. Keep local marketplace registration on free tier
+    # by default and allow opt-in paid fan-out via env override.
+    additional_registries_env = (os.getenv("HOL_REGISTER_ADDITIONAL_REGISTRIES") or "").strip()
+    additional_registries: List[str] = []
+    if additional_registries_env:
+        additional_registries = [
+            item.strip() for item in additional_registries_env.split(",") if item.strip()
+        ]
+
     return {
         # HOL /register expects this HCS-11 profile envelope.
         "profile": profile,
+        # Explicitly pass additionalRegistries to avoid broker-side paid defaults.
+        "additionalRegistries": additional_registries,
         # Keep the legacy flat shape for compatibility with any alternate broker paths.
         "agent_id": agent.agent_id,
         "name": agent.name,

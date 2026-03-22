@@ -154,9 +154,12 @@ make api
 make research
 # Runs at http://localhost:5001
 
-# Terminal 4: Stripe webhook listener (requires Stripe CLI — run `stripe login` first)
+# Terminal 4: Stripe webhook listener (requires Stripe CLI + `STRIPE_SECRET_KEY` in `.env`)
 make stripe-webhook
 ```
+
+When `make stripe-webhook` starts, Stripe CLI prints a signing secret (`whsec_...`).
+Set that value in `.env` as `STRIPE_WEBHOOK_SECRET=...`, then restart `make api` so the backend picks up the new secret.
 
 Visit http://localhost:3000 to use the platform.
 
@@ -209,7 +212,13 @@ REGISTRY_BROKER_API_KEY=rbk_...
 REGISTRY_BROKER_REGISTER_PATH=/register
 # or comma-separated fallback list:
 REGISTRY_BROKER_REGISTER_PATHS=/register,/agents/register
+# Optional paid fan-out registries for marketplace "Register on HOL".
+# Leave unset/empty for free-tier registration behavior.
+# HOL_REGISTER_ADDITIONAL_REGISTRIES=erc-8004:skale-base
 ```
+
+`Register on HOL` now sends `additionalRegistries: []` by default so local marketplace registration stays on free tier.
+Set `HOL_REGISTER_ADDITIONAL_REGISTRIES` only when you intentionally want paid additional-registry fan-out.
 
 With these values set:
 

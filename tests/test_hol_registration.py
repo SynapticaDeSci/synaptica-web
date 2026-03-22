@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from api.main import _build_hol_registration_payload, _resolve_hol_error_status
 from shared.database import Agent
-from shared.hol_client import _format_http_error
+from shared.hol_client import _format_http_error, _get_quote_paths
 
 
 def _sample_agent() -> Agent:
@@ -37,6 +37,22 @@ def test_build_hol_registration_payload_contains_hcs11_profile() -> None:
     assert profile["owner"] == {"account_id": "0.0.12345"}
     assert profile["aiAgent"]["metadata_uri"] == "ipfs://bafy-demo"
     assert profile["aiAgent"]["health_check_url"] == "https://agent.example.com/health"
+    assert payload["additionalRegistries"] == []
+
+
+def test_build_hol_registration_payload_honors_additional_registries_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "HOL_REGISTER_ADDITIONAL_REGISTRIES",
+        "erc-8004:skale-base, erc-8004:ethereum-sepolia",
+    )
+
+    payload = _build_hol_registration_payload(_sample_agent())
+    assert payload["additionalRegistries"] == [
+        "erc-8004:skale-base",
+        "erc-8004:ethereum-sepolia",
+    ]
 
 
 def test_build_hol_registration_payload_requires_endpoint() -> None:
@@ -118,3 +134,20 @@ def test_resolve_hol_error_status_marks_transient_failures_unregistered() -> Non
 def test_resolve_hol_error_status_marks_non_transient_failures_error() -> None:
     message = "HOL register_agent failed after trying paths (/register): 402 Payment Required: insufficient_credits"
     assert _resolve_hol_error_status("unregistered", message) == "error"
+
+
+def test_get_quote_paths_defaults_to_register_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("REGISTRY_BROKER_REGISTER_PATHS", raising=False)
+    monkeypatch.setenv("REGISTRY_BROKER_REGISTER_PATH", "/register")
+    assert _get_quote_paths()[0] == "/register/quote"
+
+
+def test_get_quote_paths_maps_publish_to_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGISTRY_BROKER_REGISTER_PATHS", "/skills/publish,/register")
+    paths = _get_quote_paths()
+    assert paths[0] == "/skills/quote"
+    assert "/register/quote" in paths

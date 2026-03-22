@@ -32,7 +32,7 @@ help:
 	@printf "  make frontend-dev     Start the Next.js frontend\n"
 	@printf "  make frontend-lint    Run frontend lint checks\n"
 	@printf "  make registry-sync    Force a registry sync\n"
-	@printf "  make stripe-webhook   Start the Stripe webhook listener (requires stripe CLI)\n"
+	@printf "  make stripe-webhook   Start Stripe webhook listener using STRIPE_SECRET_KEY from .env\n"
 
 sync:
 	$(UV) sync
@@ -91,4 +91,10 @@ registry-sync:
 	$(UV) run python scripts/sync_agents_from_registry.py --force
 
 stripe-webhook:
-	stripe listen --forward-to localhost:$(API_PORT)/api/credits/webhook
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$STRIPE_SECRET_KEY" ]; then \
+		echo "STRIPE_SECRET_KEY is missing. Set it in .env before running make stripe-webhook."; \
+		exit 1; \
+	fi; \
+	echo "Forwarding Stripe webhooks to http://localhost:$(API_PORT)/api/credits/webhook using STRIPE_SECRET_KEY from .env"; \
+	stripe listen --api-key "$$STRIPE_SECRET_KEY" --forward-to localhost:$(API_PORT)/api/credits/webhook

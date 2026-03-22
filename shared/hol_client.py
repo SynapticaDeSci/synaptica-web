@@ -92,6 +92,22 @@ def _get_register_paths() -> List[str]:
     return deduped
 
 
+def _get_quote_paths() -> List[str]:
+    """Derive quote endpoints from configured register paths."""
+    quote_paths: List[str] = []
+    for path in _get_register_paths():
+        candidate = path
+        if candidate.endswith("/quote"):
+            pass
+        elif candidate.endswith("/publish"):
+            candidate = f"{candidate.rsplit('/publish', 1)[0]}/quote"
+        else:
+            candidate = f"{candidate.rstrip('/')}/quote"
+        if candidate not in quote_paths:
+            quote_paths.append(candidate)
+    return quote_paths
+
+
 def _extract_error_detail(response: httpx.Response) -> Optional[str]:
     def _compact(value: str, *, limit: int = 260) -> str:
         cleaned = " ".join(value.split())
@@ -341,14 +357,16 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
         raise ValueError("mode must be either 'quote' or 'register'")
 
     payload: Dict[str, Any] = dict(agent_payload or {})
-    payload["mode"] = normalized_mode
+    if normalized_mode == "register":
+        payload["mode"] = normalized_mode
 
     attempted_paths: List[str] = []
     last_error: Optional[Exception] = None
     last_error_message: Optional[str] = None
+    candidate_paths = _get_quote_paths() if normalized_mode == "quote" else _get_register_paths()
 
     with _build_client() as client:
-        for path in _get_register_paths():
+        for path in candidate_paths:
             attempted_paths.append(path)
             try:
                 response = client.post(path, json=payload)

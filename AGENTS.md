@@ -12,6 +12,7 @@
   - `make research`
   - `make mock-agent`
   - `make frontend-dev`
+  - `make stripe-webhook` (uses `STRIPE_SECRET_KEY` from root `.env` to avoid Stripe account mismatch)
 - Validation commands that currently reflect repo reality:
   - `make test`
   - `make smoke`
@@ -26,6 +27,7 @@
   - Database schema changes should ship as Alembic revisions under `alembic/versions/`; avoid reintroducing `Base.metadata.create_all(...)` as the primary local setup path.
   - Active OpenAI-backed agent construction should go through `shared/strands_openai_agent.py`; keep `shared/openai_agent.py` legacy/demo-only unless explicitly reactivated.
   - Research agents themselves should keep using Strands directly. The optional orchestrator-side relay is `RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY`; keep it opt-in and treat `RESEARCH_RUN_USE_STRANDS_BACKEND` as a legacy alias only.
+  - HOL marketplace registration defaults to free-tier (`additionalRegistries: []`). Use `HOL_REGISTER_ADDITIONAL_REGISTRIES` only for intentional paid additional-registry fan-out.
 - Safe edits:
   - Treat `.env`, local DB files, and files under `agent_metadata/` as potentially sensitive; do not commit secrets or generated local data.
   - If a change affects local developer workflow, update `README.md` and this file in the same change.
