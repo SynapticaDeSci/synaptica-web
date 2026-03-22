@@ -8,6 +8,7 @@
   - `make db-init`
   - `make db-init` runs `uv run alembic upgrade head`
 - Dev servers:
+  - `make dev` (starts API + research + Stripe webhook + HOL sidecar + frontend in one terminal)
   - `make api`
   - `make research`
   - `make mock-agent`

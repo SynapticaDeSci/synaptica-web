@@ -10,7 +10,7 @@ RESEARCH_PORT ?= 5001
 MOCK_AGENT_HOST ?= 0.0.0.0
 MOCK_AGENT_PORT ?= 6123
 
-.PHONY: help sync db-init test lint lint-python format format-check typecheck check check-all smoke smoke-api smoke-research api research mock-agent frontend-install frontend-dev frontend-lint registry-sync stripe-webhook
+.PHONY: help sync db-init test lint lint-python format format-check typecheck check check-all smoke smoke-api smoke-research api research mock-agent frontend-install frontend-dev frontend-lint registry-sync stripe-webhook dev
 
 help:
 	@printf "Available targets:\n"
@@ -28,6 +28,7 @@ help:
 	@printf "  make api              Start the FastAPI API server\n"
 	@printf "  make research         Start the research agents server\n"
 	@printf "  make mock-agent       Start the mock marketplace agent\n"
+	@printf "  make dev              Start API, research, HOL sidecar, frontend, and Stripe webhook together\n"
 	@printf "  make frontend-install Install frontend dependencies\n"
 	@printf "  make frontend-dev     Start the Next.js frontend\n"
 	@printf "  make frontend-lint    Run frontend lint checks\n"
@@ -98,3 +99,29 @@ stripe-webhook:
 	fi; \
 	echo "Forwarding Stripe webhooks to http://localhost:$(API_PORT)/api/credits/webhook using STRIPE_SECRET_KEY from .env"; \
 	stripe listen --api-key "$$STRIPE_SECRET_KEY" --forward-to localhost:$(API_PORT)/api/credits/webhook
+
+dev:
+	@set -euo pipefail; \
+	pids=""; \
+	cleanup() { \
+		for pid in $$pids; do \
+			kill "$$pid" 2>/dev/null || true; \
+		done; \
+		wait || true; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	$(MAKE) api & pids="$$pids $$!"; \
+	$(MAKE) research & pids="$$pids $$!"; \
+	$(MAKE) stripe-webhook & pids="$$pids $$!"; \
+	$(NPM) --prefix frontend run hol-sidecar & pids="$$pids $$!"; \
+	$(MAKE) frontend-dev & pids="$$pids $$!"; \
+	while true; do \
+		for pid in $$pids; do \
+			if ! kill -0 "$$pid" 2>/dev/null; then \
+				wait "$$pid" || true; \
+				echo "One dev process exited. Stopping the remaining processes."; \
+				exit 1; \
+			fi; \
+		done; \
+		sleep 1; \
+	done

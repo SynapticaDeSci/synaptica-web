@@ -139,7 +139,15 @@ RESEARCH_RUN_USE_STRANDS_EXECUTOR_RELAY=0
 
 ### Running Locally
 
-Start all services in separate terminals:
+Start all primary local services with one command:
+
+```bash
+make dev
+```
+
+This runs `make api`, `make research`, `make stripe-webhook`, `npm --prefix frontend run hol-sidecar`, and `make frontend-dev` together in one terminal. If one process exits, the rest are stopped so you can restart cleanly.
+
+Or start services in separate terminals:
 
 ```bash
 # Terminal 1: Frontend
