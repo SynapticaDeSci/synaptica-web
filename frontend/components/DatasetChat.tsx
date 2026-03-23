@@ -1,8 +1,6 @@
 'use client'
 
-import { useRef, useEffect, useMemo, useState } from 'react'
-import { useChat } from '@ai-sdk/react'
-import { DefaultChatTransport } from 'ai'
+import { useRef, useEffect, useState } from 'react'
 import { Loader2, MessageSquare, Send } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 
@@ -10,48 +8,19 @@ import { Button } from '@/components/ui/button'
 import type { DataAssetDetailRecord } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-function getMessageText(parts: { type: string; text?: string }[]) {
-  return parts
-    .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
-    .map((p) => p.text)
-    .join('')
+const BACKEND_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
+
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
 }
 
 export function DatasetChat({ dataset }: { dataset: DataAssetDetailRecord }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState('')
-
-  const transport = useMemo(
-    () =>
-      new DefaultChatTransport({
-        api: '/api/data-agent-chat',
-        body: {
-          datasetContext: {
-            id: dataset.id,
-            title: dataset.title,
-            description: dataset.description,
-            lab_name: dataset.lab_name,
-            classification: dataset.data_classification,
-            tags: dataset.tags,
-            filename: dataset.filename,
-            size_bytes: dataset.size_bytes,
-            content_type: dataset.content_type,
-            verification_status: dataset.verification_status,
-            proof_status: dataset.proof_status,
-            reuse_count: dataset.reuse_count,
-            created_at: dataset.created_at,
-          },
-        },
-      }),
-    [dataset],
-  )
-
-  const { messages, sendMessage, status } = useChat({
-    id: `dataset-chat-${dataset.id}`,
-    transport,
-  })
-
-  const isLoading = status === 'streaming' || status === 'submitted'
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [isLoading, setIsLoading] = useState(false)
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -59,11 +28,45 @@ export function DatasetChat({ dataset }: { dataset: DataAssetDetailRecord }) {
     }
   }, [messages])
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || isLoading) return
-    sendMessage({ text: input.trim() })
+    const text = input.trim()
+    if (!text || isLoading) return
+
+    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text }
+    setMessages((prev) => [...prev, userMsg])
     setInput('')
+    setIsLoading(true)
+
+    try {
+      const res = await fetch(`${BACKEND_BASE_URL}/api/data-agent/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, dataset_id: dataset.id }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+        throw new Error(err.detail || err.error || 'Request failed')
+      }
+
+      const data = await res.json()
+      const assistantMsg: ChatMessage = {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        text: data.response,
+      }
+      setMessages((prev) => [...prev, assistantMsg])
+    } catch (err: any) {
+      const errorMsg: ChatMessage = {
+        id: `e-${Date.now()}`,
+        role: 'assistant',
+        text: `Error: ${err.message || 'Something went wrong'}`,
+      }
+      setMessages((prev) => [...prev, errorMsg])
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -84,38 +87,31 @@ export function DatasetChat({ dataset }: { dataset: DataAssetDetailRecord }) {
             Ask anything about this dataset — its contents, quality, format, or how to reuse it.
           </p>
         )}
-        {messages.map((message) => {
-            const text = getMessageText(
-              message.parts as { type: string; text?: string }[],
-            )
-            if (!text) return null
-
-            return (
-              <div
-                key={message.id}
-                className={cn(
-                  'rounded-xl px-3 py-2 text-sm',
-                  message.role === 'user'
-                    ? 'ml-8 border border-sky-400/20 bg-sky-400/10 text-sky-50'
-                    : 'mr-8 border border-white/10 bg-slate-950/40 text-slate-200',
-                )}
-              >
-                {message.role === 'assistant' ? (
-                  <div className="prose prose-invert prose-sm max-w-none prose-p:text-slate-200 prose-a:text-sky-200">
-                    <ReactMarkdown>{text}</ReactMarkdown>
-                  </div>
-                ) : (
-                  <p>{text}</p>
-                )}
+        {messages.map((message) => (
+          <div
+            key={message.id}
+            className={cn(
+              'rounded-xl px-3 py-2 text-sm',
+              message.role === 'user'
+                ? 'ml-8 border border-sky-400/20 bg-sky-400/10 text-sky-50'
+                : 'mr-8 border border-white/10 bg-slate-950/40 text-slate-200',
+            )}
+          >
+            {message.role === 'assistant' ? (
+              <div className="prose prose-invert prose-sm max-w-none prose-p:text-slate-200 prose-a:text-sky-200">
+                <ReactMarkdown>{message.text}</ReactMarkdown>
               </div>
-            )
-          })}
-          {isLoading && messages[messages.length - 1]?.role === 'user' && (
-            <div className="mr-8 flex items-center gap-2 rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-400">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Thinking...
-            </div>
-          )}
+            ) : (
+              <p>{message.text}</p>
+            )}
+          </div>
+        ))}
+        {isLoading && (
+          <div className="mr-8 flex items-center gap-2 rounded-xl border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-400">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Thinking...
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleSubmit} className="mt-3 flex gap-2">

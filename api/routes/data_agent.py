@@ -1527,3 +1527,47 @@ async def data_agent_message(
         response=response,
         metadata=payload.metadata,
     )
+
+
+class DataAgentChatRequest(BaseModel):
+    """Request body for the frontend dataset chat endpoint."""
+
+    message: str
+    dataset_id: Optional[str] = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DataAgentChatResponse(BaseModel):
+    response: str
+
+
+@router.post("/chat", response_model=DataAgentChatResponse)
+async def data_agent_chat(
+    body: DataAgentChatRequest,
+    db: Session = Depends(get_db),
+) -> DataAgentChatResponse:
+    """Chat with the Data Agent from the frontend UI.
+
+    If ``dataset_id`` is provided the agent receives enriched context
+    about that specific dataset so it can answer targeted questions.
+    """
+
+    prompt = body.message
+    if body.dataset_id:
+        asset = db.query(DataAsset).filter(DataAsset.id == body.dataset_id).first()
+        if asset:
+            meta = asset.meta if isinstance(asset.meta, dict) else {}
+            prompt = (
+                f"[Context: the user is asking about dataset '{asset.title}' "
+                f"(id={asset.id}, lab={asset.lab_name}, "
+                f"classification={asset.data_classification}, "
+                f"file={asset.filename}, size={asset.size_bytes}B, "
+                f"tags={', '.join(asset.tags or []) or 'none'}, "
+                f"verification={meta.get('verification_status', 'pending')}, "
+                f"proof={meta.get('proof_status', 'unanchored')})]\n\n"
+                f"{body.message}"
+            )
+
+    response = await _build_data_agent_chat_response(prompt, db)
+    return DataAgentChatResponse(response=response)
