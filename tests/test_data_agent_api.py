@@ -768,7 +768,11 @@ def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):
     assert message.status_code == 200
     payload = message.json()
     assert payload["message_id"]
-    assert "Synaptica Data Agent dataset summary" in payload["response"]
+    # LLM-generated response should mention the uploaded dataset
+    resp_text = payload["response"].lower()
+    assert "experiment" in resp_text or "failed" in resp_text or "neurolab" in resp_text, (
+        f"Expected LLM response to mention the uploaded dataset, got: {payload['response'][:200]}"
+    )
 
     rpc_message = client.post(
         "/api/data-agent/agent",
@@ -790,7 +794,7 @@ def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):
     rpc_payload = rpc_message.json()
     assert rpc_payload["id"] == "rpc-1"
     assert rpc_payload["result"]["id"] == "task-1"
-    assert (
-        "Synaptica Data Agent dataset summary"
-        in rpc_payload["result"]["status"]["message"]["parts"][0]["text"]
+    rpc_resp_text = rpc_payload["result"]["status"]["message"]["parts"][0]["text"].lower()
+    assert "experiment" in rpc_resp_text or "failed" in rpc_resp_text or "neurolab" in rpc_resp_text, (
+        f"Expected LLM response to mention the dataset, got: {rpc_resp_text[:200]}"
     )

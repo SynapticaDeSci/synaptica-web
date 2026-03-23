@@ -322,7 +322,7 @@ export function Marketplace() {
                 )
                 const isRegistering = registeringAgentId === agent.agent_id
                 const registerDisabled =
-                  holRegistered || holPending || isRegistering || !canRegisterOnHol
+                  holPending || isRegistering || !canRegisterOnHol
 
                 return (
                   <div
@@ -385,7 +385,9 @@ export function Marketplace() {
                           className={`rounded-full px-3 py-1.5 text-xs font-medium transition ${
                             registerDisabled
                               ? 'cursor-not-allowed bg-slate-800/60 text-slate-500'
-                              : 'bg-sky-500 text-white hover:bg-sky-400'
+                              : holRegistered
+                                ? 'border border-sky-400/30 bg-transparent text-sky-300 hover:bg-sky-500/10'
+                                : 'bg-sky-500 text-white hover:bg-sky-400'
                           }`}
                           title={
                             !canRegisterOnHol
@@ -395,10 +397,10 @@ export function Marketplace() {
                         >
                           {isRegistering
                             ? 'Registering on HOL...'
-                            : holRegistered
-                              ? 'Registered on HOL'
-                              : holPending
-                                ? 'HOL Registration Pending'
+                            : holPending
+                              ? 'HOL Registration Pending'
+                              : holRegistered
+                                ? 'Re-register on HOL'
                                 : 'Register on HOL'}
                         </button>
                       </div>
