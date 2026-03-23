@@ -68,6 +68,7 @@ class AgentResponse(BaseModel):
 
     agent_id: str
     name: str
+    agent_type: Optional[str] = None
     description: Optional[str] = None
     capabilities: List[str]
     categories: List[str]
@@ -353,6 +354,10 @@ async def list_agents() -> AgentsListResponse:
 
     payload_synced_at = payload.get("synced_at") or synced_at
     agents_payload = payload.get("agents", [])
+    if any("agent_type" not in item for item in agents_payload if isinstance(item, dict)):
+        payload = rebuild_agents_cache(synced_at=synced_dt)
+        payload_synced_at = payload.get("synced_at") or synced_at
+        agents_payload = payload.get("agents", [])
     responses = [AgentResponse(**item) for item in agents_payload]
 
     return AgentsListResponse(

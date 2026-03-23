@@ -226,6 +226,8 @@ HOL_SDK_SIDECAR_URL=http://127.0.0.1:8040
 # HOL_SDK_SIDECAR_TIMEOUT_SECONDS=60
 # Optional connect timeout for sidecar requests (seconds, default 5)
 # HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS=5
+# Optional registration timeout (seconds, default 180)
+# HOL_SDK_SIDECAR_REGISTER_TIMEOUT_SECONDS=180
 # Optional chat-session timeout (seconds, default 120)
 # HOL_SDK_SIDECAR_CREATE_SESSION_TIMEOUT_SECONDS=120
 # Optional retries for chat-session timeout/transient 5xx failures (default 2)

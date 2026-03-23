@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -25,13 +25,22 @@ from sqlalchemy.orm import Session
 from shared.database import DataAsset, get_db
 from shared.hedera.client import get_hedera_client
 from shared.a2a.models import AgentCapability, AgentCard, MessagePayload, MessageResponse
+from shared.a2a.protocol import (
+    build_agent_card_payload,
+    build_completed_task_response,
+    build_error_response,
+    extract_message_text_and_metadata,
+)
 from shared.hol_client import (
+    HOL_DIRECT_SESSION_PREFIX,
     HolAgentSummary,
     HolClientError,
     check_sidecar_health as hol_check_sidecar_health,
+    coerce_hol_broker_response,
     create_session as hol_create_session,
     search_agents as hol_search_agents,
     send_message as hol_send_message,
+    should_use_direct_chat_fallback,
 )
 
 router = APIRouter()
@@ -1269,11 +1278,39 @@ async def use_hol_data_agent(
                 transport=request.transport,
                 as_uaid=request.as_uaid,
             )
+        except HolClientError as exc:
+            attempted_errors.append(f"{candidate['uaid']}: {exc}")
+            if should_use_direct_chat_fallback(exc):
+                fallback_reason = str(exc)
+                try:
+                    broker_response = await run_in_threadpool(
+                        hol_send_message,
+                        None,
+                        message,
+                        uaid=candidate["uaid"],
+                        as_uaid=request.as_uaid,
+                    )
+                    session_id = f"{HOL_DIRECT_SESSION_PREFIX}{uuid.uuid4()}"
+                    broker_response = coerce_hol_broker_response(
+                        broker_response,
+                        mode="direct",
+                        fallback_reason=fallback_reason,
+                    )
+                    selected_agent = candidate
+                    break
+                except HolClientError as direct_exc:
+                    attempted_errors.append(f"{candidate['uaid']} (direct): {direct_exc}")
+            continue
+        try:
             broker_response = await run_in_threadpool(
                 hol_send_message,
                 session_id,
                 message,
                 as_uaid=request.as_uaid,
+            )
+            broker_response = coerce_hol_broker_response(
+                broker_response,
+                mode="session",
             )
             selected_agent = candidate
             break
@@ -1378,10 +1415,7 @@ async def download_dataset(dataset_id: str, db: Session = Depends(get_db)) -> Fi
     )
 
 
-@router.get("/agent/.well-known/agent.json", response_model=AgentCard)
-async def data_agent_card() -> AgentCard:
-    """Expose the built-in Data Agent as a minimal A2A-compatible agent."""
-
+def _build_data_agent_card() -> AgentCard:
     return AgentCard(
         id="data-agent-001",
         name="Data Agent",
@@ -1396,6 +1430,16 @@ async def data_agent_card() -> AgentCard:
     )
 
 
+@router.get("/agent/.well-known/agent-card.json")
+@router.get("/agent/.well-known/agent.json")
+async def data_agent_card(request: Request) -> Dict[str, Any]:
+    """Expose the built-in Data Agent as a broker-friendly A2A-compatible card."""
+
+    agent_card = _build_data_agent_card()
+    rpc_url = str(request.url_for("data_agent_rpc"))
+    return build_agent_card_payload(agent_card, rpc_url=rpc_url)
+
+
 @router.get("/agent/health")
 async def data_agent_health() -> Dict[str, Any]:
     """Health endpoint for the built-in Data Agent A2A surface."""
@@ -1405,6 +1449,45 @@ async def data_agent_health() -> Dict[str, Any]:
         "agent_id": "data-agent-001",
         "service": "synaptica-data-agent",
     }
+
+
+@router.post("/agent", name="data_agent_rpc")
+async def data_agent_rpc(
+    payload: Dict[str, Any],
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Expose the built-in Data Agent over a minimal JSON-RPC A2A surface."""
+
+    rpc_id = payload.get("id") if isinstance(payload, dict) else None
+    method = str(payload.get("method") or "").strip() if isinstance(payload, dict) else ""
+    if method not in {"message/send", "tasks/send"}:
+        return build_error_response(
+            rpc_id=rpc_id,
+            code=-32601,
+            message="Unsupported A2A method",
+        )
+
+    message, metadata = extract_message_text_and_metadata(payload)
+    if not message:
+        return build_error_response(
+            rpc_id=rpc_id,
+            code=-32602,
+            message="A2A message payload must include at least one text part",
+        )
+
+    response = _build_data_agent_chat_response(message, db)
+    task_id = None
+    params = payload.get("params")
+    if isinstance(params, dict):
+        raw_task_id = params.get("id")
+        if isinstance(raw_task_id, str) and raw_task_id.strip():
+            task_id = raw_task_id.strip()
+    return build_completed_task_response(
+        rpc_id=rpc_id,
+        text=response,
+        task_id=task_id,
+        metadata=metadata,
+    )
 
 
 @router.post("/agent/a2a/v1/messages", response_model=MessageResponse)

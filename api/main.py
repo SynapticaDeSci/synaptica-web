@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -24,6 +24,12 @@ from shared.database import Agent, AgentReputation, Base, SessionLocal, engine
 from shared.database.models import A2AEvent, Task
 from shared.payments.runtime import sync_verified_payment_profile
 from shared.a2a.models import AgentCapability, AgentCard, MessagePayload, MessageResponse
+from shared.a2a.protocol import (
+    build_agent_card_payload,
+    build_completed_task_response,
+    build_error_response,
+    extract_message_text_and_metadata,
+)
 from shared.research.agent_inventory import (
     get_builtin_research_agent,
     is_supported_builtin_research_agent,
@@ -48,15 +54,18 @@ from shared.registry_sync import (
     get_registry_cache_ttl_seconds,
 )
 from shared.hol_client import (
-    HolClientConfigurationError,
+    HOL_DIRECT_SESSION_PREFIX,
     HolClientError,
     check_sidecar_health as hol_check_sidecar_health,
+    coerce_hol_broker_response,
     create_session as hol_create_session,
     get_history as hol_get_history,
     get_credit_balance as hol_get_credit_balance,
+    is_transient_hol_error,
     register_agent as hol_register_agent,
     search_agents as hol_search_agents,
     send_message as hol_send_message,
+    should_use_direct_chat_fallback,
 )
 from shared.metadata import (
     AgentMetadataPayload,
@@ -92,7 +101,6 @@ _registry_refresh_task: Optional[asyncio.Task] = None
 logger = logging.getLogger(__name__)
 
 BUILT_IN_DATA_AGENT_ID = "data-agent-001"
-HOL_DIRECT_SESSION_PREFIX = "hol-direct:"
 HOL_DIRECT_SESSION_HISTORY_LIMIT = 50
 _hol_direct_chat_sessions: Dict[str, Dict[str, Any]] = {}
 
@@ -453,19 +461,7 @@ def _set_hol_meta(
 
 
 def _is_transient_hol_error(message: str) -> bool:
-    text = (message or "").lower()
-    transient_markers = (
-        "timed out",
-        "timeout",
-        "failed to connect to hol registry",
-        "connect error",
-        "502 bad gateway",
-        "503 service unavailable",
-        "504 gateway timeout",
-        "upstream hol registry error page",
-        "temporary",
-    )
-    return any(marker in text for marker in transient_markers)
+    return is_transient_hol_error(message)
 
 
 def _resolve_hol_error_status(previous_status: str, message: str) -> str:
@@ -593,6 +589,8 @@ async def _publish_missing_data_agent_metadata(
 
     meta["metadata_cid"] = upload_result.cid
     meta["metadata_gateway_url"] = upload_result.gateway_url
+    meta["hol_published_endpoint_url"] = endpoint_url
+    meta["hol_published_health_check_url"] = health_check_url
     agent.meta = meta
     agent.erc8004_metadata_uri = upload_result.ipfs_uri
 
@@ -604,6 +602,9 @@ async def _prepare_hol_registration_payload(
     metadata_uri_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     meta = dict(agent.meta or {})
+    explicit_metadata_uri_override = (
+        str(metadata_uri_override).strip() if metadata_uri_override is not None else ""
+    )
     endpoint_url = str(
         endpoint_url_override if endpoint_url_override is not None else (meta.get("endpoint_url") or "")
     ).strip()
@@ -614,12 +615,23 @@ async def _prepare_hol_registration_payload(
         else (agent.erc8004_metadata_uri or meta.get("metadata_gateway_url") or "")
     ).strip() or None
 
+    if endpoint_url and _is_relative_or_non_public_url(endpoint_url):
+        endpoint_url = _rewrite_hol_public_url(endpoint_url)
+    if health_check_url and _is_relative_or_non_public_url(health_check_url):
+        health_check_url = _rewrite_hol_public_url(health_check_url)
+
     if agent.agent_type == "data":
-        if endpoint_url and _is_relative_or_non_public_url(endpoint_url):
-            endpoint_url = _rewrite_hol_public_url(endpoint_url)
-        if health_check_url and _is_relative_or_non_public_url(health_check_url):
-            health_check_url = _rewrite_hol_public_url(health_check_url)
-        if not metadata_uri:
+        published_endpoint_url = str(meta.get("hol_published_endpoint_url") or "").strip() or None
+        published_health_check_url = str(meta.get("hol_published_health_check_url") or "").strip() or None
+        needs_metadata_publish = (
+            not explicit_metadata_uri_override
+            and (
+                not metadata_uri
+                or published_endpoint_url != endpoint_url
+                or published_health_check_url != health_check_url
+            )
+        )
+        if needs_metadata_publish:
             await _publish_missing_data_agent_metadata(
                 agent,
                 endpoint_url=endpoint_url,
@@ -909,27 +921,68 @@ class HolRegisterAgentStatusResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
-def _extract_hol_chat_message_content(payload: Any) -> str:
+def _extract_hol_chat_message_content(payload: Any, *, _depth: int = 0) -> str:
+    if _depth > 8:
+        return ""
     if isinstance(payload, str):
-        return payload.strip()
-    if isinstance(payload, dict):
-        for key in ("content", "message", "text", "reply", "response"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if isinstance(value, dict):
-                nested = _extract_hol_chat_message_content(value)
+        text = payload.strip()
+        if not text:
+            return ""
+        if text.startswith("{") or text.startswith("["):
+            with suppress(Exception):
+                parsed = json.loads(text)
+                nested = _extract_hol_chat_message_content(parsed, _depth=_depth + 1)
                 if nested:
                     return nested
+        return text
+    if isinstance(payload, list):
+        chunks = [
+            _extract_hol_chat_message_content(item, _depth=_depth + 1)
+            for item in payload
+        ]
+        chunks = [chunk for chunk in chunks if chunk]
+        return "\n".join(chunks) if chunks else ""
+    if isinstance(payload, dict):
+        for key in ("content", "text", "reply", "response"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                nested = _extract_hol_chat_message_content(value, _depth=_depth + 1)
+                if nested:
+                    return nested
+        for key in ("message", "result", "status", "artifact", "artifacts", "output", "outputs", "data"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            nested = _extract_hol_chat_message_content(value, _depth=_depth + 1)
+            if nested:
+                return nested
         parts = payload.get("parts")
         if isinstance(parts, list):
             chunks: List[str] = []
             for part in parts:
-                nested = _extract_hol_chat_message_content(part)
+                nested = _extract_hol_chat_message_content(part, _depth=_depth + 1)
                 if nested:
                     chunks.append(nested)
             if chunks:
                 return "\n".join(chunks)
+        for key, value in payload.items():
+            if key in {
+                "jsonrpc",
+                "id",
+                "messageId",
+                "kind",
+                "role",
+                "type",
+                "metadata",
+                "timestamp",
+                "createdAt",
+                "sentAt",
+            }:
+                continue
+            if isinstance(value, (dict, list)):
+                nested = _extract_hol_chat_message_content(value, _depth=_depth + 1)
+                if nested:
+                    return nested
     return ""
 
 
@@ -963,29 +1016,22 @@ def _normalize_hol_chat_history(messages: List[Dict[str, Any]]) -> List[HolChatM
 
 
 def _should_use_hol_direct_chat_fallback(error: HolClientError) -> bool:
-    if isinstance(error, HolClientConfigurationError):
-        # Sidecar not reachable/configured is a local setup problem, not a broker timeout.
-        return False
-    message = str(error).lower()
-    if "create_session failed" not in message:
-        return False
-    return any(
-        marker in message
-        for marker in (
-            "timed out",
-            "timeout",
-            "gateway timeout",
-            "504",
-            "503",
-            "502",
-            "registry broker request failed",
-        )
-    )
+    return should_use_direct_chat_fallback(error)
 
 
-def _create_hol_direct_chat_session(uaid: str) -> str:
+def _coerce_hol_raw_payload(payload: Any) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        return dict(payload)
+    return {}
+
+
+def _create_hol_direct_chat_session(uaid: str, *, fallback_reason: Optional[str] = None) -> str:
     session_id = f"{HOL_DIRECT_SESSION_PREFIX}{uuid.uuid4()}"
-    _hol_direct_chat_sessions[session_id] = {"uaid": uaid, "history": []}
+    _hol_direct_chat_sessions[session_id] = {
+        "uaid": uaid,
+        "history": [],
+        "fallback_reason": fallback_reason,
+    }
     return session_id
 
 
@@ -1158,15 +1204,12 @@ async def research_agent_public_metadata(agent_id: str) -> Dict[str, Any]:
         "name": getattr(agent, "name", agent_id),
         "description": getattr(agent, "description", ""),
         "message_endpoint": f"/api/research-agent/{agent_id}/a2a/v1/messages",
-        "card_endpoint": f"/api/research-agent/{agent_id}/.well-known/agent.json",
+        "card_endpoint": f"/api/research-agent/{agent_id}/.well-known/agent-card.json",
         "health_endpoint": f"/api/research-agent/{agent_id}/health",
     }
 
 
-@app.get("/api/research-agent/{agent_id}/.well-known/agent.json", response_model=AgentCard)
-async def research_agent_public_card(agent_id: str) -> AgentCard:
-    """Expose a supported research agent as a minimal A2A-compatible card."""
-
+def _build_research_agent_public_card(agent_id: str) -> AgentCard:
     agent = _get_supported_research_runtime_agent(agent_id)
     capabilities = [
         AgentCapability(name=str(capability), description=None)
@@ -1184,6 +1227,16 @@ async def research_agent_public_card(agent_id: str) -> AgentCard:
     )
 
 
+@app.get("/api/research-agent/{agent_id}/.well-known/agent-card.json")
+@app.get("/api/research-agent/{agent_id}/.well-known/agent.json")
+async def research_agent_public_card(request: Request, agent_id: str) -> Dict[str, Any]:
+    """Expose a supported research agent as a broker-friendly A2A-compatible card."""
+
+    agent_card = _build_research_agent_public_card(agent_id)
+    rpc_url = str(request.url_for("research_agent_public_rpc", agent_id=agent_id))
+    return build_agent_card_payload(agent_card, rpc_url=rpc_url)
+
+
 @app.get("/api/research-agent/{agent_id}/health")
 async def research_agent_public_health(agent_id: str) -> Dict[str, Any]:
     """Health endpoint for the supported research-agent public A2A surface."""
@@ -1195,6 +1248,49 @@ async def research_agent_public_health(agent_id: str) -> Dict[str, Any]:
         "service": "synaptica-research-agent",
         "name": getattr(agent, "name", agent_id),
     }
+
+
+@app.post("/api/research-agent/{agent_id}", name="research_agent_public_rpc")
+async def research_agent_public_rpc(
+    agent_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Expose supported research agents over a minimal JSON-RPC A2A surface."""
+
+    rpc_id = payload.get("id") if isinstance(payload, dict) else None
+    method = str(payload.get("method") or "").strip() if isinstance(payload, dict) else ""
+    if method not in {"message/send", "tasks/send"}:
+        return build_error_response(
+            rpc_id=rpc_id,
+            code=-32601,
+            message="Unsupported A2A method",
+        )
+
+    message, metadata = extract_message_text_and_metadata(payload)
+    if not message:
+        return build_error_response(
+            rpc_id=rpc_id,
+            code=-32602,
+            message="A2A message payload must include at least one text part",
+        )
+
+    agent = _get_supported_research_runtime_agent(agent_id)
+    result = await agent.execute(message, context=metadata or {})
+    response = _coerce_research_chat_response(result)
+
+    task_id = None
+    params = payload.get("params")
+    if isinstance(params, dict):
+        raw_task_id = params.get("id")
+        if isinstance(raw_task_id, str) and raw_task_id.strip():
+            task_id = raw_task_id.strip()
+
+    return build_completed_task_response(
+        rpc_id=rpc_id,
+        text=response,
+        task_id=task_id,
+        metadata=metadata,
+    )
 
 
 @app.post("/api/research-agent/{agent_id}/a2a/v1/messages", response_model=MessageResponse)
@@ -1405,15 +1501,19 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
                 uaid,
                 exc,
             )
-            fallback_session_id = _create_hol_direct_chat_session(uaid)
+            fallback_session_id = _create_hol_direct_chat_session(
+                uaid,
+                fallback_reason=str(exc),
+            )
             return HolChatSessionResponse(
                 success=True,
                 session_id=fallback_session_id,
                 uaid=uaid,
-                broker_response={
-                    "mode": "direct",
-                    "fallback_reason": str(exc),
-                },
+                broker_response=coerce_hol_broker_response(
+                    {},
+                    mode="direct",
+                    fallback_reason=str(exc),
+                ),
                 history=[],
             )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1428,6 +1528,7 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
         success=True,
         session_id=session_id,
         uaid=uaid,
+        broker_response=coerce_hol_broker_response({}, mode="session"),
         history=_normalize_hol_chat_history(history),
     )
 
@@ -1445,9 +1546,11 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
     if _is_hol_direct_chat_session(session_id):
         direct_session = _get_hol_direct_chat_session(session_id)
         if direct_session is None:
+            logger.warning("HOL direct chat session %s not found", session_id)
             raise HTTPException(status_code=404, detail="HOL direct chat session not found")
         uaid = str(direct_session.get("uaid") or "").strip()
         if not uaid:
+            logger.warning("HOL direct chat session %s is missing UAID", session_id)
             raise HTTPException(status_code=500, detail="HOL direct chat session is missing UAID")
 
         try:
@@ -1462,6 +1565,12 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
         except HolClientError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+        fallback_reason = str(direct_session.get("fallback_reason") or "").strip() or None
+        normalized_broker_response = coerce_hol_broker_response(
+            broker_response,
+            mode="direct",
+            fallback_reason=fallback_reason,
+        )
         assistant_content = _extract_hol_chat_message_content(broker_response) or json.dumps(
             broker_response,
             ensure_ascii=True,
@@ -1473,7 +1582,7 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 HolChatMessageRecord(
                     role="assistant",
                     content=assistant_content,
-                    raw=broker_response if isinstance(broker_response, dict) else {},
+                    raw=_coerce_hol_raw_payload(broker_response),
                 ),
             ],
         )
@@ -1481,7 +1590,7 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
             success=True,
             session_id=session_id,
             uaid=uaid,
-            broker_response=broker_response if isinstance(broker_response, dict) else {},
+            broker_response=normalized_broker_response,
             history=history,
         )
 
@@ -1496,6 +1605,10 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
     except HolClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    normalized_broker_response = coerce_hol_broker_response(
+        broker_response,
+        mode="session",
+    )
     try:
         history = await run_in_threadpool(hol_get_history, session_id, limit=50)
     except HolClientError as exc:
@@ -1510,13 +1623,17 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
         )[:1200]
         normalized_history = [
             HolChatMessageRecord(role="user", content=message, raw={}),
-            HolChatMessageRecord(role="assistant", content=content, raw=broker_response),
+            HolChatMessageRecord(
+                role="assistant",
+                content=content,
+                raw=_coerce_hol_raw_payload(broker_response),
+            ),
         ]
 
     return HolChatSessionResponse(
         success=True,
         session_id=session_id,
-        broker_response=broker_response,
+        broker_response=normalized_broker_response,
         history=normalized_history,
     )
 
