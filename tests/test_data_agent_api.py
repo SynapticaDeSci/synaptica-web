@@ -11,6 +11,7 @@ from shared.database import (
     DataAsset,
     SessionLocal,
 )
+from shared.hol_client import HolClientConfigurationError, HolClientError
 
 
 def _reset_state():
@@ -472,7 +473,7 @@ def test_dataset_hol_use_filters_unavailable_candidates(
     assert "not marked available" in detail["rejected_candidates"][0]["reason"]
 
 
-def test_dataset_hol_use_returns_502_for_hol_failures(
+def test_dataset_hol_use_falls_back_to_direct_message_for_transient_session_failures(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -497,25 +498,97 @@ def test_dataset_hol_use_returns_502_for_hol_failures(
     monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [_Agent()])
 
     def _failing_create_session(uaid, transport=None, as_uaid=None):
-        from shared.hol_client import HolClientError
-
         raise HolClientError("HOL create_session failed: 502 Bad Gateway: upstream HOL registry error page")
 
+    def _direct_send_message(session_id, message, uaid=None, as_uaid=None):
+        assert session_id is None
+        assert uaid == "uaid:aid:hol-data"
+        return {"reply": "analysis ready"}
+
     monkeypatch.setattr("api.routes.data_agent.hol_create_session", _failing_create_session)
+    monkeypatch.setattr("api.routes.data_agent.hol_send_message", _direct_send_message)
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"].startswith("hol-direct:")
+    assert payload["broker_response"]["mode"] == "direct"
+    assert "fallback_reason" in payload["broker_response"]
+
+    detail = client.get(f"/api/data-agent/datasets/{dataset_id}")
+    assert detail.status_code == 200
+    hol_sessions = detail.json()["hol_sessions"]
+    assert hol_sessions[0]["broker_response"]["mode"] == "direct"
+
+
+@pytest.mark.parametrize(
+    ("raised_error", "expected_message"),
+    [
+        (
+            HolClientConfigurationError(
+                "HOL SDK sidecar unavailable at http://127.0.0.1:8040. Start `npm --prefix frontend run hol-sidecar` and ensure HOL_SDK_SIDECAR_URL is reachable."
+            ),
+            "HOL SDK sidecar unavailable",
+        ),
+        (
+            HolClientError("HOL create_session failed: 400 Bad Request: unsupported transport"),
+            "400 Bad Request",
+        ),
+    ],
+)
+def test_dataset_hol_use_does_not_fallback_for_non_transient_failures(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    raised_error,
+    expected_message: str,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _Agent:
+        uaid = "uaid:aid:hol-data"
+        name = "HOL Data Agent"
+        description = "Remote data specialist"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {"rate": 0}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/hol-data"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [_Agent()])
+
+    def _failing_create_session(uaid, transport=None, as_uaid=None):
+        raise raised_error
+
+    def _unexpected_send_message(*args, **kwargs):
+        raise AssertionError("Direct HOL fallback should not run for non-transient failures")
+
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", _failing_create_session)
+    monkeypatch.setattr("api.routes.data_agent.hol_send_message", _unexpected_send_message)
 
     response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert "HOL create_session failed" in detail["message"]
+    assert expected_message in detail["message"]
     assert detail["attempted_errors"]
 
 
 def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):
     _upload_dataset(client)
 
-    card = client.get("/api/data-agent/agent/.well-known/agent.json")
-    assert card.status_code == 200
-    assert card.json()["id"] == "data-agent-001"
+    for path in (
+        "/api/data-agent/agent/.well-known/agent.json",
+        "/api/data-agent/agent/.well-known/agent-card.json",
+    ):
+        card = client.get(path)
+        assert card.status_code == 200
+        assert card.json()["id"] == "data-agent-001"
+        assert card.json()["url"].endswith("/api/data-agent/agent")
 
     message = client.post(
         "/api/data-agent/agent/a2a/v1/messages",
@@ -525,3 +598,28 @@ def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):
     payload = message.json()
     assert payload["message_id"]
     assert "Synaptica Data Agent dataset summary" in payload["response"]
+
+    rpc_message = client.post(
+        "/api/data-agent/agent",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-1",
+            "method": "message/send",
+            "params": {
+                "id": "task-1",
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "show me recent failed datasets"}],
+                    "metadata": {"source": "test"},
+                },
+            },
+        },
+    )
+    assert rpc_message.status_code == 200
+    rpc_payload = rpc_message.json()
+    assert rpc_payload["id"] == "rpc-1"
+    assert rpc_payload["result"]["id"] == "task-1"
+    assert (
+        "Synaptica Data Agent dataset summary"
+        in rpc_payload["result"]["status"]["message"]["parts"][0]["text"]
+    )

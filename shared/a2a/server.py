@@ -7,12 +7,18 @@ import logging
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.routing import APIRouter
 from starlette.middleware.cors import CORSMiddleware
 import uvicorn
 
 from .models import AgentCard, MessagePayload, MessageResponse
+from .protocol import (
+    build_agent_card_payload,
+    build_completed_task_response,
+    build_error_response,
+    extract_message_text_and_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +47,54 @@ class A2AServer:
 
         router = APIRouter()
 
-        @router.get("/.well-known/agent.json", response_model=AgentCard)
-        async def get_agent_card() -> AgentCard:
+        @router.get("/.well-known/agent-card.json")
+        @router.get("/.well-known/agent.json")
+        async def get_agent_card(request: Request) -> dict[str, Any]:
             logger.debug("Serving agent card for %s", self.agent_card.id)
-            return self.agent_card
+            return build_agent_card_payload(self.agent_card, rpc_url=str(request.url_for("agent_rpc")))
+
+        @router.post("/", name="agent_rpc")
+        async def agent_rpc(payload: dict[str, Any]) -> dict[str, Any]:
+            rpc_id = payload.get("id") if isinstance(payload, dict) else None
+            method = str(payload.get("method") or "").strip() if isinstance(payload, dict) else ""
+            if method not in {"message/send", "tasks/send"}:
+                return build_error_response(
+                    rpc_id=rpc_id,
+                    code=-32601,
+                    message="Unsupported A2A method",
+                )
+
+            message, metadata = extract_message_text_and_metadata(payload)
+            if not message:
+                return build_error_response(
+                    rpc_id=rpc_id,
+                    code=-32602,
+                    message="A2A message payload must include at least one text part",
+                )
+
+            try:
+                result = await self._invoke_agent(message, metadata=metadata)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Agent invocation failed for %s", self.agent_card.id)
+                return build_error_response(
+                    rpc_id=rpc_id,
+                    code=-32000,
+                    message=str(exc),
+                )
+
+            response_text = self._coerce_response(result)
+            task_id = None
+            params = payload.get("params")
+            if isinstance(params, dict):
+                raw_task_id = params.get("id")
+                if isinstance(raw_task_id, str) and raw_task_id.strip():
+                    task_id = raw_task_id.strip()
+            return build_completed_task_response(
+                rpc_id=rpc_id,
+                text=response_text,
+                task_id=task_id,
+                metadata=metadata,
+            )
 
         @router.post("/a2a/v1/messages", response_model=MessageResponse)
         async def send_message(payload: MessagePayload) -> MessageResponse:

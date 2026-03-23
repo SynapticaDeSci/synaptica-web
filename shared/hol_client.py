@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+HOL_DIRECT_SESSION_PREFIX = "hol-direct:"
 
 
 class HolClientError(RuntimeError):
@@ -32,6 +33,48 @@ class HolClientError(RuntimeError):
 
 class HolClientConfigurationError(HolClientError):
     """Raised when required HOL configuration is missing or invalid."""
+
+
+def is_transient_hol_error(message: str) -> bool:
+    """Return whether a HOL error looks transient/retryable."""
+
+    text = (message or "").lower()
+    transient_markers = (
+        "timed out",
+        "timeout",
+        "failed to connect to hol registry",
+        "connect error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "upstream hol registry error page",
+        "registry broker request failed",
+        "temporary",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def should_use_direct_chat_fallback(error: HolClientError) -> bool:
+    """Return whether broker chat should fall back to direct UAID messaging."""
+
+    if isinstance(error, HolClientConfigurationError):
+        return False
+    return is_transient_hol_error(str(error))
+
+
+def coerce_hol_broker_response(
+    payload: Any,
+    *,
+    mode: str,
+    fallback_reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Normalize broker response payloads into a frontend-safe dict."""
+
+    normalized = dict(payload) if isinstance(payload, dict) else {}
+    normalized["mode"] = mode
+    if fallback_reason:
+        normalized["fallback_reason"] = fallback_reason
+    return normalized
 
 
 def _get_env_float(name: str, default: float, *, minimum: float) -> float:
@@ -102,6 +145,14 @@ def _get_sidecar_timeout_seconds() -> float:
 
 def _get_sidecar_connect_timeout_seconds() -> float:
     return _get_env_float("HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS", 5.0, minimum=0.1)
+
+
+def _get_sidecar_register_timeout_seconds() -> float:
+    return _get_env_float(
+        "HOL_SDK_SIDECAR_REGISTER_TIMEOUT_SECONDS",
+        180.0,
+        minimum=1.0,
+    )
 
 
 def _get_sidecar_create_session_timeout_seconds() -> float:
@@ -746,10 +797,14 @@ def register_agent(agent_payload: Dict[str, Any], *, mode: str = "register") -> 
         "agent_payload": dict(agent_payload or {}),
         "mode": normalized_mode,
     }
+    request_timeout = httpx.Timeout(
+        _get_sidecar_register_timeout_seconds(),
+        connect=_get_sidecar_connect_timeout_seconds(),
+    )
 
     with _build_sidecar_client() as client:
         try:
-            response = client.post("/register", json=payload)
+            response = client.post("/register", json=payload, timeout=request_timeout)
             response.raise_for_status()
         except httpx.ConnectError as exc:
             detail = _format_sidecar_error(exc)

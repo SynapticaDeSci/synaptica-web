@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -16,6 +18,7 @@ from shared.hol_client import (
     _get_quote_paths,
     create_session,
     get_history,
+    register_agent,
     search_agents,
     send_message,
     vector_search_agents,
@@ -296,6 +299,46 @@ def test_vector_search_agents_supports_nested_agent_payload(
     assert agents[0].available is True
 
 
+def test_register_agent_uses_dedicated_registration_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOL_SDK_SIDECAR_REGISTER_TIMEOUT_SECONDS", "321")
+    monkeypatch.setenv("HOL_SDK_SIDECAR_CONNECT_TIMEOUT_SECONDS", "9")
+
+    request = httpx.Request("POST", "http://127.0.0.1:8040/register")
+    response = httpx.Response(200, json={"uaid": "uaid:aid:registered"}, request=request)
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def post(
+            self,
+            path: str,
+            json: dict | None = None,
+            timeout: httpx.Timeout | None = None,
+        ) -> httpx.Response:
+            captured["path"] = path
+            captured["json"] = json
+            captured["timeout"] = timeout
+            return response
+
+    monkeypatch.setattr(hol_client, "_build_sidecar_client", lambda: _FakeClient())
+
+    result = register_agent({"profile": {"display_name": "Demo Agent"}}, mode="register")
+
+    assert result == {"uaid": "uaid:aid:registered"}
+    assert captured["path"] == "/register"
+    timeout = captured["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == 321
+    assert timeout.connect == 9
+
+
 def test_hol_agents_search_exposes_candidate_metadata(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -458,10 +501,17 @@ def test_supported_research_agent_public_a2a_endpoints_respond(
 
     monkeypatch.setattr("api.main._load_supported_research_runtime_agent", lambda agent_id: _FakeAgent())
 
-    card = client.get("/api/research-agent/literature-miner-001/.well-known/agent.json")
-    assert card.status_code == 200
-    assert card.json()["id"] == "literature-miner-001"
-    assert card.json()["extras"]["message_endpoint"].endswith("/api/research-agent/literature-miner-001/a2a/v1/messages")
+    for path in (
+        "/api/research-agent/literature-miner-001/.well-known/agent.json",
+        "/api/research-agent/literature-miner-001/.well-known/agent-card.json",
+    ):
+        card = client.get(path)
+        assert card.status_code == 200
+        assert card.json()["id"] == "literature-miner-001"
+        assert card.json()["url"].endswith("/api/research-agent/literature-miner-001")
+        assert card.json()["extras"]["message_endpoint"].endswith(
+            "/api/research-agent/literature-miner-001/a2a/v1/messages"
+        )
 
     message = client.post(
         "/api/research-agent/literature-miner-001/a2a/v1/messages",
@@ -471,6 +521,28 @@ def test_supported_research_agent_public_a2a_endpoints_respond(
     payload = message.json()
     assert payload["message_id"]
     assert payload["response"] == "Found two relevant papers."
+
+    rpc_message = client.post(
+        "/api/research-agent/literature-miner-001",
+        json={
+            "jsonrpc": "2.0",
+            "id": "rpc-1",
+            "method": "message/send",
+            "params": {
+                "id": "task-1",
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "find papers about agent payments"}],
+                    "metadata": {"source": "test"},
+                },
+            },
+        },
+    )
+    assert rpc_message.status_code == 200
+    rpc_payload = rpc_message.json()
+    assert rpc_payload["id"] == "rpc-1"
+    assert rpc_payload["result"]["id"] == "task-1"
+    assert rpc_payload["result"]["status"]["message"]["parts"][0]["text"] == "Found two relevant papers."
 
 
 def test_hol_chat_session_endpoint_returns_normalized_history(
@@ -493,8 +565,29 @@ def test_hol_chat_session_endpoint_returns_normalized_history(
     assert response.status_code == 200
     payload = response.json()
     assert payload["session_id"] == "session-123"
+    assert payload["broker_response"]["mode"] == "session"
     assert len(payload["history"]) == 2
     assert payload["history"][1]["content"] == "hi there"
+
+
+def test_hol_chat_session_endpoint_uses_direct_fallback_for_transient_errors(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failing_create_session(uaid, transport=None, as_uaid=None):
+        raise hol_client.HolClientError("504 Gateway Timeout: registry broker request failed")
+
+    monkeypatch.setattr("api.main.hol_create_session", _failing_create_session)
+
+    response = client.post(
+        "/api/hol/chat/session",
+        json={"uaid": "uaid:aid:demo"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"].startswith("hol-direct:")
+    assert payload["broker_response"]["mode"] == "direct"
+    assert "504" in payload["broker_response"]["fallback_reason"]
 
 
 def test_hol_chat_message_endpoint_returns_broker_response_and_history(
@@ -520,8 +613,131 @@ def test_hol_chat_message_endpoint_returns_broker_response_and_history(
     assert response.status_code == 200
     payload = response.json()
     assert payload["session_id"] == "session-123"
+    assert payload["broker_response"]["mode"] == "session"
     assert payload["broker_response"]["reply"] == "ack"
     assert payload["history"][0]["content"] == "ping"
+
+
+def test_hol_chat_message_endpoint_normalizes_non_dict_broker_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.main.hol_send_message",
+        lambda session_id, message, as_uaid=None: "plain ack",
+    )
+    monkeypatch.setattr("api.main.hol_get_history", lambda session_id, limit=50: [])
+
+    response = client.post(
+        "/api/hol/chat/message",
+        json={"session_id": "session-123", "message": "ping"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["broker_response"] == {"mode": "session"}
+    assert payload["history"][1]["content"] == "plain ack"
+    assert payload["history"][1]["raw"] == {}
+
+
+def test_hol_chat_message_endpoint_extracts_a2a_json_rpc_message_text(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "api.main.hol_send_message",
+        lambda session_id, message, as_uaid=None: {
+            "jsonrpc": "2.0",
+            "id": "uss6nk549khmn360ewa",
+            "result": {
+                "id": "b82909bc1cb04f459bc93e9348648234",
+                "kind": "task",
+                "status": {
+                    "state": "completed",
+                    "message": {
+                        "kind": "message",
+                        "messageId": "b82909bc1cb04f459bc93e9348648234",
+                        "role": "agent",
+                        "parts": [
+                            {
+                                "kind": "text",
+                                "type": "text",
+                                "text": (
+                                    "No datasets are currently stored in the Synaptica Data Vault. "
+                                    "Upload a failed or underused dataset first, then ask again."
+                                ),
+                            }
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    monkeypatch.setattr("api.main.hol_get_history", lambda session_id, limit=50: [])
+
+    response = client.post(
+        "/api/hol/chat/message",
+        json={"session_id": "session-123", "message": "Hello"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["history"][1]["content"] == (
+        "No datasets are currently stored in the Synaptica Data Vault. "
+        "Upload a failed or underused dataset first, then ask again."
+    )
+
+
+def test_hol_chat_history_normalizes_stringified_a2a_json_rpc_message_text(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = {
+        "jsonrpc": "2.0",
+        "id": "w7gq0kki7hmn36457k",
+        "result": {
+            "id": "d63154595a224c49bb9a91540c55bb75",
+            "kind": "task",
+            "status": {
+                "state": "completed",
+                "message": {
+                    "kind": "message",
+                    "messageId": "d63154595a224c49bb9a91540c55bb75",
+                    "role": "agent",
+                    "parts": [
+                        {
+                            "kind": "text",
+                            "type": "text",
+                            "text": (
+                                "No datasets are currently stored in the Synaptica Data Vault. "
+                                "Upload a failed or underused dataset first, then ask again."
+                            ),
+                        }
+                    ],
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(
+        "api.main.hol_send_message",
+        lambda session_id, message, as_uaid=None: {"ok": True},
+    )
+    monkeypatch.setattr(
+        "api.main.hol_get_history",
+        lambda session_id, limit=50: [
+            {"role": "user", "content": "Hello!"},
+            {"role": "assistant", "content": json.dumps(envelope)},
+        ],
+    )
+
+    response = client.post(
+        "/api/hol/chat/message",
+        json={"session_id": "session-123", "message": "Hello!"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["history"][1]["content"] == (
+        "No datasets are currently stored in the Synaptica Data Vault. "
+        "Upload a failed or underused dataset first, then ask again."
+    )
 
 
 def test_create_session_normalizes_http_errors(

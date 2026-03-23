@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 
 import {
+  AgentRecord,
   ApiRequestError,
   DataAssetDetailRecord,
   DataAssetRecord,
@@ -30,6 +31,7 @@ import {
   DatasetProofBundle,
   anchorDataset,
   downloadDataset,
+  getAgents,
   getDataset,
   getDatasetCitation,
   getDatasetProof,
@@ -110,6 +112,20 @@ function actionFeedbackClass(tone: ActionFeedback['tone']): string {
 function normalizeHolErrorDetail(detail: unknown): DatasetHolUseErrorDetail | null {
   if (!detail || typeof detail !== 'object') return null
   return detail as DatasetHolUseErrorDetail
+}
+
+function extractHolSessionStatus(brokerResponse: Record<string, any> | null | undefined): {
+  mode: string
+  fallbackReason?: string | null
+} | null {
+  if (!brokerResponse || typeof brokerResponse !== 'object') return null
+  const mode = typeof brokerResponse.mode === 'string' ? brokerResponse.mode.trim() : ''
+  if (!mode) return null
+  return {
+    mode,
+    fallbackReason:
+      typeof brokerResponse.fallback_reason === 'string' ? brokerResponse.fallback_reason : null,
+  }
 }
 
 function holCandidateStatus(agent: HolAgentRecord): {
@@ -348,6 +364,10 @@ export function DataVault() {
   const [holSearchQuery, setHolSearchQuery] = useState('')
   const [holTransport, setHolTransport] = useState('')
   const [holDiagnostics, setHolDiagnostics] = useState<DatasetHolUseErrorDetail | null>(null)
+  const [holSessionStatus, setHolSessionStatus] = useState<{
+    mode: string
+    fallbackReason?: string | null
+  } | null>(null)
   const [copiedCitation, setCopiedCitation] = useState(false)
 
   const query = useQuery({
@@ -372,6 +392,25 @@ export function DataVault() {
         offset: 0,
       }),
   })
+
+  const localAgentsQuery = useQuery<AgentRecord[], Error>({
+    queryKey: ['data-vault-local-agents'],
+    queryFn: getAgents,
+    staleTime: 60_000,
+  })
+
+  const localHolAgents = useMemo(
+    () =>
+      (localAgentsQuery.data ?? [])
+        .filter(
+          (agent) =>
+            (agent.hol_registration_status || '').toLowerCase() === 'registered' &&
+            typeof agent.hol_uaid === 'string' &&
+            agent.hol_uaid.trim()
+        )
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [localAgentsQuery.data]
+  )
 
   const holCandidatePreviewQuery = useMemo(() => {
     if (holSearchQuery.trim()) return holSearchQuery.trim()
@@ -536,6 +575,7 @@ export function DataVault() {
       }),
     onMutate: () => {
       setHolDiagnostics(null)
+      setHolSessionStatus(null)
       setHolAgentFeedback({
         tone: 'info',
         message: 'Starting HOL data-agent session...',
@@ -544,6 +584,8 @@ export function DataVault() {
     onSuccess: async (result: DatasetHolUseResponse) => {
       setErrorMessage(null)
       setHolDiagnostics(null)
+      const sessionStatus = extractHolSessionStatus(result.broker_response)
+      setHolSessionStatus(sessionStatus)
       if (selectedDataset) {
         const refreshed = await getDataset(selectedDataset.id)
         setSelectedDataset(refreshed)
@@ -553,7 +595,10 @@ export function DataVault() {
         String(result.selected_agent?.name || result.selected_agent?.uaid || 'HOL agent')
       setHolAgentFeedback({
         tone: 'success',
-        message: `${agentName} responded via HOL session ${result.session_id}.`,
+        message:
+          sessionStatus?.mode === 'direct'
+            ? `${agentName} responded via direct HOL fallback ${result.session_id}.`
+            : `${agentName} responded via HOL session ${result.session_id}.`,
       })
       await query.refetch()
     },
@@ -561,6 +606,7 @@ export function DataVault() {
       const message = error.message || 'HOL data-agent call failed'
       const detail =
         error instanceof ApiRequestError ? normalizeHolErrorDetail(error.detail) : null
+      setHolSessionStatus(null)
       setHolDiagnostics(detail)
       setErrorMessage(message)
       setHolAgentFeedback({
@@ -634,6 +680,7 @@ export function DataVault() {
       setHolSearchQuery('')
       setHolTransport('')
       setHolDiagnostics(null)
+      setHolSessionStatus(null)
       const detail = await getDataset(datasetId)
       setSelectedDataset(detail)
       setSelectedDatasetProof(detail.proof_bundle ?? null)
@@ -1120,6 +1167,7 @@ export function DataVault() {
             setHolSearchQuery('')
             setHolTransport('')
             setHolDiagnostics(null)
+            setHolSessionStatus(null)
           }
         }}
       >
@@ -1203,6 +1251,32 @@ export function DataVault() {
 
               <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
                 <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Ask HOL agent about this dataset</p>
+                {localHolAgents.length > 0 && (
+                  <div className="mb-3 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
+                    <p className="text-xs uppercase tracking-wide text-sky-200">
+                      Your Registered HOL Agents
+                    </p>
+                    <p className="mt-1 text-xs text-slate-300">
+                      Preferred demo path. Pick one to prefill the UAID override and chat your own registered agent directly.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {localHolAgents.map((agent) => (
+                        <Button
+                          key={agent.agent_id}
+                          type="button"
+                          variant="outline"
+                          className="border-sky-400/30 bg-transparent text-sky-100 hover:bg-sky-500/10"
+                          onClick={() => {
+                            setHolUaidOverride(agent.hol_uaid || '')
+                            setHolTransport('http')
+                          }}
+                        >
+                          {agent.name}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="grid gap-2 md:grid-cols-2">
                   <Input
                     placeholder="Optional UAID override"
@@ -1396,6 +1470,16 @@ export function DataVault() {
                 </div>
               )}
 
+              {holSessionStatus?.mode === 'direct' && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                  <p className="mb-1 font-medium uppercase tracking-wide text-amber-200">HOL fallback mode</p>
+                  <p>Using direct UAID messaging because broker session creation was transiently unavailable.</p>
+                  {holSessionStatus.fallbackReason && (
+                    <p className="mt-2 text-amber-200">{holSessionStatus.fallbackReason}</p>
+                  )}
+                </div>
+              )}
+
               {holDiagnostics && (
                 <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
                   <p className="mb-2 font-medium uppercase tracking-wide text-amber-200">HOL diagnostics</p>
@@ -1494,7 +1578,17 @@ export function DataVault() {
                           >
                             <div><span className="text-slate-500">Agent:</span> {agentName}</div>
                             <div><span className="text-slate-500">Session:</span> {String(entry.session_id || 'N/A')}</div>
+                            <div>
+                              <span className="text-slate-500">Mode:</span>{' '}
+                              {String((entry.broker_response as Record<string, any> | undefined)?.mode || 'session')}
+                            </div>
                             <div><span className="text-slate-500">Started:</span> {formatDate(String(entry.created_at || ''))}</div>
+                            {typeof (entry.broker_response as Record<string, any> | undefined)?.fallback_reason === 'string' && (
+                              <div>
+                                <span className="text-slate-500">Fallback reason:</span>{' '}
+                                {String((entry.broker_response as Record<string, any>).fallback_reason)}
+                              </div>
+                            )}
                             <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-slate-300">
                               {responsePreview}
                             </pre>

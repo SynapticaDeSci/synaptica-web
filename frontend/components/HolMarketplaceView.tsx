@@ -28,6 +28,42 @@ const KNOWN_GOOD_UAIDS = {
   hederaMcp:
     'uaid:aid:9WADT6xgCjoT3XP4QCsfQdJwPn8RhXCufoHQcbKRTzdS6fTnmY4BxFKPrwjqkiT4aC',
 } as const
+const PINNED_TEST_AGENTS: HolAgentRecord[] = [
+  {
+    uaid: KNOWN_GOOD_UAIDS.ping,
+    name: 'Registry Ping Agent',
+    description: 'Stateless ping/pong agent for verifying Registry Broker chat connectivity.',
+    capabilities: ['ping', 'connectivity'],
+    categories: ['Testing'],
+    transports: ['a2a'],
+    pricing: {},
+    registry: 'a2a-registry',
+    available: null,
+    availability_status: 'pinned test agent',
+    trust_score: null,
+    trust_scores: null,
+    source_url: null,
+    adapter: 'a2a-registry-adapter',
+    protocol: 'a2a',
+  },
+  {
+    uaid: KNOWN_GOOD_UAIDS.hederaMcp,
+    name: 'Hedera MCP Agent',
+    description: 'Pinned test agent for broker chat against the Hedera MCP surface.',
+    capabilities: ['hedera', 'mcp'],
+    categories: ['Infrastructure'],
+    transports: ['http'],
+    pricing: {},
+    registry: 'hashgraph-online',
+    available: null,
+    availability_status: 'pinned test agent',
+    trust_score: null,
+    trust_scores: null,
+    source_url: null,
+    adapter: null,
+    protocol: 'http',
+  },
+]
 const HIGH_TRUST_THRESHOLD = 10
 
 function normalizeForMatch(value: string | null | undefined): string {
@@ -112,6 +148,13 @@ function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
 
   if (!isAvailable) {
+    if (isKnownGoodHolAgent(agent)) {
+      return {
+        supported: true,
+        reason:
+          'Pinned test agent. HOL may currently mark it unavailable, but it is still worth trying for broker-chat validation.',
+      }
+    }
     return {
       supported: false,
       reason: 'This agent is discoverable in HOL but is not currently marked available by the broker.',
@@ -137,6 +180,20 @@ function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?
   return { supported: true }
 }
 
+function extractHolChatStatus(brokerResponse: Record<string, any> | null | undefined): {
+  mode: string
+  fallbackReason?: string | null
+} | null {
+  if (!brokerResponse || typeof brokerResponse !== 'object') return null
+  const mode = typeof brokerResponse.mode === 'string' ? brokerResponse.mode.trim() : ''
+  if (!mode) return null
+  return {
+    mode,
+    fallbackReason:
+      typeof brokerResponse.fallback_reason === 'string' ? brokerResponse.fallback_reason : null,
+  }
+}
+
 export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRecord[] }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [showAvailableOnly, setShowAvailableOnly] = useState(false)
@@ -147,6 +204,10 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
   const [chatMessages, setChatMessages] = useState<HolChatMessageRecord[]>([])
   const [chatDraft, setChatDraft] = useState('')
   const [chatError, setChatError] = useState<string | null>(null)
+  const [chatStatus, setChatStatus] = useState<{
+    mode: string
+    fallbackReason?: string | null
+  } | null>(null)
 
   const { data, isLoading, isError, error, refetch } = useQuery<
     { agents: HolAgentRecord[]; query: string },
@@ -167,10 +228,12 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
       setChatError(null)
       setChatMessages([])
       setChatSessionId(null)
+      setChatStatus(null)
     },
     onSuccess: (result) => {
       setChatSessionId(result.session_id)
       setChatMessages(result.history ?? [])
+      setChatStatus(extractHolChatStatus(result.broker_response))
     },
     onError: (error: Error) => {
       setChatError(error.message || 'Failed to start HOL chat session')
@@ -189,6 +252,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
     onSuccess: (result) => {
       setChatMessages(result.history ?? [])
       setChatDraft('')
+      setChatStatus(extractHolChatStatus(result.broker_response))
     },
     onError: (error: Error) => {
       const message =
@@ -205,11 +269,23 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
     setChatMessages([])
     setChatDraft('')
     setChatError(null)
+    setChatStatus(null)
   }, [selectedAgent])
 
   const agents = useMemo(
     () => [...(data?.agents ?? [])].sort(compareAgentsByTrust),
     [data]
+  )
+  const pinnedTestAgents = useMemo(() => {
+    const byUaid = new Map(agents.map((agent) => [agent.uaid, agent]))
+    return PINNED_TEST_AGENTS.map((fallback) => {
+      const discovered = byUaid.get(fallback.uaid)
+      return discovered ? { ...fallback, ...discovered } : fallback
+    })
+  }, [agents])
+  const pinnedTestAgentUaids = useMemo(
+    () => new Set(PINNED_TEST_AGENTS.map((agent) => agent.uaid)),
+    []
   )
   const filteredAgents = useMemo(
     () =>
@@ -237,27 +313,33 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
   const recommendedAgents = useMemo(() => {
     const seen = new Set<string>()
     const recommended = filteredAgents.filter((agent) => {
-      if (!isKnownGoodHolAgent(agent)) {
+      if (pinnedTestAgentUaids.has(agent.uaid) || !isOpenRouterRegistryAgent(agent)) {
         return false
       }
       seen.add(agent.uaid)
       return true
     })
     return { recommended, seen }
-  }, [filteredAgents])
+  }, [filteredAgents, pinnedTestAgentUaids])
   const availableAgents = useMemo(
     () =>
       filteredAgents.filter(
-        (agent) => agent.available === true && !recommendedAgents.seen.has(agent.uaid)
+        (agent) =>
+          agent.available === true &&
+          !pinnedTestAgentUaids.has(agent.uaid) &&
+          !recommendedAgents.seen.has(agent.uaid)
       ),
-    [filteredAgents, recommendedAgents]
+    [filteredAgents, pinnedTestAgentUaids, recommendedAgents]
   )
   const unavailableAgents = useMemo(
     () =>
       filteredAgents.filter(
-        (agent) => agent.available !== true && !recommendedAgents.seen.has(agent.uaid)
+        (agent) =>
+          agent.available !== true &&
+          !pinnedTestAgentUaids.has(agent.uaid) &&
+          !recommendedAgents.seen.has(agent.uaid)
       ),
-    [filteredAgents, recommendedAgents]
+    [filteredAgents, pinnedTestAgentUaids, recommendedAgents]
   )
   const errorMessage = isError ? error?.message ?? 'Failed to load HOL agents' : null
   const selectedAgentHint = useMemo(
@@ -420,7 +502,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
         <div>
           <h2 className="text-2xl font-semibold text-white">HOL Registry</h2>
           <p className="mt-1 text-sm text-slate-400">
-            Browse all discovered HOL agents, see availability and trust separately, and use the recommended rail or your own registered agents for the most reliable demos.
+            Browse discovered HOL agents, but use your own registered Synaptica agents first for the most reliable hackathon demo path.
           </p>
         </div>
       </div>
@@ -459,7 +541,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
           </label>
         </div>
         <div className="rounded-2xl border border-white/10 bg-slate-900/30 p-4 text-sm text-slate-400">
-          Many HOL agents are discoverable but not consistently usable. For demos, prefer your own registered agents, the Ping Agent, Hedera MCP Agent, and OpenRouter-backed entries when available.
+          Many HOL agents are discoverable but not consistently usable. Public registry results are exploratory; for demos, prefer your own registered agents, then Ping Agent, Hedera MCP Agent, and OpenRouter-backed entries when available.
         </div>
       </div>
 
@@ -541,11 +623,27 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
         </div>
       )}
 
+      {!isLoading && !errorMessage && pinnedTestAgents.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-200">
+              Pinned Test Agents
+            </h3>
+            <span className="text-xs text-slate-400">
+              {pinnedTestAgents.length} agents
+            </span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {pinnedTestAgents.map((agent) => renderAgentCard(agent))}
+          </div>
+        </div>
+      )}
+
       {!isLoading && !errorMessage && recommendedAgents.recommended.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-200">
-              Recommended For Testing
+              Registry-Recommended
             </h3>
             <span className="text-xs text-slate-400">
               {recommendedAgents.recommended.length} agents
@@ -608,6 +706,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
             setChatMessages([])
             setChatDraft('')
             setChatError(null)
+            setChatStatus(null)
           }
         }}
       >
@@ -663,6 +762,22 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
               {chatError && (
                 <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
                   {chatError}
+                </div>
+              )}
+              {chatStatus && (
+                <div
+                  className={`rounded-lg border px-3 py-2 text-xs ${
+                    chatStatus.mode === 'direct'
+                      ? 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+                      : 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+                  }`}
+                >
+                  {chatStatus.mode === 'direct'
+                    ? 'Using direct UAID fallback because broker session creation was transiently unavailable.'
+                    : 'Using broker session mode.'}
+                  {chatStatus.mode === 'direct' && chatStatus.fallbackReason && (
+                    <div className="mt-1 text-amber-100">{chatStatus.fallbackReason}</div>
+                  )}
                 </div>
               )}
               {selectedAgentSessionSupport.reason && (
