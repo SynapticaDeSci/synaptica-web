@@ -1,0 +1,31 @@
+# Synaptica Frontend — Next.js
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+
+COPY frontend/ .
+
+# Build-time env vars — these will be overridden via Cloud Run env if needed
+ARG NEXT_PUBLIC_BACKEND_URL
+ARG NEXT_PUBLIC_RESEARCH_URL
+ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
+ENV NEXT_PUBLIC_RESEARCH_URL=$NEXT_PUBLIC_RESEARCH_URL
+
+RUN npm run build
+
+# Production runner
+FROM node:20-slim AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/public ./public
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]
