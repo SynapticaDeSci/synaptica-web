@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -9,6 +10,7 @@ from shared.database import (
     AgentReputation,
     AgentsCacheEntry,
     DataAsset,
+    HolAgentVerification,
     SessionLocal,
 )
 from shared.hol_client import HolClientConfigurationError, HolClientError
@@ -17,6 +19,7 @@ from shared.hol_client import HolClientConfigurationError, HolClientError
 def _reset_state():
     session = SessionLocal()
     try:
+        session.query(HolAgentVerification).delete()
         session.query(DataAsset).delete()
         session.query(AgentsCacheEntry).delete()
         session.query(AgentReputation).delete()
@@ -280,6 +283,16 @@ def test_dataset_hol_use_autodiscovery_persists_session_trace(
     assert len(hol_sessions) == 1
     assert hol_sessions[0]["session_id"] == "session-123"
     assert hol_sessions[0]["selected_agent"]["uaid"] == "uaid:aid:hol-data"
+    assert hol_sessions[0]["selected_agent"]["synaptica_verified"] is True
+
+    session = SessionLocal()
+    try:
+        record = session.get(HolAgentVerification, "uaid:aid:hol-data")
+        assert record is not None
+        assert record.success_count == 1
+        assert record.last_success_mode == "session"
+    finally:
+        session.close()
 
 
 def test_dataset_hol_use_autodiscovery_skips_broken_adapter_candidate(
@@ -438,7 +451,7 @@ def test_dataset_hol_use_filters_non_broker_chatable_candidates(
     assert len(detail["rejected_candidates"]) == 2
 
 
-def test_dataset_hol_use_filters_unavailable_candidates(
+def test_dataset_hol_use_filters_blocked_candidates(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -470,7 +483,120 @@ def test_dataset_hol_use_filters_unavailable_candidates(
     detail = response.json()["detail"]
     assert "No broker-chatable HOL agents found" in detail["message"]
     assert detail["rejected_candidates"][0]["uaid"] == "uaid:aid:unavailable"
-    assert "not marked available" in detail["rejected_candidates"][0]["reason"]
+    assert "offline" in detail["rejected_candidates"][0]["reason"]
+
+
+def test_dataset_hol_use_allows_exploratory_http_candidate(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _ExploratoryAgent:
+        uaid = "uaid:aid:exploratory"
+        name = "Exploratory Agent"
+        description = "Discoverable but not broker-marked available yet"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = False
+        availability_status = None
+        source_url = "https://example.com/exploratory"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=10: [_ExploratoryAgent()],
+    )
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", lambda uaid, transport=None, as_uaid=None: "session-exploratory")
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_send_message",
+        lambda session_id, message, as_uaid=None: {"reply": "exploratory ok", "sessionId": session_id},
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_agent"]["uaid"] == "uaid:aid:exploratory"
+    assert payload["selected_agent"]["synaptica_verified"] is True
+    assert payload["selected_agent"]["usability_tier"] == "verified"
+
+
+def test_dataset_hol_use_prefers_synaptica_verified_candidates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _VerifiedAgent:
+        uaid = "uaid:aid:verified-data"
+        name = "Verified Data Agent"
+        description = "Previously verified by Synaptica"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = False
+        availability_status = None
+        source_url = "https://example.com/verified"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    class _BrokerAgent:
+        uaid = "uaid:aid:broker-data"
+        name = "Broker Data Agent"
+        description = "Broker available but not yet verified"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/broker"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    session = SessionLocal()
+    try:
+        session.add(
+            HolAgentVerification(  # type: ignore[call-arg]
+                uaid="uaid:aid:verified-data",
+                last_success_at=datetime.utcnow(),
+                last_success_mode="direct",
+                success_count=1,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_search_agents",
+        lambda query, limit=10: [_BrokerAgent(), _VerifiedAgent()],
+    )
+
+    def _mock_create_session(uaid, transport=None, as_uaid=None):
+        if uaid == "uaid:aid:broker-data":
+            raise AssertionError("Verified candidate should be tried before broker-only candidate")
+        return "session-verified"
+
+    monkeypatch.setattr("api.routes.data_agent.hol_create_session", _mock_create_session)
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_send_message",
+        lambda session_id, message, as_uaid=None: {"reply": "verified ok", "sessionId": session_id},
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_agent"]["uaid"] == "uaid:aid:verified-data"
 
 
 def test_dataset_hol_use_falls_back_to_direct_message_for_transient_session_failures(
@@ -576,6 +702,51 @@ def test_dataset_hol_use_does_not_fallback_for_non_transient_failures(
     detail = response.json()["detail"]
     assert expected_message in detail["message"]
     assert detail["attempted_errors"]
+
+
+def test_dataset_hol_use_persists_hard_reachability_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    upload = _upload_dataset(client)
+    dataset_id = upload.json()["id"]
+
+    class _Agent:
+        uaid = "uaid:aid:hard-fail"
+        name = "Hard Fail Agent"
+        description = "Definitively unreachable"
+        capabilities = ["data", "analysis"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/hard-fail"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    monkeypatch.setattr("api.routes.data_agent.hol_search_agents", lambda query, limit=5: [_Agent()])
+    monkeypatch.setattr(
+        "api.routes.data_agent.hol_create_session",
+        lambda uaid, transport=None, as_uaid=None: (_ for _ in ()).throw(
+            HolClientError(
+                "422 Unprocessable Entity: This A2A agent is currently unreachable from the broker (agent card or endpoint check failed)."
+            )
+        ),
+    )
+
+    response = client.post(f"/api/data-agent/datasets/{dataset_id}/hol-use", json={})
+    assert response.status_code == 502
+
+    session = SessionLocal()
+    try:
+        record = session.get(HolAgentVerification, "uaid:aid:hard-fail")
+        assert record is not None
+        assert record.failure_count == 1
+        assert "currently unreachable from the broker" in str(record.last_hard_failure_reason)
+    finally:
+        session.close()
 
 
 def test_built_in_data_agent_a2a_endpoints_respond(client: TestClient):

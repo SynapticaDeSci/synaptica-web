@@ -67,6 +67,13 @@ from shared.hol_client import (
     send_message as hol_send_message,
     should_use_direct_chat_fallback,
 )
+from shared.hol_agent_usability import (
+    apply_hol_agent_usability,
+    get_hol_agent_verification_map,
+    is_hol_hard_availability_failure,
+    record_hol_agent_hard_failure,
+    record_hol_agent_success,
+)
 from shared.metadata import (
     AgentMetadataPayload,
     PinataCredentialsError,
@@ -103,6 +110,7 @@ logger = logging.getLogger(__name__)
 BUILT_IN_DATA_AGENT_ID = "data-agent-001"
 HOL_DIRECT_SESSION_HISTORY_LIMIT = 50
 _hol_direct_chat_sessions: Dict[str, Dict[str, Any]] = {}
+_hol_broker_chat_sessions: Dict[str, Dict[str, Any]] = {}
 
 
 @lru_cache(maxsize=8)
@@ -839,12 +847,18 @@ class HolAgentRecord(BaseModel):
     pricing: Dict[str, Any]
     registry: Optional[str] = None
     available: Optional[bool] = None
+    broker_marked_available: Optional[bool] = None
     availability_status: Optional[str] = None
     trust_score: Optional[float] = None
     trust_scores: Optional[Dict[str, float]] = None
     source_url: Optional[str] = None
     adapter: Optional[str] = None
     protocol: Optional[str] = None
+    synaptica_verified: bool = False
+    synaptica_verified_at: Optional[str] = None
+    synaptica_verification_mode: Optional[Literal["session", "direct"]] = None
+    usability_tier: Literal["verified", "broker_available", "exploratory", "blocked"] = "exploratory"
+    usability_reason: str = ""
 
 
 class HolAgentsSearchResponse(BaseModel):
@@ -1025,14 +1039,32 @@ def _coerce_hol_raw_payload(payload: Any) -> Dict[str, Any]:
     return {}
 
 
-def _create_hol_direct_chat_session(uaid: str, *, fallback_reason: Optional[str] = None) -> str:
+def _create_hol_direct_chat_session(
+    uaid: str,
+    *,
+    fallback_reason: Optional[str] = None,
+    transport: Optional[str] = None,
+) -> str:
     session_id = f"{HOL_DIRECT_SESSION_PREFIX}{uuid.uuid4()}"
     _hol_direct_chat_sessions[session_id] = {
         "uaid": uaid,
         "history": [],
         "fallback_reason": fallback_reason,
+        "transport": transport,
     }
     return session_id
+
+
+def _remember_hol_broker_chat_session(
+    session_id: str,
+    *,
+    uaid: str,
+    transport: Optional[str] = None,
+) -> None:
+    _hol_broker_chat_sessions[session_id] = {
+        "uaid": uaid,
+        "transport": transport,
+    }
 
 
 def _is_hol_direct_chat_session(session_id: str) -> bool:
@@ -1041,6 +1073,10 @@ def _is_hol_direct_chat_session(session_id: str) -> bool:
 
 def _get_hol_direct_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
     return _hol_direct_chat_sessions.get(session_id)
+
+
+def _get_hol_broker_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
+    return _hol_broker_chat_sessions.get(session_id)
 
 
 def _append_hol_direct_chat_history(
@@ -1059,6 +1095,47 @@ def _append_hol_direct_chat_history(
         history = history[-HOL_DIRECT_SESSION_HISTORY_LIMIT:]
     session["history"] = history
     return list(history)
+
+
+def _record_hol_agent_success_now(
+    uaid: str,
+    *,
+    mode: Optional[str],
+    transport: Optional[str] = None,
+) -> None:
+    session = SessionLocal()
+    try:
+        record_hol_agent_success(
+            session,
+            uaid,
+            mode=mode,
+            transport=transport,
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
+def _record_hol_agent_hard_failure_now(
+    uaid: str,
+    *,
+    reason: str,
+    transport: Optional[str] = None,
+) -> None:
+    if not is_hol_hard_availability_failure(reason):
+        return
+
+    session = SessionLocal()
+    try:
+        record_hol_agent_hard_failure(
+            session,
+            uaid,
+            reason=reason,
+            transport=transport,
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 @asynccontextmanager
@@ -1451,8 +1528,21 @@ async def hol_agents_search(
         agents = await run_in_threadpool(hol_search_agents, query, limit=broker_limit)
     except HolClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    db = SessionLocal()
+    try:
+        verification_map = get_hol_agent_verification_map(db, [agent.uaid for agent in agents])
+    finally:
+        db.close()
+
+    for agent in agents:
+        apply_hol_agent_usability(agent, verification_map.get(agent.uaid))
     if only_available:
-        agents = [agent for agent in agents if agent.available is True][:capped_limit]
+        agents = [
+            agent
+            for agent in agents
+            if getattr(agent, "usability_tier", "exploratory") in {"verified", "broker_available"}
+        ][:capped_limit]
 
     records: List[HolAgentRecord] = []
     for agent in agents:
@@ -1467,12 +1557,18 @@ async def hol_agents_search(
                 pricing=agent.pricing,
                 registry=agent.registry,
                 available=agent.available,
+                broker_marked_available=getattr(agent, "broker_marked_available", None),
                 availability_status=agent.availability_status,
                 trust_score=getattr(agent, "trust_score", None),
                 trust_scores=getattr(agent, "trust_scores", None),
                 source_url=getattr(agent, "source_url", None),
                 adapter=getattr(agent, "adapter", None),
                 protocol=getattr(agent, "protocol", None),
+                synaptica_verified=bool(getattr(agent, "synaptica_verified", False)),
+                synaptica_verified_at=getattr(agent, "synaptica_verified_at", None),
+                synaptica_verification_mode=getattr(agent, "synaptica_verification_mode", None),
+                usability_tier=getattr(agent, "usability_tier", "exploratory"),
+                usability_reason=getattr(agent, "usability_reason", ""),
             )
         )
 
@@ -1495,6 +1591,11 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
             as_uaid=request.as_uaid,
         )
     except HolClientError as exc:
+        _record_hol_agent_hard_failure_now(
+            uaid,
+            reason=str(exc),
+            transport=request.transport,
+        )
         if _should_use_hol_direct_chat_fallback(exc):
             logger.warning(
                 "HOL create_session failed for %s, enabling direct chat fallback: %s",
@@ -1504,6 +1605,7 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
             fallback_session_id = _create_hol_direct_chat_session(
                 uaid,
                 fallback_reason=str(exc),
+                transport=request.transport,
             )
             return HolChatSessionResponse(
                 success=True,
@@ -1517,6 +1619,12 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
                 history=[],
             )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    _remember_hol_broker_chat_session(
+        session_id,
+        uaid=uaid,
+        transport=request.transport,
+    )
 
     try:
         history = await run_in_threadpool(hol_get_history, session_id, limit=50)
@@ -1563,6 +1671,11 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 as_uaid=request.as_uaid,
             )
         except HolClientError as exc:
+            _record_hol_agent_hard_failure_now(
+                uaid,
+                reason=str(exc),
+                transport=str(direct_session.get("transport") or "").strip() or None,
+            )
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         fallback_reason = str(direct_session.get("fallback_reason") or "").strip() or None
@@ -1586,6 +1699,11 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 ),
             ],
         )
+        _record_hol_agent_success_now(
+            uaid,
+            mode="direct",
+            transport=str(direct_session.get("transport") or "").strip() or None,
+        )
         return HolChatSessionResponse(
             success=True,
             session_id=session_id,
@@ -1594,6 +1712,9 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
             history=history,
         )
 
+    session_meta = _get_hol_broker_chat_session(session_id) or {}
+    broker_session_uaid = str(session_meta.get("uaid") or "").strip() or None
+    broker_transport = str(session_meta.get("transport") or "").strip() or None
     try:
         await run_in_threadpool(hol_check_sidecar_health)
         broker_response = await run_in_threadpool(
@@ -1603,6 +1724,12 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
             as_uaid=request.as_uaid,
         )
     except HolClientError as exc:
+        if broker_session_uaid:
+            _record_hol_agent_hard_failure_now(
+                broker_session_uaid,
+                reason=str(exc),
+                transport=broker_transport,
+            )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     normalized_broker_response = coerce_hol_broker_response(
@@ -1629,6 +1756,13 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 raw=_coerce_hol_raw_payload(broker_response),
             ),
         ]
+
+    if broker_session_uaid:
+        _record_hol_agent_success_now(
+            broker_session_uaid,
+            mode="session",
+            transport=broker_transport,
+        )
 
     return HolChatSessionResponse(
         success=True,

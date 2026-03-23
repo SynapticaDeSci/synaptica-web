@@ -368,12 +368,18 @@ class HolAgentSummary:
     pricing: Dict[str, Any]
     registry: Optional[str] = None
     available: Optional[bool] = None
+    broker_marked_available: Optional[bool] = None
     availability_status: Optional[str] = None
     trust_score: Optional[float] = None
     trust_scores: Optional[Dict[str, float]] = None
     source_url: Optional[str] = None
     adapter: Optional[str] = None
     protocol: Optional[str] = None
+    synaptica_verified: bool = False
+    synaptica_verified_at: Optional[str] = None
+    synaptica_verification_mode: Optional[str] = None
+    usability_tier: str = "exploratory"
+    usability_reason: str = "Discoverable in HOL, but not yet verified by Synaptica."
 
 
 def _coerce_optional_bool(value: Any) -> Optional[bool]:
@@ -465,6 +471,8 @@ def _normalize_hol_agent_entry(item: Dict[str, Any]) -> Optional[HolAgentSummary
     adapter = meta.get("adapter") or payload.get("adapter")
     protocol = meta.get("protocol") or payload.get("protocol")
 
+    normalized_available = _coerce_optional_bool(available)
+
     return HolAgentSummary(
         uaid=uaid,
         name=str(name),
@@ -474,7 +482,8 @@ def _normalize_hol_agent_entry(item: Dict[str, Any]) -> Optional[HolAgentSummary
         transports=transports,
         pricing=pricing if isinstance(pricing, dict) else {},
         registry=str(registry) if registry else None,
-        available=_coerce_optional_bool(available),
+        available=normalized_available,
+        broker_marked_available=normalized_available,
         availability_status=str(availability_status) if availability_status else None,
         trust_score=trust_score,
         trust_scores=trust_scores,

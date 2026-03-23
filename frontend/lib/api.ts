@@ -518,12 +518,18 @@ export interface HolAgentRecord {
   };
   registry?: string | null;
   available?: boolean | null;
+  broker_marked_available?: boolean | null;
   availability_status?: string | null;
   trust_score?: number | null;
   trust_scores?: Record<string, number> | null;
   source_url?: string | null;
   adapter?: string | null;
   protocol?: string | null;
+  synaptica_verified?: boolean;
+  synaptica_verified_at?: string | null;
+  synaptica_verification_mode?: 'session' | 'direct' | null;
+  usability_tier?: 'verified' | 'broker_available' | 'exploratory' | 'blocked';
+  usability_reason?: string;
 }
 
 export type HolRegisterMode = 'quote' | 'register';

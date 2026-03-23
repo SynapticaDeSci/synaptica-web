@@ -39,12 +39,19 @@ const PINNED_TEST_AGENTS: HolAgentRecord[] = [
     pricing: {},
     registry: 'a2a-registry',
     available: null,
+    broker_marked_available: null,
     availability_status: 'pinned test agent',
     trust_score: null,
     trust_scores: null,
     source_url: null,
     adapter: 'a2a-registry-adapter',
     protocol: 'a2a',
+    synaptica_verified: false,
+    synaptica_verified_at: null,
+    synaptica_verification_mode: null,
+    usability_tier: 'exploratory',
+    usability_reason:
+      'Curated test agent. HOL may not currently mark it available, so treat this as an exploratory chat attempt until Synaptica verifies it.',
   },
   {
     uaid: KNOWN_GOOD_UAIDS.hederaMcp,
@@ -56,12 +63,19 @@ const PINNED_TEST_AGENTS: HolAgentRecord[] = [
     pricing: {},
     registry: 'hashgraph-online',
     available: null,
+    broker_marked_available: null,
     availability_status: 'pinned test agent',
     trust_score: null,
     trust_scores: null,
     source_url: null,
     adapter: null,
     protocol: 'http',
+    synaptica_verified: false,
+    synaptica_verified_at: null,
+    synaptica_verification_mode: null,
+    usability_tier: 'exploratory',
+    usability_reason:
+      'Curated test agent. HOL may not currently mark it available, so treat this as an exploratory chat attempt until Synaptica verifies it.',
   },
 ]
 const HIGH_TRUST_THRESHOLD = 10
@@ -84,14 +98,6 @@ function isOpenRouterRegistryAgent(agent: HolAgentRecord): boolean {
     registry.includes('openrouter') ||
     name.includes('openrouter') ||
     description.includes('openrouter')
-  )
-}
-
-function isKnownGoodHolAgent(agent: HolAgentRecord): boolean {
-  return (
-    agent.uaid === KNOWN_GOOD_UAIDS.ping ||
-    agent.uaid === KNOWN_GOOD_UAIDS.hederaMcp ||
-    isOpenRouterRegistryAgent(agent)
   )
 }
 
@@ -142,42 +148,67 @@ function holAgentChatHint(agent: HolAgentRecord): {
   }
 }
 
+function holUsabilityBadge(agent: HolAgentRecord): {
+  label: string
+  toneClass: string
+} {
+  const tier = String(agent.usability_tier ?? 'exploratory').trim().toLowerCase()
+  if (tier === 'verified') {
+    return {
+      label: 'Synaptica verified',
+      toneClass: 'bg-emerald-500/20 text-emerald-200',
+    }
+  }
+  if (tier === 'broker_available') {
+    return {
+      label: 'Broker available',
+      toneClass: 'bg-sky-500/20 text-sky-200',
+    }
+  }
+  if (tier === 'blocked') {
+    return {
+      label: 'Blocked',
+      toneClass: 'bg-red-500/20 text-red-200',
+    }
+  }
+  return {
+    label: 'Exploratory',
+    toneClass: 'bg-amber-500/20 text-amber-200',
+  }
+}
+
 function holSessionSupport(agent: HolAgentRecord): { supported: boolean; reason?: string } {
-  const isAvailable = agent.available === true
+  const usabilityTier = String(agent.usability_tier ?? 'exploratory').trim().toLowerCase()
+  const usabilityReason = String(agent.usability_reason ?? '').trim()
   const protocol = String(agent.protocol ?? '').trim().toLowerCase()
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
 
-  if (!isAvailable) {
-    if (isKnownGoodHolAgent(agent)) {
-      return {
-        supported: true,
-        reason:
-          'Pinned test agent. HOL may currently mark it unavailable, but it is still worth trying for broker-chat validation.',
-      }
-    }
+  if (usabilityTier === 'blocked') {
     return {
       supported: false,
-      reason: 'This agent is discoverable in HOL but is not currently marked available by the broker.',
+      reason: usabilityReason || 'This HOL agent is currently blocked by Synaptica usability checks.',
     }
   }
 
   if (protocol === 'acp' || adapter === 'virtuals-protocol-adapter') {
     return {
       supported: true,
-      reason:
-        'Virtuals ACP is often job-based and may require provider wallet/payment setup, so chat may fail even though this agent appears available.',
+      reason: usabilityReason
+        ? `${usabilityReason} Virtuals ACP is often job-based and may require provider wallet/payment setup.`
+        : 'Virtuals ACP is often job-based and may require provider wallet/payment setup, so chat may fail even when discoverable.',
     }
   }
 
   if (['a2a', 'uagent'].includes(protocol) || ['a2a-registry-adapter', 'agentverse-adapter'].includes(adapter)) {
     return {
       supported: true,
-      reason:
-        'This protocol/adapter is available but commonly unreliable in this broker environment. Chat is allowed, but failures are expected.',
+      reason: usabilityReason
+        ? `${usabilityReason} This protocol/adapter is commonly unreliable in the current broker environment.`
+        : 'This protocol/adapter is commonly unreliable in the current broker environment. Chat is allowed, but failures are expected.',
     }
   }
 
-  return { supported: true }
+  return { supported: true, reason: usabilityReason || undefined }
 }
 
 function extractHolChatStatus(brokerResponse: Record<string, any> | null | undefined): {
@@ -321,26 +352,19 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
     })
     return { recommended, seen }
   }, [filteredAgents, pinnedTestAgentUaids])
-  const availableAgents = useMemo(
-    () =>
-      filteredAgents.filter(
-        (agent) =>
-          agent.available === true &&
-          !pinnedTestAgentUaids.has(agent.uaid) &&
-          !recommendedAgents.seen.has(agent.uaid)
-      ),
-    [filteredAgents, pinnedTestAgentUaids, recommendedAgents]
-  )
-  const unavailableAgents = useMemo(
-    () =>
-      filteredAgents.filter(
-        (agent) =>
-          agent.available !== true &&
-          !pinnedTestAgentUaids.has(agent.uaid) &&
-          !recommendedAgents.seen.has(agent.uaid)
-      ),
-    [filteredAgents, pinnedTestAgentUaids, recommendedAgents]
-  )
+  const tieredAgents = useMemo(() => {
+    const remaining = filteredAgents.filter(
+      (agent) =>
+        !pinnedTestAgentUaids.has(agent.uaid) &&
+        !recommendedAgents.seen.has(agent.uaid)
+    )
+    return {
+      verified: remaining.filter((agent) => agent.usability_tier === 'verified'),
+      brokerAvailable: remaining.filter((agent) => agent.usability_tier === 'broker_available'),
+      exploratory: remaining.filter((agent) => (agent.usability_tier ?? 'exploratory') === 'exploratory'),
+      blocked: remaining.filter((agent) => agent.usability_tier === 'blocked'),
+    }
+  }, [filteredAgents, pinnedTestAgentUaids, recommendedAgents])
   const errorMessage = isError ? error?.message ?? 'Failed to load HOL agents' : null
   const selectedAgentHint = useMemo(
     () => (selectedAgent ? holAgentChatHint(selectedAgent) : null),
@@ -386,6 +410,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
     const currency = agent.pricing?.currency ?? 'HBAR'
     const rateType = agent.pricing?.rate_type?.replace('_', ' ') ?? 'per task'
     const hint = holAgentChatHint(agent)
+    const usability = holUsabilityBadge(agent)
     const sessionSupport = holSessionSupport(agent)
     const trustScore = holAgentTrustScore(agent)
 
@@ -405,14 +430,8 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
                 <span className={`rounded-md px-2 py-0.5 text-[11px] ${hint.toneClass}`}>
                   {hint.label}
                 </span>
-                <span
-                  className={`rounded-md px-2 py-0.5 text-[11px] ${
-                    agent.available === true
-                      ? 'bg-emerald-500/20 text-emerald-200'
-                      : 'bg-slate-700/70 text-slate-300'
-                  }`}
-                >
-                  {agent.available === true ? 'Available now' : 'Discoverable only'}
+                <span className={`rounded-md px-2 py-0.5 text-[11px] ${usability.toneClass}`}>
+                  {usability.label}
                 </span>
               </div>
               <p className="mt-1 truncate font-mono text-xs text-slate-400">{agent.uaid}</p>
@@ -527,7 +546,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
               onChange={(event) => setShowAvailableOnly(event.target.checked)}
               className="h-4 w-4 rounded border-white/20 bg-slate-950 text-sky-500 focus:ring-sky-400/40"
             />
-            <span>Available only</span>
+            <span>Usable only</span>
           </label>
           <label className="inline-flex items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-4 py-2 text-sm text-slate-300">
             <input
@@ -655,35 +674,67 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
         </div>
       )}
 
-      {!isLoading && !errorMessage && availableAgents.length > 0 && (
+      {!isLoading && !errorMessage && tieredAgents.verified.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-emerald-200">
-              Available Now
+              Synaptica Verified
             </h3>
-            <span className="text-xs text-slate-400">{availableAgents.length} agents</span>
+            <span className="text-xs text-slate-400">{tieredAgents.verified.length} agents</span>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
-            {availableAgents.map((agent) => renderAgentCard(agent))}
+            {tieredAgents.verified.map((agent) => renderAgentCard(agent))}
           </div>
         </div>
       )}
 
-      {!isLoading && !errorMessage && !showAvailableOnly && unavailableAgents.length > 0 && (
+      {!isLoading && !errorMessage && tieredAgents.brokerAvailable.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-slate-300">
-              Discoverable Only
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-sky-200">
+              Broker Available
             </h3>
-            <span className="text-xs text-slate-500">
-              {unavailableAgents.length} agents
-            </span>
+            <span className="text-xs text-slate-500">{tieredAgents.brokerAvailable.length} agents</span>
           </div>
           <p className="text-sm text-slate-500">
-            These agents exist in HOL search results, but the broker does not currently mark them available for direct use here.
+            HOL currently marks these agents available, but Synaptica has not verified them recently yet.
           </p>
           <div className="grid gap-4 md:grid-cols-2">
-            {unavailableAgents.map((agent) => renderAgentCard(agent))}
+            {tieredAgents.brokerAvailable.map((agent) => renderAgentCard(agent))}
+          </div>
+        </div>
+      )}
+
+      {!isLoading && !errorMessage && !showAvailableOnly && tieredAgents.exploratory.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-200">
+              Exploratory
+            </h3>
+            <span className="text-xs text-slate-500">{tieredAgents.exploratory.length} agents</span>
+          </div>
+          <p className="text-sm text-slate-500">
+            These agents are discoverable and chat attempts are allowed, but Synaptica has not verified them and HOL does not currently mark them available.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {tieredAgents.exploratory.map((agent) => renderAgentCard(agent))}
+          </div>
+        </div>
+      )}
+
+      {!isLoading && !errorMessage && !showAvailableOnly && tieredAgents.blocked.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold uppercase tracking-[0.18em] text-red-200">
+              Blocked
+            </h3>
+            <span className="text-xs text-slate-500">{tieredAgents.blocked.length} agents</span>
+          </div>
+          <p className="text-sm text-slate-500">
+            These agents are currently blocked by HOL or Synaptica reachability signals and cannot be opened for chat.
+          </p>
+          <div className="grid gap-4 md:grid-cols-2">
+            {tieredAgents.blocked.map((agent) => renderAgentCard(agent))}
           </div>
         </div>
       )}

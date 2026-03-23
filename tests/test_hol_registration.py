@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -11,7 +12,7 @@ from api.main import (
     _is_hol_insufficient_credits_error,
     _resolve_hol_error_status,
 )
-from shared.database import Agent, AgentReputation, AgentsCacheEntry, SessionLocal
+from shared.database import Agent, AgentReputation, AgentsCacheEntry, HolAgentVerification, SessionLocal
 import shared.hol_client as hol_client
 from shared.hol_client import (
     _format_http_error,
@@ -29,6 +30,7 @@ from shared.research.catalog import default_public_research_endpoint, default_pu
 def _reset_state() -> None:
     session = SessionLocal()
     try:
+        session.query(HolAgentVerification).delete()
         session.query(AgentsCacheEntry).delete()
         session.query(AgentReputation).delete()
         session.query(Agent).delete()
@@ -372,6 +374,101 @@ def test_hol_agents_search_exposes_candidate_metadata(
     assert payload["agents"][0]["trust_scores"]["availability.uptime"] == 77.0
     assert payload["agents"][0]["source_url"] == "https://example.com/agent"
     assert payload["agents"][0]["protocol"] == "http"
+    assert payload["agents"][0]["broker_marked_available"] is True
+    assert payload["agents"][0]["synaptica_verified"] is False
+    assert payload["agents"][0]["usability_tier"] == "broker_available"
+
+
+def test_hol_agents_search_marks_recent_synaptica_success_as_verified(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Agent:
+        uaid = "uaid:aid:verified"
+        name = "Verified Agent"
+        description = "Previously validated by Synaptica"
+        capabilities = ["data"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = False
+        availability_status = None
+        source_url = "https://example.com/verified"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    session = SessionLocal()
+    try:
+        session.add(
+            HolAgentVerification(  # type: ignore[call-arg]
+                uaid="uaid:aid:verified",
+                last_success_at=datetime.utcnow(),
+                last_success_mode="session",
+                success_count=1,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setattr("api.main.hol_search_agents", lambda query, limit=12: [_Agent()])
+
+    response = client.get("/api/hol/agents/search", params={"q": "verified agent", "only_available": "true"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["agents"]) == 1
+    assert payload["agents"][0]["available"] is False
+    assert payload["agents"][0]["broker_marked_available"] is False
+    assert payload["agents"][0]["synaptica_verified"] is True
+    assert payload["agents"][0]["synaptica_verification_mode"] == "session"
+    assert payload["agents"][0]["usability_tier"] == "verified"
+
+
+def test_hol_agents_search_marks_newer_hard_failure_as_blocked(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Agent:
+        uaid = "uaid:aid:blocked"
+        name = "Blocked Agent"
+        description = "Unreachable endpoint"
+        capabilities = ["data"]
+        categories = ["Data"]
+        transports = ["http"]
+        pricing = {}
+        registry = "broker"
+        available = True
+        availability_status = "online"
+        source_url = "https://example.com/blocked"
+        adapter = "http-adapter"
+        protocol = "http"
+
+    session = SessionLocal()
+    try:
+        session.add(
+            HolAgentVerification(  # type: ignore[call-arg]
+                uaid="uaid:aid:blocked",
+                last_success_at=datetime.utcnow() - timedelta(hours=2),
+                last_success_mode="session",
+                last_hard_failure_at=datetime.utcnow() - timedelta(minutes=5),
+                last_hard_failure_reason="422 Unprocessable Entity: This A2A agent is currently unreachable from the broker",
+                success_count=1,
+                failure_count=1,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    monkeypatch.setattr("api.main.hol_search_agents", lambda query, limit=12: [_Agent()])
+
+    response = client.get("/api/hol/agents/search", params={"q": "blocked agent"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agents"][0]["synaptica_verified"] is False
+    assert payload["agents"][0]["usability_tier"] == "blocked"
+    assert "currently unreachable from the broker" in payload["agents"][0]["usability_reason"]
 
 
 def test_hol_agents_search_only_available_filters_unavailable_agents(
@@ -590,10 +687,38 @@ def test_hol_chat_session_endpoint_uses_direct_fallback_for_transient_errors(
     assert "504" in payload["broker_response"]["fallback_reason"]
 
 
+def test_hol_chat_session_endpoint_persists_hard_reachability_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failing_create_session(uaid, transport=None, as_uaid=None):
+        raise hol_client.HolClientError(
+            "422 Unprocessable Entity: This A2A agent is currently unreachable from the broker (agent card or endpoint check failed)."
+        )
+
+    monkeypatch.setattr("api.main.hol_create_session", _failing_create_session)
+
+    response = client.post(
+        "/api/hol/chat/session",
+        json={"uaid": "uaid:aid:demo"},
+    )
+    assert response.status_code == 502
+
+    session = SessionLocal()
+    try:
+        record = session.get(HolAgentVerification, "uaid:aid:demo")
+        assert record is not None
+        assert record.failure_count == 1
+        assert "currently unreachable from the broker" in str(record.last_hard_failure_reason)
+    finally:
+        session.close()
+
+
 def test_hol_chat_message_endpoint_returns_broker_response_and_history(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("api.main.hol_create_session", lambda uaid, transport=None, as_uaid=None: "session-123")
     monkeypatch.setattr(
         "api.main.hol_send_message",
         lambda session_id, message, as_uaid=None: {"reply": "ack", "sessionId": session_id},
@@ -606,6 +731,12 @@ def test_hol_chat_message_endpoint_returns_broker_response_and_history(
         ],
     )
 
+    session_response = client.post(
+        "/api/hol/chat/session",
+        json={"uaid": "uaid:aid:demo", "transport": "http"},
+    )
+    assert session_response.status_code == 200
+
     response = client.post(
         "/api/hol/chat/message",
         json={"session_id": "session-123", "message": "ping"},
@@ -616,6 +747,16 @@ def test_hol_chat_message_endpoint_returns_broker_response_and_history(
     assert payload["broker_response"]["mode"] == "session"
     assert payload["broker_response"]["reply"] == "ack"
     assert payload["history"][0]["content"] == "ping"
+
+    session = SessionLocal()
+    try:
+        record = session.get(HolAgentVerification, "uaid:aid:demo")
+        assert record is not None
+        assert record.success_count == 1
+        assert record.last_success_mode == "session"
+        assert record.last_transport == "http"
+    finally:
+        session.close()
 
 
 def test_hol_chat_message_endpoint_normalizes_non_dict_broker_response(
