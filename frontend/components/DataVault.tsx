@@ -1,6 +1,7 @@
 'use client'
 
 import { FormEvent, useMemo, useState } from 'react'
+import { DatasetChat } from './DatasetChat'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import * as XLSX from 'xlsx'
 import {
@@ -383,6 +384,7 @@ export function DataVault() {
   const [holUaidOverride, setHolUaidOverride] = useState('')
   const [holSearchQuery, setHolSearchQuery] = useState('')
   const [holTransport, setHolTransport] = useState('')
+  const [detailTab, setDetailTab] = useState<'hol' | 'provenance' | 'history'>('hol')
   const [holDiagnostics, setHolDiagnostics] = useState<DatasetHolUseErrorDetail | null>(null)
   const [holSessionStatus, setHolSessionStatus] = useState<{
     mode: string
@@ -1191,7 +1193,7 @@ export function DataVault() {
           }
         }}
       >
-        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto border-white/15 bg-slate-950 text-slate-100">
+        <DialogContent className="max-h-[85vh] max-w-6xl overflow-hidden border-white/15 bg-slate-950 text-slate-100">
           <DialogHeader>
             <DialogTitle>{selectedDataset?.title}</DialogTitle>
             <DialogDescription className="text-slate-400">
@@ -1199,34 +1201,38 @@ export function DataVault() {
             </DialogDescription>
           </DialogHeader>
           {selectedDataset && (
-            <div className="space-y-4 text-sm text-slate-200">
-              <div className="grid gap-2 md:grid-cols-2">
-                <div><span className="text-slate-400">Dataset ID:</span> {selectedDataset.id}</div>
-                <div><span className="text-slate-400">Filename:</span> {selectedDataset.filename}</div>
-                <div><span className="text-slate-400">Lab:</span> {selectedDataset.lab_name}</div>
-                <div><span className="text-slate-400">Uploader:</span> {selectedDataset.uploader_name || 'N/A'}</div>
-                <div><span className="text-slate-400">Classification:</span> {selectedDataset.data_classification}</div>
-                <div><span className="text-slate-400">Visibility:</span> {selectedDataset.intended_visibility}</div>
-                <div><span className="text-slate-400">Size:</span> {formatBytes(selectedDataset.size_bytes)}</div>
-                <div><span className="text-slate-400">Uploaded:</span> {formatDate(selectedDataset.created_at)}</div>
-              </div>
+            <div className="flex gap-4" style={{ height: 'calc(85vh - 100px)' }}>
+              {/* Left column — dataset details with tabs */}
+              <div className="flex min-w-0 flex-1 flex-col">
+                {/* Metadata header — always visible */}
+                <div className="space-y-3 text-sm text-slate-200">
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <div><span className="text-slate-400">Dataset ID:</span> {selectedDataset.id}</div>
+                    <div><span className="text-slate-400">Filename:</span> {selectedDataset.filename}</div>
+                    <div><span className="text-slate-400">Lab:</span> {selectedDataset.lab_name}</div>
+                    <div><span className="text-slate-400">Uploader:</span> {selectedDataset.uploader_name || 'N/A'}</div>
+                    <div><span className="text-slate-400">Classification:</span> {selectedDataset.data_classification}</div>
+                    <div><span className="text-slate-400">Visibility:</span> {selectedDataset.intended_visibility}</div>
+                    <div><span className="text-slate-400">Size:</span> {formatBytes(selectedDataset.size_bytes)}</div>
+                    <div><span className="text-slate-400">Uploaded:</span> {formatDate(selectedDataset.created_at)}</div>
+                  </div>
 
-              <div className="flex flex-wrap gap-2">
-                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${statusBadgeClass(selectedDataset.verification_status)}`}>
-                  {selectedDataset.verification_status === 'passed' ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
-                  Local Verified
-                </span>
-                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${selectedDataset.manifest_cid ? 'bg-sky-500/20 text-sky-200' : 'bg-slate-700/70 text-slate-200'}`}>
-                  <Link2 className="h-3 w-3" />
-                  IPFS Manifest
-                </span>
-                <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${statusBadgeClass(selectedDataset.proof_status)}`}>
-                  <ShieldCheck className="h-3 w-3" />
-                  Hedera Anchored
-                </span>
-              </div>
+                  <div className="flex flex-wrap gap-2">
+                    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${statusBadgeClass(selectedDataset.verification_status)}`}>
+                      {selectedDataset.verification_status === 'passed' ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                      Local Verified
+                    </span>
+                    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${selectedDataset.manifest_cid ? 'bg-sky-500/20 text-sky-200' : 'bg-slate-700/70 text-slate-200'}`}>
+                      <Link2 className="h-3 w-3" />
+                      IPFS Manifest
+                    </span>
+                    <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${statusBadgeClass(selectedDataset.proof_status)}`}>
+                      <ShieldCheck className="h-3 w-3" />
+                      Hedera Anchored
+                    </span>
+                  </div>
 
-              <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   onClick={() => verifyMutation.mutate(selectedDataset.id)}
@@ -1268,7 +1274,30 @@ export function DataVault() {
                   Refresh proof
                 </Button>
               </div>
+                </div>
 
+                {/* Tabs */}
+                <div className="mt-3 flex gap-1 border-b border-white/10 text-xs">
+                  {(['hol', 'provenance', 'history'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setDetailTab(t)}
+                      className={`rounded-t-md px-3 py-1.5 font-medium transition-colors ${
+                        detailTab === t
+                          ? 'border-b-2 border-sky-400 text-sky-300'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {t === 'hol' ? 'HOL Agents' : t === 'provenance' ? 'Trust & Provenance' : 'History'}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tab content — scrollable */}
+                <div className="flex-1 space-y-4 overflow-y-auto pr-1 pt-3 text-sm text-slate-200">
+
+              {detailTab === 'hol' && (<>
               <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
                 <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Ask HOL agent about this dataset</p>
                 {localHolAgents.length > 0 && (
@@ -1529,7 +1558,9 @@ export function DataVault() {
                   )}
                 </div>
               )}
+              </>)}
 
+              {detailTab === 'provenance' && (<>
               {selectedDataset.proof_bundle?.verification_report && (
                 <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
                   <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Verification report</p>
@@ -1578,6 +1609,14 @@ export function DataVault() {
                 </div>
               )}
 
+              {!selectedDataset.proof_bundle?.verification_report && !selectedDatasetProof && !selectedDatasetCitation && (
+                <div className="rounded-md border border-white/10 bg-slate-900/60 px-3 py-4 text-center text-xs text-slate-400">
+                  No provenance data yet. Use the Verify and Anchor buttons above to create trust records.
+                </div>
+              )}
+              </>)}
+
+              {detailTab === 'history' && (<>
               {selectedDataset.hol_sessions.length > 0 && (
                 <div className="rounded-lg border border-white/10 bg-slate-900/60 p-3">
                   <p className="mb-2 text-xs uppercase tracking-wide text-slate-400">Recent HOL sessions</p>
@@ -1634,6 +1673,21 @@ export function DataVault() {
                   </div>
                 </div>
               )}
+
+              {selectedDataset.hol_sessions.length === 0 && selectedDataset.similar_datasets.length === 0 && (
+                <div className="rounded-md border border-white/10 bg-slate-900/60 px-3 py-4 text-center text-xs text-slate-400">
+                  No session history or similar datasets yet.
+                </div>
+              )}
+              </>)}
+
+                </div>
+              </div>
+
+              {/* Right column — persistent chat */}
+              <div className="flex w-80 shrink-0 flex-col border-l border-white/10 pl-4">
+                <DatasetChat dataset={selectedDataset} />
+              </div>
             </div>
           )}
         </DialogContent>

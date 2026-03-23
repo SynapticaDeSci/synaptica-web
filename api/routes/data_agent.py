@@ -693,52 +693,12 @@ def _append_hol_session_trace(
     asset.meta = meta
 
 
-def _build_data_agent_chat_response(message: str, db: Session) -> str:
-    query = (message or "").strip().lower()
-    rows = db.query(DataAsset).order_by(DataAsset.created_at.desc()).limit(50).all()
+async def _build_data_agent_chat_response(message: str, db: Session) -> str:
+    """Use the LLM-powered Strands data agent to respond to user messages."""
+    from agents.data_agent.agent import create_data_agent
 
-    terms = re.findall(r"[a-z0-9]{3,}", query)
-    if terms:
-        matched: List[Tuple[int, DataAsset]] = []
-        for row in rows:
-            haystack = " ".join(
-                [
-                    row.title or "",
-                    row.description or "",
-                    row.lab_name or "",
-                    row.data_classification or "",
-                    " ".join(row.tags or []),
-                ]
-            ).lower()
-            score = sum(1 for term in terms if term in haystack)
-            if score:
-                matched.append((score, row))
-        matched.sort(key=lambda item: (item[0], item[1].created_at or datetime.min), reverse=True)
-        rows = [row for _, row in matched[:5]]
-    else:
-        rows = rows[:5]
-
-    if not rows:
-        return (
-            "No datasets are currently stored in the Synaptica Data Vault. "
-            "Upload a failed or underused dataset first, then ask again."
-        )
-
-    lines = [
-        "Synaptica Data Agent dataset summary:",
-    ]
-    for row in rows[:5]:
-        meta = _coerce_meta(row.meta)
-        lines.append(
-            "- "
-            f"{row.title} | lab={row.lab_name} | classification={row.data_classification} | "
-            f"verification={meta.get('verification_status')} | proof={meta.get('proof_status')} | "
-            f"tags={', '.join(row.tags or []) or 'none'}"
-        )
-    lines.append(
-        "Reply with a dataset title, tag, lab, or classification if you want a narrower match."
-    )
-    return "\n".join(lines)
+    agent = create_data_agent()
+    return await agent.run(message or "")
 
 
 def _manifest_payload(asset: DataAsset) -> Dict[str, Any]:
@@ -1539,7 +1499,7 @@ async def data_agent_rpc(
             message="A2A message payload must include at least one text part",
         )
 
-    response = _build_data_agent_chat_response(message, db)
+    response = await _build_data_agent_chat_response(message, db)
     task_id = None
     params = payload.get("params")
     if isinstance(params, dict):
@@ -1561,7 +1521,7 @@ async def data_agent_message(
 ) -> MessageResponse:
     """Respond to simple broker/A2A-style chat messages for the built-in Data Agent."""
 
-    response = _build_data_agent_chat_response(payload.message, db)
+    response = await _build_data_agent_chat_response(payload.message, db)
     return MessageResponse(
         message_id=uuid.uuid4().hex,
         response=response,
