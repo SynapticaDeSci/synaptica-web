@@ -194,6 +194,99 @@ function extractHolChatStatus(brokerResponse: Record<string, any> | null | undef
   }
 }
 
+function decodeHolHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+}
+
+function stripHolChatMarkup(value: string): string {
+  const normalized = String(value ?? '').replace(/\r\n/g, '\n')
+  const withBreaks = normalized
+    .replace(/<\s*br\s*\/?>/gi, '\n')
+    .replace(/<\s*\/p\s*>/gi, '\n\n')
+    .replace(/<\s*p[^>]*>/gi, '')
+  const withoutTags = withBreaks.replace(/<[^>]+>/g, '')
+  return decodeHolHtmlEntities(withoutTags)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function parseHolSearchSnippet(value: string): {
+  title: string
+  link?: string
+  content: string
+} | null {
+  const normalized = String(value ?? '').replace(/\r\n/g, '\n').trim()
+  if (!/^Title:\s*/i.test(normalized)) {
+    return null
+  }
+
+  const fields: Record<'title' | 'link' | 'content', string[]> = {
+    title: [],
+    link: [],
+    content: [],
+  }
+  let activeField: 'title' | 'link' | 'content' | null = null
+
+  for (const line of normalized.split('\n')) {
+    const match = line.match(/^(Title|Link|Content):\s*(.*)$/i)
+    if (match) {
+      activeField = match[1].toLowerCase() as 'title' | 'link' | 'content'
+      if (match[2]) {
+        fields[activeField].push(match[2])
+      }
+      continue
+    }
+    if (activeField) {
+      fields[activeField].push(line)
+    }
+  }
+
+  const title = stripHolChatMarkup(fields.title.join('\n'))
+  const link = fields.link.join('\n').trim()
+  const content = stripHolChatMarkup(fields.content.join('\n'))
+  if (!title || !content) {
+    return null
+  }
+
+  return {
+    title,
+    link: /^https?:\/\//i.test(link) ? link : undefined,
+    content,
+  }
+}
+
+function renderHolChatContent(content: string) {
+  const snippet = parseHolSearchSnippet(content)
+  if (snippet) {
+    return (
+      <div className="space-y-2">
+        <div className="font-medium text-white">{snippet.title}</div>
+        {snippet.link && (
+          <a
+            href={snippet.link}
+            target="_blank"
+            rel="noreferrer"
+            className="block break-all text-xs text-sky-300 underline decoration-sky-400/40 underline-offset-2 hover:text-sky-200"
+          >
+            {snippet.link}
+          </a>
+        )}
+        <div className="whitespace-pre-wrap break-words text-slate-100">{snippet.content}</div>
+      </div>
+    )
+  }
+
+  const cleaned = stripHolChatMarkup(content)
+  return <div className="whitespace-pre-wrap break-words">{cleaned || content}</div>
+}
+
 export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRecord[] }) {
   const [searchQuery, setSearchQuery] = useState('')
   const [showAvailableOnly, setShowAvailableOnly] = useState(false)
@@ -804,7 +897,7 @@ export function HolMarketplaceView({ localAgents = [] }: { localAgents?: AgentRe
                       <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">
                         {message.role}
                       </div>
-                      <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                      {renderHolChatContent(message.content)}
                     </div>
                   ))
                 )}
