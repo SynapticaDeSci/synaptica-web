@@ -44,10 +44,10 @@ from shared.hol_client import (
 )
 from shared.hol_agent_usability import (
     apply_hol_agent_usability,
-    get_hol_agent_verification_map,
     is_hol_hard_availability_failure,
-    record_hol_agent_hard_failure,
-    record_hol_agent_success,
+    load_hol_agent_verification_map,
+    persist_hol_agent_hard_failure,
+    persist_hol_agent_success,
 )
 
 router = APIRouter()
@@ -1204,7 +1204,10 @@ async def use_hol_data_agent(
             adapter=None,
             protocol=None,
         )
-        verification_map = get_hol_agent_verification_map(db, [explicit_summary.uaid])
+        verification_map = await run_in_threadpool(
+            load_hol_agent_verification_map,
+            [explicit_summary.uaid],
+        )
         apply_hol_agent_usability(explicit_summary, verification_map.get(explicit_summary.uaid))
         selected_agent = _hol_agent_summary(explicit_summary)
         candidate_agents: List[HolAgentSummary] = []
@@ -1231,7 +1234,10 @@ async def use_hol_data_agent(
                 seen_uaids.add(uaid)
                 discovered.append(agent)
 
-        verification_map = get_hol_agent_verification_map(db, [agent.uaid for agent in discovered])
+        verification_map = await run_in_threadpool(
+            load_hol_agent_verification_map,
+            [agent.uaid for agent in discovered],
+        )
         for agent in discovered:
             apply_hol_agent_usability(agent, verification_map.get(agent.uaid))
 
@@ -1309,8 +1315,8 @@ async def use_hol_data_agent(
         except HolClientError as exc:
             attempted_errors.append(f"{candidate['uaid']}: {exc}")
             if is_hol_hard_availability_failure(str(exc)):
-                record_hol_agent_hard_failure(
-                    db,
+                await run_in_threadpool(
+                    persist_hol_agent_hard_failure,
                     candidate["uaid"],
                     reason=str(exc),
                     transport=request.transport,
@@ -1336,8 +1342,8 @@ async def use_hol_data_agent(
                 except HolClientError as direct_exc:
                     attempted_errors.append(f"{candidate['uaid']} (direct): {direct_exc}")
                     if is_hol_hard_availability_failure(str(direct_exc)):
-                        record_hol_agent_hard_failure(
-                            db,
+                        await run_in_threadpool(
+                            persist_hol_agent_hard_failure,
                             candidate["uaid"],
                             reason=str(direct_exc),
                             transport=request.transport,
@@ -1359,8 +1365,8 @@ async def use_hol_data_agent(
         except HolClientError as exc:
             attempted_errors.append(f"{candidate['uaid']}: {exc}")
             if is_hol_hard_availability_failure(str(exc)):
-                record_hol_agent_hard_failure(
-                    db,
+                await run_in_threadpool(
+                    persist_hol_agent_hard_failure,
                     candidate["uaid"],
                     reason=str(exc),
                     transport=request.transport,
@@ -1381,8 +1387,8 @@ async def use_hol_data_agent(
         )
 
     success_mode = str(broker_response.get("mode") or "session").strip() or "session"
-    verification_row = record_hol_agent_success(
-        db,
+    verification_row = await run_in_threadpool(
+        persist_hol_agent_success,
         selected_agent["uaid"],
         mode=success_mode,
         transport=request.transport,

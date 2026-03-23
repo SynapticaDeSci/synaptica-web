@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
-from shared.database import HolAgentVerification
+from shared.database import HolAgentVerification, SessionLocal
 
 HOL_VERIFIED_TTL = timedelta(hours=24)
 _HARD_FAILURE_PATTERNS = (
@@ -70,6 +70,21 @@ def get_hol_agent_verification_map(
     return {row.uaid: row for row in rows}
 
 
+def load_hol_agent_verification_map(
+    uaids: Iterable[str],
+) -> Dict[str, HolAgentVerification]:
+    """Load verification records using a fresh local session."""
+
+    session = SessionLocal()
+    try:
+        mapping = get_hol_agent_verification_map(session, uaids)
+        for row in mapping.values():
+            session.expunge(row)
+        return mapping
+    finally:
+        session.close()
+
+
 def record_hol_agent_success(
     session: Session,
     uaid: str,
@@ -96,6 +111,31 @@ def record_hol_agent_success(
     return row
 
 
+def persist_hol_agent_success(
+    uaid: str,
+    *,
+    mode: Optional[str],
+    transport: Optional[str] = None,
+) -> HolAgentVerification:
+    """Persist a success using a fresh local session and return a detached row."""
+
+    session = SessionLocal()
+    try:
+        row = record_hol_agent_success(
+            session,
+            uaid,
+            mode=mode,
+            transport=transport,
+        )
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        session.commit()
+        return row
+    finally:
+        session.close()
+
+
 def record_hol_agent_hard_failure(
     session: Session,
     uaid: str,
@@ -120,6 +160,31 @@ def record_hol_agent_hard_failure(
     if transport and str(transport).strip():
         row.last_transport = str(transport).strip()
     return row
+
+
+def persist_hol_agent_hard_failure(
+    uaid: str,
+    *,
+    reason: str,
+    transport: Optional[str] = None,
+) -> HolAgentVerification:
+    """Persist a hard failure using a fresh local session and return a detached row."""
+
+    session = SessionLocal()
+    try:
+        row = record_hol_agent_hard_failure(
+            session,
+            uaid,
+            reason=reason,
+            transport=transport,
+        )
+        session.flush()
+        session.refresh(row)
+        session.expunge(row)
+        session.commit()
+        return row
+    finally:
+        session.close()
 
 
 def compute_hol_agent_usability_fields(

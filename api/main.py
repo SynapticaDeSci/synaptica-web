@@ -69,10 +69,10 @@ from shared.hol_client import (
 )
 from shared.hol_agent_usability import (
     apply_hol_agent_usability,
-    get_hol_agent_verification_map,
     is_hol_hard_availability_failure,
-    record_hol_agent_hard_failure,
-    record_hol_agent_success,
+    load_hol_agent_verification_map,
+    persist_hol_agent_hard_failure,
+    persist_hol_agent_success,
 )
 from shared.metadata import (
     AgentMetadataPayload,
@@ -1102,18 +1102,12 @@ def _record_hol_agent_success_now(
     *,
     mode: Optional[str],
     transport: Optional[str] = None,
-) -> None:
-    session = SessionLocal()
-    try:
-        record_hol_agent_success(
-            session,
-            uaid,
-            mode=mode,
-            transport=transport,
-        )
-        session.commit()
-    finally:
-        session.close()
+) -> Any:
+    return persist_hol_agent_success(
+        uaid,
+        mode=mode,
+        transport=transport,
+    )
 
 
 def _record_hol_agent_hard_failure_now(
@@ -1125,17 +1119,11 @@ def _record_hol_agent_hard_failure_now(
     if not is_hol_hard_availability_failure(reason):
         return
 
-    session = SessionLocal()
-    try:
-        record_hol_agent_hard_failure(
-            session,
-            uaid,
-            reason=reason,
-            transport=transport,
-        )
-        session.commit()
-    finally:
-        session.close()
+    persist_hol_agent_hard_failure(
+        uaid,
+        reason=reason,
+        transport=transport,
+    )
 
 
 @asynccontextmanager
@@ -1529,11 +1517,10 @@ async def hol_agents_search(
     except HolClientError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    db = SessionLocal()
-    try:
-        verification_map = get_hol_agent_verification_map(db, [agent.uaid for agent in agents])
-    finally:
-        db.close()
+    verification_map = await run_in_threadpool(
+        load_hol_agent_verification_map,
+        [agent.uaid for agent in agents],
+    )
 
     for agent in agents:
         apply_hol_agent_usability(agent, verification_map.get(agent.uaid))
@@ -1591,7 +1578,8 @@ async def hol_chat_create_session(request: HolChatSessionRequest) -> HolChatSess
             as_uaid=request.as_uaid,
         )
     except HolClientError as exc:
-        _record_hol_agent_hard_failure_now(
+        await run_in_threadpool(
+            _record_hol_agent_hard_failure_now,
             uaid,
             reason=str(exc),
             transport=request.transport,
@@ -1671,7 +1659,8 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 as_uaid=request.as_uaid,
             )
         except HolClientError as exc:
-            _record_hol_agent_hard_failure_now(
+            await run_in_threadpool(
+                _record_hol_agent_hard_failure_now,
                 uaid,
                 reason=str(exc),
                 transport=str(direct_session.get("transport") or "").strip() or None,
@@ -1699,7 +1688,8 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
                 ),
             ],
         )
-        _record_hol_agent_success_now(
+        await run_in_threadpool(
+            _record_hol_agent_success_now,
             uaid,
             mode="direct",
             transport=str(direct_session.get("transport") or "").strip() or None,
@@ -1725,7 +1715,8 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
         )
     except HolClientError as exc:
         if broker_session_uaid:
-            _record_hol_agent_hard_failure_now(
+            await run_in_threadpool(
+                _record_hol_agent_hard_failure_now,
                 broker_session_uaid,
                 reason=str(exc),
                 transport=broker_transport,
@@ -1758,7 +1749,8 @@ async def hol_chat_send_message(request: HolChatSendRequest) -> HolChatSessionRe
         ]
 
     if broker_session_uaid:
-        _record_hol_agent_success_now(
+        await run_in_threadpool(
+            _record_hol_agent_success_now,
             broker_session_uaid,
             mode="session",
             transport=broker_transport,
