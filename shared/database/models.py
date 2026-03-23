@@ -770,6 +770,23 @@ class AgentsCacheEntry(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class HolAgentVerification(Base):
+    """Synaptica-owned verification state for external HOL agents."""
+
+    __tablename__ = "hol_agent_verifications"
+
+    uaid = Column(String, primary_key=True)
+    last_success_at = Column(DateTime, nullable=True)
+    last_success_mode = Column(String, nullable=True)
+    last_hard_failure_at = Column(DateTime, nullable=True)
+    last_hard_failure_reason = Column(Text, nullable=True)
+    success_count = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    last_transport = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UserCredits(Base):
     """User credit balance."""
 

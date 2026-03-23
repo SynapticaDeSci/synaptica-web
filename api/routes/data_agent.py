@@ -42,6 +42,13 @@ from shared.hol_client import (
     send_message as hol_send_message,
     should_use_direct_chat_fallback,
 )
+from shared.hol_agent_usability import (
+    apply_hol_agent_usability,
+    is_hol_hard_availability_failure,
+    load_hol_agent_verification_map,
+    persist_hol_agent_hard_failure,
+    persist_hol_agent_success,
+)
 
 router = APIRouter()
 
@@ -488,10 +495,16 @@ def _hol_agent_summary(agent: HolAgentSummary) -> Dict[str, Any]:
         "pricing": getattr(agent, "pricing", {}) or {},
         "registry": getattr(agent, "registry", None),
         "available": getattr(agent, "available", None),
+        "broker_marked_available": getattr(agent, "broker_marked_available", None),
         "availability_status": getattr(agent, "availability_status", None),
         "source_url": getattr(agent, "source_url", None),
         "adapter": getattr(agent, "adapter", None),
         "protocol": getattr(agent, "protocol", None),
+        "synaptica_verified": bool(getattr(agent, "synaptica_verified", False)),
+        "synaptica_verified_at": getattr(agent, "synaptica_verified_at", None),
+        "synaptica_verification_mode": getattr(agent, "synaptica_verification_mode", None),
+        "usability_tier": getattr(agent, "usability_tier", "exploratory"),
+        "usability_reason": getattr(agent, "usability_reason", ""),
     }
 
 
@@ -513,17 +526,26 @@ def _matches_required_capabilities(
     return any(capability.lower() in haystack for capability in required_capabilities if capability.strip())
 
 
-def _hol_candidate_sort_key(agent: HolAgentSummary) -> tuple[int, int, int, int]:
+def _hol_candidate_sort_key(agent: HolAgentSummary) -> tuple[int, int, int, int, int, int]:
     availability = str(getattr(agent, "availability_status", "") or "").strip().lower()
     source_url = getattr(agent, "source_url", None)
     transports = getattr(agent, "transports", []) or []
-    available_flag = getattr(agent, "available", None)
+    tier = str(getattr(agent, "usability_tier", "exploratory") or "exploratory").strip().lower()
+    tier_rank = {
+        "verified": 3,
+        "broker_available": 2,
+        "exploratory": 1,
+        "blocked": 0,
+    }.get(tier, 0)
     has_url = 1 if source_url else 0
     has_http_transport = 1 if "http" in [str(item).lower() for item in transports] else 0
-    available = 1 if available_flag is True else 0
+    available = 1 if getattr(agent, "broker_marked_available", None) is True else 0
+    synaptica_verified = 1 if bool(getattr(agent, "synaptica_verified", False)) else 0
     online = 1 if availability in {"online", "ok", "available"} else 0
     stale = 1 if availability == "stale" else 0
     return (
+        tier_rank,
+        synaptica_verified,
         available,
         online,
         has_http_transport or has_url,
@@ -536,13 +558,11 @@ def _get_broker_chatable_rejection_reason(agent: HolAgentSummary) -> Optional[st
     source_url = str(getattr(agent, "source_url", "") or "").strip()
     protocol = str(getattr(agent, "protocol", "") or "").strip().lower()
     adapter = str(getattr(agent, "adapter", "") or "").strip().lower()
-    availability = str(getattr(agent, "availability_status", "") or "").strip().lower()
-    available_flag = getattr(agent, "available", None)
+    usability_tier = str(getattr(agent, "usability_tier", "exploratory") or "exploratory").strip().lower()
+    usability_reason = str(getattr(agent, "usability_reason", "") or "").strip()
 
-    if available_flag is not True:
-        return "Agent is not marked available by HOL search metadata."
-    if availability in {"offline", "inactive", "error"}:
-        return f"Agent availability status is {availability}."
+    if usability_tier == "blocked":
+        return usability_reason or "Agent is blocked by current HOL usability signals."
 
     if "http" in transports:
         return None
@@ -1168,21 +1188,28 @@ async def use_hol_data_agent(
     search_query = search_queries[0]
 
     if request.uaid and request.uaid.strip():
-        selected_agent = {
-            "uaid": request.uaid.strip(),
-            "name": request.uaid.strip(),
-            "description": "",
-            "capabilities": [],
-            "categories": [],
-            "transports": [],
-            "pricing": {},
-            "registry": None,
-            "available": None,
-            "availability_status": None,
-            "source_url": None,
-            "adapter": None,
-            "protocol": None,
-        }
+        explicit_summary = HolAgentSummary(
+            uaid=request.uaid.strip(),
+            name=request.uaid.strip(),
+            description="",
+            capabilities=[],
+            categories=[],
+            transports=[],
+            pricing={},
+            registry=None,
+            available=None,
+            broker_marked_available=None,
+            availability_status=None,
+            source_url=None,
+            adapter=None,
+            protocol=None,
+        )
+        verification_map = await run_in_threadpool(
+            load_hol_agent_verification_map,
+            [explicit_summary.uaid],
+        )
+        apply_hol_agent_usability(explicit_summary, verification_map.get(explicit_summary.uaid))
+        selected_agent = _hol_agent_summary(explicit_summary)
         candidate_agents: List[HolAgentSummary] = []
     else:
         discovered: List[HolAgentSummary] = []
@@ -1206,6 +1233,13 @@ async def use_hol_data_agent(
                     continue
                 seen_uaids.add(uaid)
                 discovered.append(agent)
+
+        verification_map = await run_in_threadpool(
+            load_hol_agent_verification_map,
+            [agent.uaid for agent in discovered],
+        )
+        for agent in discovered:
+            apply_hol_agent_usability(agent, verification_map.get(agent.uaid))
 
         if not discovered and search_errors:
             raise HTTPException(
@@ -1280,6 +1314,13 @@ async def use_hol_data_agent(
             )
         except HolClientError as exc:
             attempted_errors.append(f"{candidate['uaid']}: {exc}")
+            if is_hol_hard_availability_failure(str(exc)):
+                await run_in_threadpool(
+                    persist_hol_agent_hard_failure,
+                    candidate["uaid"],
+                    reason=str(exc),
+                    transport=request.transport,
+                )
             if should_use_direct_chat_fallback(exc):
                 fallback_reason = str(exc)
                 try:
@@ -1300,6 +1341,13 @@ async def use_hol_data_agent(
                     break
                 except HolClientError as direct_exc:
                     attempted_errors.append(f"{candidate['uaid']} (direct): {direct_exc}")
+                    if is_hol_hard_availability_failure(str(direct_exc)):
+                        await run_in_threadpool(
+                            persist_hol_agent_hard_failure,
+                            candidate["uaid"],
+                            reason=str(direct_exc),
+                            transport=request.transport,
+                        )
             continue
         try:
             broker_response = await run_in_threadpool(
@@ -1316,10 +1364,18 @@ async def use_hol_data_agent(
             break
         except HolClientError as exc:
             attempted_errors.append(f"{candidate['uaid']}: {exc}")
+            if is_hol_hard_availability_failure(str(exc)):
+                await run_in_threadpool(
+                    persist_hol_agent_hard_failure,
+                    candidate["uaid"],
+                    reason=str(exc),
+                    transport=request.transport,
+                )
             continue
 
     if session_id is None or broker_response is None:
         detail = attempted_errors[0] if len(attempted_errors) == 1 else "; ".join(attempted_errors[:5])
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=_build_dataset_hol_error_detail(
@@ -1330,6 +1386,14 @@ async def use_hol_data_agent(
             ),
         )
 
+    success_mode = str(broker_response.get("mode") or "session").strip() or "session"
+    verification_row = await run_in_threadpool(
+        persist_hol_agent_success,
+        selected_agent["uaid"],
+        mode=success_mode,
+        transport=request.transport,
+    )
+    apply_hol_agent_usability(selected_agent, verification_row)
     _append_hol_session_trace(
         asset,
         selected_agent=selected_agent,

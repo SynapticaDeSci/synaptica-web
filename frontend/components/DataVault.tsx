@@ -137,15 +137,16 @@ function holCandidateStatus(agent: HolAgentRecord): {
   const transports = (agent.transports ?? []).map((item) => String(item).trim().toLowerCase()).filter(Boolean)
   const protocol = String(agent.protocol ?? '').trim().toLowerCase()
   const adapter = String(agent.adapter ?? '').trim().toLowerCase()
-  const availability = String(agent.availability_status ?? '').trim().toLowerCase()
+  const tier = String(agent.usability_tier ?? 'exploratory').trim().toLowerCase()
+  const usabilityReason = String(agent.usability_reason ?? '').trim()
   const hasHttp = transports.includes('http')
   const hasUrl = Boolean(agent.source_url)
 
-  if (agent.available === false || ['offline', 'inactive', 'error'].includes(availability)) {
+  if (tier === 'blocked') {
     return {
       label: 'Blocked',
       tone: 'error',
-      reason: availability ? `Availability is ${availability}.` : 'Agent is marked unavailable.',
+      reason: usabilityReason || 'This HOL agent is currently blocked by Synaptica usability checks.',
     }
   }
   if (['a2a', 'uagent'].includes(protocol)) {
@@ -162,25 +163,44 @@ function holCandidateStatus(agent: HolAgentRecord): {
       reason: `Adapter ${adapter} is not broker-chatable in this flow.`,
     }
   }
+  if (tier === 'verified') {
+    return {
+      label: 'Verified',
+      tone: 'success',
+      reason: usabilityReason || 'Synaptica verified this HOL agent recently.',
+      recommendedTransport: hasHttp ? 'http' : undefined,
+    }
+  }
+  if (tier === 'broker_available') {
+    return {
+      label: 'Broker available',
+      tone: 'success',
+      reason: usabilityReason || 'HOL currently marks this agent available.',
+      recommendedTransport: hasHttp ? 'http' : undefined,
+    }
+  }
   if (hasHttp) {
     return {
-      label: 'Likely usable',
-      tone: 'success',
-      reason: 'HTTP transport is advertised.',
+      label: 'Exploratory',
+      tone: 'warning',
+      reason:
+        usabilityReason || 'HTTP transport is advertised, but this agent is still exploratory until Synaptica verifies it.',
       recommendedTransport: 'http',
     }
   }
   if (hasUrl) {
     return {
-      label: 'Possible',
+      label: 'Exploratory',
       tone: 'warning',
-      reason: 'Source URL exists, but transport is not explicit.',
+      reason:
+        usabilityReason || 'Source URL exists, but transport is not explicit, so this remains exploratory.',
     }
   }
   return {
-    label: 'Unclear',
+    label: 'Exploratory',
     tone: 'warning',
-    reason: 'No explicit HTTP transport or source URL metadata.',
+    reason:
+      usabilityReason || 'No explicit HTTP transport or source URL metadata was returned for this agent.',
   }
 }
 
