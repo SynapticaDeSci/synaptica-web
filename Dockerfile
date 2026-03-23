@@ -1,30 +1,18 @@
-# Synaptica Frontend — Next.js
-FROM node:20-slim AS builder
+# Synaptica Research Agents
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-COPY frontend/ .
+COPY agents/ ./agents/
+COPY shared/ ./shared/
 
-ARG NEXT_PUBLIC_BACKEND_URL=https://synaptica-api-812950212515.us-central1.run.app
-ARG NEXT_PUBLIC_RESEARCH_URL=https://synaptica-research-812950212515.us-central1.run.app
-ENV NEXT_PUBLIC_BACKEND_URL=$NEXT_PUBLIC_BACKEND_URL
-ENV NEXT_PUBLIC_RESEARCH_URL=$NEXT_PUBLIC_RESEARCH_URL
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV PATH="/app/.venv/bin:$PATH"
 
-RUN npm run build
+EXPOSE 5001
 
-FROM node:20-slim AS runner
-WORKDIR /app
-ENV NODE_ENV=production
-ENV NEXT_TELEMETRY_DISABLED=1
-
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public
-
-EXPOSE 8080
-ENV PORT=8080
-
-CMD ["node", "server.js"]
+CMD ["uv", "run", "python", "-m", "uvicorn", "agents.research.main:app", "--host", "0.0.0.0", "--port", "5001", "--proxy-headers", "--forwarded-allow-ips", "*"]
